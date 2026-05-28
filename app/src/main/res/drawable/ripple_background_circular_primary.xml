@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ripple xmlns:android="http://schemas.android.com/apk/res/android"
+    android:color="@color/piggietv_accent">
+    <item>
+        <shape android:shape="oval">
+            <gradient
+                android:angle="135"
+                android:centerColor="#6EA78BFA"
+                android:endColor="#66FF8DC3"
+                android:startColor="#707DD6FF" />
+            <stroke
+                android:width="1dp"
+                android:color="#96F8F6FF" />
+        </shape>
+    </item>
+    <item android:id="@android:id/mask">
+        <shape android:shape="oval">
+            <solid android:color="@android:color/white" />
+        </shape>
+    </item>
+</ripple>

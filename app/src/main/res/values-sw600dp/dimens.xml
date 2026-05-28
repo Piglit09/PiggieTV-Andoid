@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <dimen name="exo_player_controls_display_padding">24dp</dimen>
+    <dimen name="exo_center_icon_padding">14dp</dimen>
+    <dimen name="exo_center_controls_distance">32dp</dimen>
+    <dimen name="exo_bottom_controls_size">48dp</dimen>
+    <dimen name="exo_bottom_controls_padding">10dp</dimen>
+    <dimen name="exo_bottom_controls_margin">12dp</dimen>
+    <dimen name="exo_gesture_overlay_width">192dp</dimen>
+    <dimen name="exo_gesture_overlay_image_size">80dp</dimen>
+</resources>

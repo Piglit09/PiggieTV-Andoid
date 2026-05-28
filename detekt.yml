@@ -1,0 +1,61 @@
+# Detekt configuration
+
+complexity:
+  CyclomaticComplexMethod:
+    ignoreSimpleWhenEntries: true
+  LongParameterList:
+    allowedConstructorParameters: 10
+    allowedFunctionParameters: 10
+  TooManyFunctions:
+    allowedFunctionsPerFile: 16
+    allowedFunctionsPerClass: 20
+    allowedFunctionsPerInterface: 8
+    allowedFunctionsPerObject: 16
+    allowedFunctionsPerEnum: 8
+    ignoreOverridden: true
+    ignoreDeprecated: true
+
+exceptions:
+  SwallowedException:
+    active: false
+
+ktlint:
+  MaximumLineLength:
+    # Already handled by detekt itself
+    active: false
+  NoWildcardImports:
+    # Already handled by detekt itself
+    active: false
+  PackageName:
+    # Already handled by detekt itself
+    active: false
+  TrailingCommaOnCallSite:
+    active: true
+    useTrailingCommaOnCallSite: true
+  TrailingCommaOnDeclarationSite:
+    active: true
+    useTrailingCommaOnDeclarationSite: true
+
+naming:
+  FunctionNaming:
+    ignoreAnnotated:
+      - Composable
+  PackageNaming:
+    # Package names must be lowercase letters
+    packagePattern: '[a-z]+(\.[a-z]+)*'
+
+performance:
+  SpreadOperator:
+    active: false
+
+style:
+  ForbiddenComment:
+    # Allow TODOs
+    comments: [ 'FIXME:', 'STOPSHIP:' ]
+  LoopWithTooManyJumpStatements:
+    maxJumpCount: 2
+  MaxLineLength:
+    maxLineLength: 200
+  ReturnCount:
+    excludeGuardClauses: true
+    max: 3

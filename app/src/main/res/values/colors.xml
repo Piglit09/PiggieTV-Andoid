@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- PiggieTV brand colors from Jellyfin-Web-PiggieTV src/ptv/styles/tokens.scss -->
+    <color name="piggietv_focus">#7DD6FF</color>
+    <color name="piggietv_focus_soft">#9FE7FF</color>
+    <color name="piggietv_violet">#A78BFA</color>
+    <color name="piggietv_violet_soft">#C9B5FF</color>
+    <color name="piggietv_violet_deep">#2C1746</color>
+    <color name="piggietv_accent">#FF8DC3</color>
+    <color name="piggietv_accent_soft">#FF9FD0</color>
+    <color name="piggietv_night">#05050C</color>
+    <color name="piggietv_panel">#140B24</color>
+    <color name="piggietv_panel_high">#2C1746</color>
+    <color name="piggietv_border">#3DC9B5FF</color>
+    <color name="piggietv_text_primary">#F8F6FF</color>
+    <color name="piggietv_text_secondary">#C5BED8</color>
+    <color name="piggietv_control_surface">#B305050C</color>
+
+    <!-- Legacy token names retained for existing code paths -->
+    <color name="jellyfin_primary">@color/piggietv_focus</color>
+    <color name="jellyfin_primary_dark">@color/piggietv_night</color>
+    <color name="jellyfin_accent">@color/piggietv_accent</color>
+    <color name="piggietv_purple">@color/piggietv_violet</color>
+
+    <!-- Launcher icon background -->
+    <color name="ic_launcher_background">@color/piggietv_night</color>
+
+    <!-- Splash logo color for API < 24. API >= 24 will have the default gradient. -->
+    <color name="splash_fill">@color/piggietv_focus</color>
+
+    <!-- App colors -->
+    <color name="theme_background">@color/piggietv_night</color>
+    <color name="playback_controls_background">#B305050C</color>
+    <color name="playback_info_background">#E3140B24</color>
+    <color name="playback_timebar_unplayed">#4E3F5F</color>
+
+    <!-- Skip Media Segment Button -->
+    <color name="skip_media_segment_background">@color/piggietv_violet</color>
+    <color name="skip_media_segment_text">@color/piggietv_text_primary</color>
+</resources>
