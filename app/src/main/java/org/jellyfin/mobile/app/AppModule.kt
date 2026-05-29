@@ -22,13 +22,19 @@ import androidx.media3.exoplayer.source.SingleSampleMediaSource
 import androidx.media3.extractor.DefaultExtractorsFactory
 import androidx.media3.extractor.ts.TsExtractor
 import coil3.ImageLoader
+import coil3.network.okhttp.OkHttpNetworkFetcherFactory
 import kotlinx.coroutines.channels.Channel
+import okhttp3.Credentials
 import okhttp3.OkHttpClient
 import org.jellyfin.mobile.MainViewModel
 import org.jellyfin.mobile.bridge.MediaSegments
 import org.jellyfin.mobile.bridge.NativePlayer
 import org.jellyfin.mobile.downloads.DownloadsViewModel
 import org.jellyfin.mobile.events.ActivityEventHandler
+import org.jellyfin.mobile.feature.library.LibraryRepository
+import org.jellyfin.mobile.feature.library.LibraryReaderFragment
+import org.jellyfin.mobile.feature.library.LibraryViewModel
+import org.jellyfin.mobile.feature.library.OpdsClient
 import org.jellyfin.mobile.home.NativeHomeFragment
 import org.jellyfin.mobile.player.deviceprofile.DeviceProfileBuilder
 import org.jellyfin.mobile.player.interaction.PlayerEvent
@@ -60,10 +66,45 @@ private const val TS_SEARCH_PACKETS = 1800
 
 val applicationModule = module {
     single { AppPreferences(androidApplication()) }
-    single { OkHttpClient() }
-    single { ImageLoader(androidApplication()) }
+    single { InMemoryCookieJar() }
+    single {
+        val appPreferences: AppPreferences = get()
+        OkHttpClient.Builder()
+            .cookieJar(get<InMemoryCookieJar>())
+            .addInterceptor { chain ->
+                val request = chain.request()
+                val libraryBaseUrl = appPreferences.libraryServerBaseUrl
+                val requestUrl = request.url.toString()
+                val authenticatedRequest = if (
+                    requestUrl.startsWith(libraryBaseUrl) &&
+                    request.header("Authorization") == null
+                ) {
+                    val builder = request.newBuilder()
+                    appPreferences.libraryBearerToken?.let { token ->
+                        builder.header("Authorization", "Bearer $token")
+                    } ?: appPreferences.libraryUsername?.let { username ->
+                        builder.header("Authorization", Credentials.basic(username, appPreferences.libraryPassword.orEmpty()))
+                    }
+                    builder.build()
+                } else {
+                    request
+                }
+
+                chain.proceed(authenticatedRequest)
+            }
+            .build()
+    }
+    single {
+        ImageLoader.Builder(androidApplication())
+            .components {
+                add(OkHttpNetworkFetcherFactory(get<OkHttpClient>()))
+            }
+            .build()
+    }
     single { PermissionRequestHelper() }
     single { MediaReportSender(get()) }
+    single { OpdsClient(get()) }
+    single { LibraryRepository(get(), get()) }
     single { RemoteVolumeProvider(get()) }
     single(named(PLAYER_EVENT_CHANNEL)) { Channel<PlayerEvent>() }
 
@@ -82,10 +123,12 @@ val applicationModule = module {
     viewModel { MainViewModel(get(), get()) }
     viewModel { DownloadsViewModel() }
     viewModel { NativeHomeViewModel(get(), get(), get(), get()) }
+    viewModel { LibraryViewModel(get()) }
 
     // Fragments
     fragment { WebViewFragment() }
     fragment { NativeHomeFragment() }
+    fragment { LibraryReaderFragment() }
     fragment { PlayerFragment() }
 
     // Connection helper

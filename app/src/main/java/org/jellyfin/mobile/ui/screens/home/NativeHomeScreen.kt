@@ -67,7 +67,9 @@ import androidx.compose.material.icons.outlined.PersonAdd
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -92,6 +94,8 @@ import androidx.compose.ui.viewinterop.AndroidView
 import coil3.compose.AsyncImage
 import org.jellyfin.mobile.R
 import org.jellyfin.mobile.data.entity.ServerEntity
+import org.jellyfin.mobile.feature.library.LibraryScreen
+import org.jellyfin.mobile.feature.library.LibraryViewModel
 import org.jellyfin.mobile.player.interaction.PlayOptions
 import org.jellyfin.mobile.reporting.MediaReportReason
 import org.jellyfin.mobile.ui.utils.PiggieTvBackground
@@ -104,19 +108,88 @@ import kotlin.time.Duration.Companion.ZERO
 fun NativeHomeScreen(
     server: ServerEntity,
     viewModel: NativeHomeViewModel,
+    libraryViewModel: LibraryViewModel,
     onOpenDownloads: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenDashboard: (String) -> Unit,
     onOpenExternalUrl: (String) -> Unit,
+    onOpenLibraryLink: (String) -> Unit,
+    onDownloadLibraryBook: (Uri, String, String) -> Unit,
+    onReadLibraryBook: (Uri, String, String, String?) -> Unit,
     onSelectServer: () -> Unit,
     onPlay: (PlayOptions) -> Unit,
+    onBackHandlerChanged: ((() -> Boolean)?) -> Unit,
 ) {
     val uiState by viewModel.uiState.collectAsState()
     var reportItem by remember { mutableStateOf<NativeMediaItem?>(null) }
     var detailsSelection by remember { mutableStateOf<NativeMediaDetailsSelection?>(null) }
+    var detailsHistory by remember { mutableStateOf<List<NativeMediaDetailsSelection>>(emptyList()) }
+
+    fun openDetails(item: NativeMediaItem, siblings: List<NativeMediaItem>) {
+        detailsSelection = NativeMediaDetailsSelection(item, siblings)
+    }
+
+    fun goBackFromDetails() {
+        val parent = detailsHistory.lastOrNull()
+        if (parent == null) {
+            val closingDetails = detailsSelection
+            detailsSelection = null
+            if (closingDetails?.siblings?.isEmpty() == true && (uiState as? NativeHomeUiState.Content)?.selectedLibrary != null) {
+                viewModel.closeLibrary()
+            }
+        } else {
+            detailsHistory = detailsHistory.dropLast(1)
+            detailsSelection = parent
+        }
+    }
+
+    fun openFolderFromDetails(item: NativeMediaItem) {
+        detailsSelection?.let { currentDetails ->
+            detailsHistory = detailsHistory + currentDetails
+        }
+        detailsSelection = null
+        viewModel.openFolder(item)
+    }
+
+    fun closeLibraryOrDetailsParent() {
+        val parent = detailsHistory.lastOrNull()
+        if (parent == null) {
+            viewModel.closeLibrary()
+        } else {
+            detailsHistory = detailsHistory.dropLast(1)
+            detailsSelection = parent
+        }
+    }
 
     LaunchedEffect(server.id) {
         viewModel.load(server)
+        detailsSelection = null
+        detailsHistory = emptyList()
+    }
+
+    SideEffect {
+        onBackHandlerChanged {
+            val state = uiState
+            when {
+                reportItem != null -> {
+                    reportItem = null
+                    true
+                }
+                detailsSelection != null -> {
+                    goBackFromDetails()
+                    true
+                }
+                state is NativeHomeUiState.Content && state.selectedLibrary != null -> {
+                    closeLibraryOrDetailsParent()
+                    true
+                }
+                else -> false
+            }
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose { onBackHandlerChanged(null) }
     }
 
     PiggieTvBackground(modifier = Modifier.fillMaxSize()) {
@@ -138,12 +211,9 @@ fun NativeHomeScreen(
                         MediaDetailsScreen(
                             layout = layout,
                             selection = details,
-                            onBack = { detailsSelection = null },
+                            onBack = ::goBackFromDetails,
                             onPlay = { item, siblings -> onPlay(item.toPlayOptions(siblings)) },
-                            onOpenFolder = { item ->
-                                detailsSelection = null
-                                viewModel.openFolder(item)
-                            },
+                            onOpenFolder = ::openFolderFromDetails,
                             onReport = { item -> reportItem = item },
                         )
                     } else if (state.selectedLibrary == null) {
@@ -154,12 +224,19 @@ fun NativeHomeScreen(
                             onOpenDownloads = onOpenDownloads,
                             onOpenSettings = onOpenSettings,
                             onOpenDashboard = onOpenDashboard,
+                            libraryViewModel = libraryViewModel,
+                            onOpenLibraryLink = onOpenLibraryLink,
+                            onDownloadLibraryBook = onDownloadLibraryBook,
+                            onReadLibraryBook = onReadLibraryBook,
+                            onBackHandlerChanged = onBackHandlerChanged,
                             onSignOut = {
                                 detailsSelection = null
+                                detailsHistory = emptyList()
                                 viewModel.signOut(server)
                             },
                             onItemClick = { item ->
-                                detailsSelection = NativeMediaDetailsSelection(item, emptyList())
+                                detailsHistory = emptyList()
+                                openDetails(item, emptyList())
                             },
                             onItemPlay = { item, siblings ->
                                 onPlay(item.toPlayOptions(siblings))
@@ -171,10 +248,10 @@ fun NativeHomeScreen(
                         LibraryContent(
                             layout = layout,
                             state = state,
-                            onBack = viewModel::closeLibrary,
+                            onBack = ::closeLibraryOrDetailsParent,
                             onItemClick = { item ->
                                 val siblings = state.selectedLibrary.items
-                                detailsSelection = NativeMediaDetailsSelection(item, siblings)
+                                openDetails(item, siblings)
                             },
                             onItemPlay = { item, siblings ->
                                 onPlay(item.toPlayOptions(siblings))
@@ -492,6 +569,11 @@ private fun HomeContent(
     onOpenDownloads: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenDashboard: (String) -> Unit,
+    libraryViewModel: LibraryViewModel,
+    onOpenLibraryLink: (String) -> Unit,
+    onDownloadLibraryBook: (Uri, String, String) -> Unit,
+    onReadLibraryBook: (Uri, String, String, String?) -> Unit,
+    onBackHandlerChanged: ((() -> Boolean)?) -> Unit,
     onSignOut: () -> Unit,
     onItemClick: (NativeMediaItem) -> Unit,
     onItemPlay: (NativeMediaItem, List<NativeMediaItem>) -> Unit,
@@ -542,6 +624,14 @@ private fun HomeContent(
             )
             NativeHomeTab.REQUESTS -> RequestsPortal(
                 layout = layout,
+                modifier = Modifier.weight(1f),
+            )
+            NativeHomeTab.LIBRARY -> LibraryScreen(
+                viewModel = libraryViewModel,
+                onOpenLink = onOpenLibraryLink,
+                onDownload = onDownloadLibraryBook,
+                onRead = onReadLibraryBook,
+                onBackHandlerChanged = onBackHandlerChanged,
                 modifier = Modifier.weight(1f),
             )
         }
@@ -616,6 +706,12 @@ private fun HomeTabs(layout: PtvAdaptiveLayout, activeTab: NativeHomeTab, onSele
                 text = "Requests",
                 selected = activeTab == NativeHomeTab.REQUESTS,
                 onClick = { onSelectTab(NativeHomeTab.REQUESTS) },
+                modifier = Modifier.weight(1f),
+            )
+            HomeTabButton(
+                text = "Library",
+                selected = activeTab == NativeHomeTab.LIBRARY,
+                onClick = { onSelectTab(NativeHomeTab.LIBRARY) },
                 modifier = Modifier.weight(1f),
             )
         }
@@ -1577,6 +1673,7 @@ private data class PtvAdaptiveLayout(
 private enum class NativeHomeTab {
     HOME,
     REQUESTS,
+    LIBRARY,
 }
 
 private data class NativeMediaDetailsSelection(

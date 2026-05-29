@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import android.os.Environment
 import android.view.WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
 import androidx.core.content.edit
+import org.jellyfin.mobile.feature.library.OpdsAuthConfig
 import org.jellyfin.mobile.player.mediasegments.MediaSegmentAction
 import org.jellyfin.mobile.player.mediasegments.toMediaSegmentActionsString
 import org.jellyfin.mobile.settings.ExternalPlayerPackage
@@ -16,6 +17,7 @@ import java.io.File
 class AppPreferences(context: Context) {
     private val sharedPreferences: SharedPreferences =
         context.getSharedPreferences("${context.packageName}_preferences", Context.MODE_PRIVATE)
+    private val secureLibraryCredentials = SecureLibraryCredentials(context)
 
     var currentServerId: Long?
         get() = sharedPreferences.getLong(Constants.PREF_SERVER_ID, -1).takeIf { it >= 0 }
@@ -115,6 +117,40 @@ class AppPreferences(context: Context) {
             ).toMediaSegmentActionsString(),
         )!!
         set(value) = sharedPreferences.edit { putString(Constants.PREF_MEDIA_SEGMENT_ACTIONS, value) }
+
+    var libraryServerBaseUrl: String
+        get() = sharedPreferences.getString(
+            Constants.PREF_LIBRARY_SERVER_BASE_URL,
+            Constants.PIGGIETV_LIBRARY_DEFAULT_URL,
+        )!!.trimEnd('/')
+        set(value) = sharedPreferences.edit {
+            putString(Constants.PREF_LIBRARY_SERVER_BASE_URL, value.trim().trimEnd('/'))
+        }
+
+    var libraryUsername: String?
+        get() = secureLibraryCredentials.username
+        set(value) {
+            secureLibraryCredentials.username = value
+        }
+
+    var libraryPassword: String?
+        get() = secureLibraryCredentials.password
+        set(value) {
+            secureLibraryCredentials.password = value
+        }
+
+    var libraryBearerToken: String?
+        get() = secureLibraryCredentials.bearerToken
+        set(value) {
+            secureLibraryCredentials.bearerToken = value
+        }
+
+    val libraryAuthConfig: OpdsAuthConfig
+        get() = OpdsAuthConfig(
+            username = libraryUsername,
+            password = libraryPassword,
+            bearerToken = libraryBearerToken,
+        )
 
     val musicNotificationAlwaysDismissible: Boolean
         get() = sharedPreferences.getBoolean(Constants.PREF_MUSIC_NOTIFICATION_ALWAYS_DISMISSIBLE, false)

@@ -1,13 +1,18 @@
 package org.jellyfin.mobile.settings
 
+import android.app.AlertDialog
 import android.content.Intent
 import android.os.Bundle
 import android.os.Environment
 import android.provider.Settings
+import android.text.InputType
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.Toast
 import androidx.fragment.app.Fragment
 import de.Maxr1998.modernpreferences.Preference
 import de.Maxr1998.modernpreferences.PreferencesAdapter
@@ -48,6 +53,8 @@ class SettingsFragment :
     private lateinit var directPlayAssPreference: Preference
     private lateinit var networkBufferPreference: Preference
     private lateinit var externalPlayerChoicePreference: Preference
+    private lateinit var libraryUsernamePreference: Preference
+    private lateinit var libraryPasswordPreference: Preference
 
     init {
         Preference.Config.titleMaxLines = 2
@@ -64,6 +71,13 @@ class SettingsFragment :
         }
         binding.recyclerView.adapter = settingsAdapter
         return binding.root
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (::libraryUsernamePreference.isInitialized && ::libraryPasswordPreference.isInitialized) {
+            updateLibraryCredentialSummaries()
+        }
     }
 
     override fun onInterceptBackPressed(): Boolean = settingsAdapter.goBack()
@@ -233,6 +247,23 @@ class SettingsFragment :
                 }
             }
         }
+        categoryHeader(PREF_CATEGORY_LIBRARY) {
+            titleRes = R.string.pref_category_library
+        }
+        libraryUsernamePreference = pref(Constants.PREF_LIBRARY_USERNAME) {
+            titleRes = R.string.pref_library_username
+            summary = libraryUsernameSummary()
+            defaultOnClick {
+                showLibraryUsernameDialog()
+            }
+        }
+        libraryPasswordPreference = pref(Constants.PREF_LIBRARY_PASSWORD) {
+            titleRes = R.string.pref_library_password
+            summary = libraryPasswordSummary()
+            defaultOnClick {
+                showLibraryPasswordDialog()
+            }
+        }
         categoryHeader(PREF_CATEGORY_DOWNLOADS) {
             titleRes = R.string.pref_category_downloads
         }
@@ -275,9 +306,90 @@ class SettingsFragment :
         }
     }
 
+    private fun showLibraryUsernameDialog() {
+        val input = EditText(requireContext()).apply {
+            setSingleLine(true)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_NORMAL
+            setText(appPreferences.libraryUsername.orEmpty())
+            selectAll()
+        }
+
+        showLibraryInputDialog(
+            title = getString(R.string.pref_library_username),
+            input = input,
+            onSave = { value ->
+                saveLibraryCredential { appPreferences.libraryUsername = value }
+            },
+        )
+    }
+
+    private fun showLibraryPasswordDialog() {
+        val input = EditText(requireContext()).apply {
+            setSingleLine(true)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setText(appPreferences.libraryPassword.orEmpty())
+            selectAll()
+        }
+
+        showLibraryInputDialog(
+            title = getString(R.string.pref_library_password),
+            input = input,
+            onSave = { value ->
+                saveLibraryCredential { appPreferences.libraryPassword = value }
+            },
+        )
+    }
+
+    private fun saveLibraryCredential(save: () -> Unit) {
+        runCatching {
+            save()
+            updateLibraryCredentialSummaries()
+            settingsAdapter.notifyDataSetChanged()
+        }.onFailure {
+            Toast.makeText(requireContext(), R.string.pref_library_save_failed, Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun updateLibraryCredentialSummaries() {
+        libraryUsernamePreference.summary = libraryUsernameSummary()
+        libraryPasswordPreference.summary = libraryPasswordSummary()
+    }
+
+    private fun libraryUsernameSummary(): String =
+        appPreferences.libraryUsername ?: getString(R.string.pref_library_not_set)
+
+    private fun libraryPasswordSummary(): String =
+        if (appPreferences.libraryPassword.isNullOrBlank()) {
+            getString(R.string.pref_library_not_set)
+        } else {
+            getString(R.string.pref_library_password_saved)
+        }
+
+    private fun showLibraryInputDialog(title: String, input: EditText, onSave: (String?) -> Unit) {
+        val container = LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
+            val padding = (24 * resources.displayMetrics.density).toInt()
+            setPadding(padding, padding / 2, padding, 0)
+            addView(input)
+        }
+
+        AlertDialog.Builder(requireContext())
+            .setTitle(title)
+            .setView(container)
+            .setPositiveButton(android.R.string.ok) { _, _ ->
+                onSave(input.text?.toString()?.trim()?.takeIf(String::isNotBlank))
+            }
+            .setNeutralButton(R.string.pref_library_clear) { _, _ ->
+                onSave(null)
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
     companion object {
         const val PREF_CATEGORY_MUSIC_PLAYER = "pref_category_music"
         const val PREF_CATEGORY_VIDEO_PLAYER = "pref_category_video"
+        const val PREF_CATEGORY_LIBRARY = "pref_category_library"
         const val PREF_CATEGORY_DOWNLOADS = "pref_category_downloads"
     }
 }
