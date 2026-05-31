@@ -15,7 +15,6 @@ object Constants {
     const val PIGGIETV_TESTING_SERVER_URL = "https://testing.piggietv.com"
     const val PIGGIETV_REQUESTS_URL = "https://request.piggietv.com"
     const val PIGGIETV_LIBRARY_DEFAULT_URL = "https://books.piggietv.com"
-    const val PIGGIETV_SIGNUP_URL = "https://signup.piggietv.com/invite/ysBDoDSMpv5fFMz9GPMxUL"
     const val PIGGIETV_DISCORD_URL = "https://discord.gg/FbtexGYau"
 
     // Webapp constants

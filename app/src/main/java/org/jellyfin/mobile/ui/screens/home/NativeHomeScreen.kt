@@ -74,6 +74,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -151,6 +152,13 @@ fun NativeHomeScreen(
         viewModel.openFolder(item)
     }
 
+    fun openChildDetails(item: NativeMediaItem, siblings: List<NativeMediaItem>) {
+        detailsSelection?.let { currentDetails ->
+            detailsHistory = detailsHistory + currentDetails
+        }
+        detailsSelection = NativeMediaDetailsSelection(item, siblings)
+    }
+
     fun closeLibraryOrDetailsParent() {
         val parent = detailsHistory.lastOrNull()
         if (parent == null) {
@@ -214,6 +222,8 @@ fun NativeHomeScreen(
                             onBack = ::goBackFromDetails,
                             onPlay = { item, siblings -> onPlay(item.toPlayOptions(siblings)) },
                             onOpenFolder = ::openFolderFromDetails,
+                            onOpenChild = ::openChildDetails,
+                            loadChildren = viewModel::loadFolderItems,
                             onReport = { item -> reportItem = item },
                         )
                     } else if (state.selectedLibrary == null) {
@@ -318,6 +328,7 @@ private fun LoginScreen(
     if (showSignup) {
         SignupPortalScreen(
             layout = layout,
+            server = state.serverName,
             onClose = { showSignup = false },
         )
         return
@@ -499,7 +510,9 @@ private fun LoginScreen(
 }
 
 @Composable
-private fun SignupPortalScreen(layout: PtvAdaptiveLayout, onClose: () -> Unit) {
+private fun SignupPortalScreen(layout: PtvAdaptiveLayout, server: String, onClose: () -> Unit) {
+    val signupUrl = remember(server) { server.nativeSignupUrl() }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -554,7 +567,7 @@ private fun SignupPortalScreen(layout: PtvAdaptiveLayout, onClose: () -> Unit) {
                                 if (url?.isSignupReturnUrl() == true) onClose()
                             }
                         }
-                        loadUrl(Constants.PIGGIETV_SIGNUP_URL)
+                        loadUrl(signupUrl)
                     }
                 },
             )
@@ -1250,9 +1263,18 @@ private fun MediaDetailsScreen(
     onBack: () -> Unit,
     onPlay: (NativeMediaItem, List<NativeMediaItem>) -> Unit,
     onOpenFolder: (NativeMediaItem) -> Unit,
+    onOpenChild: (NativeMediaItem, List<NativeMediaItem>) -> Unit,
+    loadChildren: suspend (NativeMediaItem) -> List<NativeMediaItem>,
     onReport: (NativeMediaItem) -> Unit,
 ) {
     val mediaItem = selection.item
+    val childItems by produceState<List<NativeMediaItem>?>(initialValue = null, mediaItem.id) {
+        value = if (mediaItem.showsChildrenOnDetails) {
+            runCatching { loadChildren(mediaItem) }.getOrDefault(emptyList())
+        } else {
+            emptyList()
+        }
+    }
 
     LazyColumn(
         modifier = Modifier
@@ -1361,7 +1383,7 @@ private fun MediaDetailsScreen(
                                 Text(text = "Play", fontWeight = FontWeight.Bold)
                             }
                         }
-                        if (mediaItem.isFolder) {
+                        if (mediaItem.isFolder && !mediaItem.showsChildrenOnDetails) {
                             Button(
                                 onClick = { onOpenFolder(mediaItem) },
                                 colors = ButtonDefaults.buttonColors(
@@ -1387,6 +1409,62 @@ private fun MediaDetailsScreen(
                     style = MaterialTheme.typography.body1,
                     modifier = Modifier.padding(horizontal = layout.edgePadding),
                 )
+            }
+        }
+        if (mediaItem.showsChildrenOnDetails) {
+            item {
+                Text(
+                    text = if (mediaItem.type == BaseItemKind.SERIES) "Seasons" else "Episodes",
+                    color = PiggieTvColors.TextPrimary,
+                    style = MaterialTheme.typography.h6,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(horizontal = layout.edgePadding),
+                )
+            }
+            when (val children = childItems) {
+                null -> item {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = layout.edgePadding, vertical = 12.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(22.dp),
+                            color = PiggieTvColors.Focus,
+                            strokeWidth = 2.dp,
+                        )
+                    }
+                }
+                else -> {
+                    if (children.isEmpty()) {
+                        item {
+                            Text(
+                                text = "Nothing here yet",
+                                color = PiggieTvColors.TextSecondary,
+                                modifier = Modifier.padding(horizontal = layout.edgePadding),
+                            )
+                        }
+                    } else {
+                        item {
+                            LazyRow(
+                                contentPadding = PaddingValues(horizontal = layout.edgePadding),
+                                horizontalArrangement = Arrangement.spacedBy(layout.rowSpacing),
+                            ) {
+                                items(children, key = { child -> child.id.toString() }) { child ->
+                                    PosterCard(
+                                        layout = layout,
+                                        item = child,
+                                        onClick = { onOpenChild(child, children) },
+                                        onPlay = { onPlay(child, children) },
+                                        onReport = { onReport(child) },
+                                        compact = false,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -1695,7 +1773,15 @@ private fun String.isSignupReturnUrl(): Boolean {
     }
 }
 
+private fun String.nativeSignupUrl(): String {
+    val baseUrl = trim().trimEnd('/')
+    return "$baseUrl/web/index.html#/signup"
+}
+
 private val playableAudioKinds = setOf(BaseItemKind.AUDIO, BaseItemKind.AUDIO_BOOK)
+
+private val NativeMediaItem.showsChildrenOnDetails: Boolean
+    get() = type == BaseItemKind.SERIES || type == BaseItemKind.SEASON
 
 private fun NativeMediaItem.toPlayOptions(siblings: List<NativeMediaItem> = emptyList()): PlayOptions {
     val queue = when {

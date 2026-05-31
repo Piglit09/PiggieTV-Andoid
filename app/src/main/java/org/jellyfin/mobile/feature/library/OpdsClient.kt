@@ -3,6 +3,7 @@ package org.jellyfin.mobile.feature.library
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.Credentials
+import okhttp3.FormBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.w3c.dom.Element
@@ -37,8 +38,28 @@ class OpdsClient(private val okHttpClient: OkHttpClient) {
         }
 
         try {
-            feedClient.newCall(requestBuilder.build()).execute().use { response ->
+            val request = requestBuilder.build()
+            feedClient.newCall(request).execute().use { response ->
                 if (response.code == HTTP_UNAUTHORIZED) {
+                    val loggedIn = authConfig.username
+                        ?.takeIf(String::isNotBlank)
+                        ?.let { username -> authenticateSession(baseUrl, username, authConfig.password.orEmpty()) }
+                        ?: false
+
+                    if (loggedIn) {
+                        feedClient.newCall(request).execute().use { retryResponse ->
+                            if (retryResponse.code == HTTP_UNAUTHORIZED) {
+                                throw LibraryLoginRequiredException()
+                            }
+                            if (!retryResponse.isSuccessful) {
+                                throw IOException("Library server returned HTTP ${retryResponse.code}")
+                            }
+
+                            val body = retryResponse.body?.bytes() ?: throw IOException("Library server returned an empty OPDS feed")
+                            return@withContext parseFeed(baseUrl, url, body)
+                        }
+                    }
+
                     throw LibraryLoginRequiredException()
                 }
                 if (!response.isSuccessful) {
@@ -51,6 +72,35 @@ class OpdsClient(private val okHttpClient: OkHttpClient) {
         } catch (error: SocketTimeoutException) {
             throw IOException("Library server timed out while loading OPDS.", error)
         }
+    }
+
+    private fun authenticateSession(baseUrl: String, username: String, password: String): Boolean {
+        val loginUrl = resolveUrl(baseUrl, "/login")
+        val loginPage = runCatching {
+            feedClient.newCall(Request.Builder().url(loginUrl).get().build()).execute().use { response ->
+                response.body?.string().orEmpty()
+            }
+        }.getOrDefault("")
+        val csrfToken = CSRF_TOKEN_REGEX.find(loginPage)?.groupValues?.getOrNull(1).orEmpty()
+        val formBuilder = FormBody.Builder()
+            .add("username", username)
+            .add("password", password)
+            .add("remember_me", "on")
+
+        if (csrfToken.isNotBlank()) {
+            formBuilder.add("csrf_token", csrfToken)
+        }
+
+        return runCatching {
+            feedClient.newCall(
+                Request.Builder()
+                    .url(loginUrl)
+                    .post(formBuilder.build())
+                    .build(),
+            ).execute().use { response ->
+                response.isSuccessful || response.isRedirect
+            }
+        }.getOrDefault(false)
     }
 
     private fun parseFeed(baseUrl: String, feedUrl: String, body: ByteArray): OpdsFeed {
@@ -129,6 +179,7 @@ private const val HTTP_UNAUTHORIZED = 401
 private const val OPDS_CONNECT_TIMEOUT_SECONDS = 30L
 private const val OPDS_READ_TIMEOUT_SECONDS = 90L
 private const val OPDS_CALL_TIMEOUT_SECONDS = 120L
+private val CSRF_TOKEN_REGEX = Regex("""name=["']csrf_token["'][^>]*value=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
 
 data class OpdsFeed(
     val url: String,

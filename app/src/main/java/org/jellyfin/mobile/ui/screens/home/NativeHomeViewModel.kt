@@ -159,27 +159,13 @@ class NativeHomeViewModel(
             val content = uiState.value as? NativeHomeUiState.Content ?: return@launch
             _uiState.value = content.copy(isLoadingLibrary = true)
             try {
-                val includeItemTypes = item.childContentTypes()
-                val items = withContext(Dispatchers.IO) {
-                    apiClient.itemsApi.getItems(
-                        parentId = item.id,
-                        recursive = item.type == BaseItemKind.MUSIC_ARTIST,
-                        includeItemTypes = includeItemTypes,
-                        sortBy = listOf(ItemSortBy.SORT_NAME),
-                        sortOrder = listOf(SortOrder.ASCENDING),
-                        fields = displayItemFields,
-                        enableUserData = true,
-                        imageTypeLimit = 1,
-                        enableImageTypes = imageTypes,
-                        limit = 120,
-                    ).content.items
-                }
+                val items = loadFolderItems(item)
 
                 _uiState.value = content.copy(
                     selectedLibrary = NativeLibraryContent(
                         title = item.title,
                         subtitle = item.subtitle,
-                        items = items.map(::toNativeMediaItem),
+                        items = items,
                     ),
                     isLoadingLibrary = false,
                 )
@@ -194,6 +180,26 @@ class NativeHomeViewModel(
                     isLoadingLibrary = false,
                 )
             }
+        }
+    }
+
+    suspend fun loadFolderItems(item: NativeMediaItem): List<NativeMediaItem> {
+        val includeItemTypes = item.childContentTypes()
+        if (includeItemTypes.isEmpty()) return emptyList()
+
+        return withContext(Dispatchers.IO) {
+            apiClient.itemsApi.getItems(
+                parentId = item.id,
+                recursive = item.type == BaseItemKind.MUSIC_ARTIST,
+                includeItemTypes = includeItemTypes,
+                sortBy = item.childSortBy(),
+                sortOrder = listOf(SortOrder.ASCENDING),
+                fields = displayItemFields,
+                enableUserData = true,
+                imageTypeLimit = 1,
+                enableImageTypes = imageTypes,
+                limit = 200,
+            ).content.items.map(::toNativeMediaItem)
         }
     }
 
@@ -715,7 +721,17 @@ class NativeHomeViewModel(
         -> listOf(BaseItemKind.AUDIO)
 
         BaseItemKind.MUSIC_ARTIST -> listOf(BaseItemKind.MUSIC_ALBUM)
+        BaseItemKind.SERIES -> listOf(BaseItemKind.SEASON)
+        BaseItemKind.SEASON -> listOf(BaseItemKind.EPISODE)
         else -> emptyList()
+    }
+
+    private fun NativeMediaItem.childSortBy(): List<ItemSortBy> = when (type) {
+        BaseItemKind.SERIES,
+        BaseItemKind.SEASON,
+        -> listOf(ItemSortBy.SORT_NAME)
+
+        else -> listOf(ItemSortBy.SORT_NAME)
     }
 
     private fun BaseItemDto.isPlayableVideo() = mediaType == MediaType.VIDEO && type in playableVideoTypes
