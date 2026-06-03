@@ -44,6 +44,7 @@ import org.jellyfin.mobile.player.source.MediaSourceResolver
 import org.jellyfin.mobile.reporting.MediaReportSender
 import org.jellyfin.mobile.player.ui.PlayerFragment
 import org.jellyfin.mobile.setup.ConnectionHelper
+import org.jellyfin.mobile.signup.NativeSignupRepository
 import org.jellyfin.mobile.ui.screens.home.NativeHomeViewModel
 import org.jellyfin.mobile.utils.Constants
 import org.jellyfin.mobile.utils.PermissionRequestHelper
@@ -103,6 +104,7 @@ val applicationModule = module {
     }
     single { PermissionRequestHelper() }
     single { MediaReportSender(get()) }
+    single { NativeSignupRepository(get()) }
     single { OpdsClient(get()) }
     single { LibraryRepository(get(), get()) }
     single { RemoteVolumeProvider(get()) }

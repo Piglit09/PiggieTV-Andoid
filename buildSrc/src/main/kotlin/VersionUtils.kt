@@ -2,8 +2,8 @@ import org.gradle.api.Project
 
 /**
  * Get the version name from the current environment or use the fallback.
- * It will look for a environment variable called JELLYFIN_VERSION first.
- * Next it will look for a property called "jellyfin.version" and lastly it will use the fallback.
+ * It will look for a environment variable called PIGGIETV_VERSION first.
+ * Next it will look for a property called "piggietv.version" and lastly it will use the fallback.
  * If the version in the environment starts with a "v" prefix it will be removed.
  *
  * Sample output:
@@ -11,8 +11,8 @@ import org.gradle.api.Project
  * null -> 0.0.0-dev.1 (unless different fallback set)
  */
 fun Project.getVersionName(fallback: String = "0.0.0-dev.1"): String {
-    val configuredVersion = System.getenv("JELLYFIN_VERSION")
-        ?: findProperty("jellyfin.version")?.toString()
+    val configuredVersion = System.getenv("PIGGIETV_VERSION")
+        ?: findProperty("piggietv.version")?.toString()
 
     return configuredVersion?.removePrefix("v") ?: fallback
 }

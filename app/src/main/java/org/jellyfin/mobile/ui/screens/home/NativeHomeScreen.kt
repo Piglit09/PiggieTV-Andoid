@@ -1,7 +1,6 @@
 package org.jellyfin.mobile.ui.screens.home
 
 import android.net.Uri
-import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -76,6 +75,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -85,24 +85,31 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import coil3.compose.AsyncImage
+import kotlinx.coroutines.launch
 import org.jellyfin.mobile.R
 import org.jellyfin.mobile.data.entity.ServerEntity
 import org.jellyfin.mobile.feature.library.LibraryScreen
 import org.jellyfin.mobile.feature.library.LibraryViewModel
 import org.jellyfin.mobile.player.interaction.PlayOptions
 import org.jellyfin.mobile.reporting.MediaReportReason
+import org.jellyfin.mobile.signup.NativeSignupRepository
+import org.jellyfin.mobile.signup.NativeSignupRequest
 import org.jellyfin.mobile.ui.utils.PiggieTvBackground
 import org.jellyfin.mobile.ui.utils.PiggieTvColors
 import org.jellyfin.mobile.utils.Constants
 import org.jellyfin.sdk.model.api.BaseItemKind
+import org.koin.compose.koinInject
 import kotlin.time.Duration.Companion.ZERO
 
 @Composable
@@ -326,7 +333,7 @@ private fun LoginScreen(
     var showSignup by rememberSaveable(state.serverName) { mutableStateOf(false) }
 
     if (showSignup) {
-        SignupPortalScreen(
+        NativeSignupScreen(
             layout = layout,
             server = state.serverName,
             onClose = { showSignup = false },
@@ -506,12 +513,74 @@ private fun LoginScreen(
                 Text(text = "Use a different server", color = PiggieTvColors.FocusSoft)
             }
         }
+        item {
+            Text(
+                text = stringResource(R.string.app_version_label, Constants.APP_INFO_VERSION),
+                color = PiggieTvColors.TextSecondary,
+                style = MaterialTheme.typography.caption,
+            )
+        }
     }
 }
 
 @Composable
-private fun SignupPortalScreen(layout: PtvAdaptiveLayout, server: String, onClose: () -> Unit) {
-    val signupUrl = remember(server) { server.nativeSignupUrl() }
+private fun NativeSignupScreen(
+    layout: PtvAdaptiveLayout,
+    server: String,
+    onClose: () -> Unit,
+    signupRepository: NativeSignupRepository = koinInject(),
+) {
+    val scope = rememberCoroutineScope()
+    var email by rememberSaveable(server) { mutableStateOf("") }
+    var username by rememberSaveable(server) { mutableStateOf("") }
+    var password by rememberSaveable(server) { mutableStateOf("") }
+    var confirmPassword by rememberSaveable(server) { mutableStateOf("") }
+    var isSubmitting by rememberSaveable(server) { mutableStateOf(false) }
+    var created by rememberSaveable(server) { mutableStateOf(false) }
+    var message by rememberSaveable(server) { mutableStateOf<String?>(null) }
+    var messageTone by rememberSaveable(server) { mutableStateOf(SignupMessageTone.ERROR) }
+
+    fun showError(text: String) {
+        created = false
+        messageTone = SignupMessageTone.ERROR
+        message = text
+    }
+
+    fun submitSignup() {
+        if (isSubmitting) return
+
+        validateNativeSignup(email, username, password, confirmPassword)?.let { validationError ->
+            showError(validationError)
+            return
+        }
+
+        isSubmitting = true
+        message = null
+        scope.launch {
+            runCatching {
+                signupRepository.createUser(
+                    serverUrl = server,
+                    signupRequest = NativeSignupRequest(
+                        email = email,
+                        username = username,
+                        password = password,
+                        confirmPassword = confirmPassword,
+                    ),
+                )
+            }.onSuccess { result ->
+                password = ""
+                confirmPassword = ""
+                created = true
+                messageTone = SignupMessageTone.SUCCESS
+                message = result.message
+            }.onFailure { error ->
+                created = false
+                messageTone = SignupMessageTone.ERROR
+                message = error.message ?: "PiggieTV signup failed. Please try again."
+            }
+            isSubmitting = false
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -536,41 +605,169 @@ private fun SignupPortalScreen(layout: PtvAdaptiveLayout, server: String, onClos
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        Surface(
+        LazyColumn(
             modifier = Modifier
-                .padding(horizontal = layout.edgePadding, vertical = 10.dp)
                 .fillMaxWidth()
                 .weight(1f),
-            color = PiggieTvColors.Panel.copy(alpha = 0.84f),
-            shape = RoundedCornerShape(8.dp),
-            border = BorderStroke(1.dp, PiggieTvColors.Border),
+            contentPadding = PaddingValues(horizontal = layout.edgePadding, vertical = 18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            AndroidView(
-                modifier = Modifier.fillMaxSize(),
-                factory = { context ->
-                    WebView(context).apply {
-                        settings.javaScriptEnabled = true
-                        settings.domStorageEnabled = true
-                        settings.cacheMode = WebSettings.LOAD_DEFAULT
-                        settings.mediaPlaybackRequiresUserGesture = false
-                        webViewClient = object : WebViewClient() {
-                            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
-                                return if (request.url.toString().isSignupReturnUrl()) {
-                                    onClose()
-                                    true
-                                } else {
-                                    false
-                                }
-                            }
-
-                            override fun onPageFinished(view: WebView, url: String?) {
-                                if (url?.isSignupReturnUrl() == true) onClose()
-                            }
-                        }
-                        loadUrl(signupUrl)
+            item {
+                Image(
+                    painter = painterResource(R.drawable.app_logo),
+                    contentDescription = null,
+                    modifier = Modifier
+                        .fillMaxWidth(0.68f)
+                        .widthIn(max = layout.loginMaxWidth)
+                        .height(layout.loadingLogoHeight),
+                    contentScale = ContentScale.Fit,
+                )
+            }
+            item {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .widthIn(max = layout.loginMaxWidth),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text(
+                        text = "Create your account",
+                        color = PiggieTvColors.TextPrimary,
+                        style = MaterialTheme.typography.h5,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Text(
+                        text = server,
+                        color = PiggieTvColors.TextSecondary,
+                        style = MaterialTheme.typography.body2,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            item {
+                PiggieTextField(
+                    value = email,
+                    onValueChange = {
+                        email = it
+                        created = false
+                    },
+                    label = "Email",
+                    imeAction = ImeAction.Next,
+                    keyboardType = KeyboardType.Email,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .widthIn(max = layout.loginMaxWidth),
+                )
+            }
+            item {
+                PiggieTextField(
+                    value = username,
+                    onValueChange = {
+                        username = it
+                        created = false
+                    },
+                    label = "Username",
+                    imeAction = ImeAction.Next,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .widthIn(max = layout.loginMaxWidth),
+                )
+            }
+            item {
+                PiggieTextField(
+                    value = password,
+                    onValueChange = {
+                        password = it
+                        created = false
+                    },
+                    label = "Password",
+                    imeAction = ImeAction.Next,
+                    isPassword = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .widthIn(max = layout.loginMaxWidth),
+                )
+            }
+            item {
+                PiggieTextField(
+                    value = confirmPassword,
+                    onValueChange = {
+                        confirmPassword = it
+                        created = false
+                    },
+                    label = "Confirm Password",
+                    imeAction = ImeAction.Go,
+                    isPassword = true,
+                    onGo = ::submitSignup,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .widthIn(max = layout.loginMaxWidth),
+                )
+            }
+            message?.let { text ->
+                item {
+                    val isSuccess = messageTone == SignupMessageTone.SUCCESS
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .widthIn(max = layout.loginMaxWidth),
+                        color = if (isSuccess) PiggieTvColors.Focus.copy(alpha = 0.14f) else PiggieTvColors.Accent.copy(alpha = 0.14f),
+                        shape = MaterialTheme.shapes.medium,
+                        border = BorderStroke(
+                            1.dp,
+                            if (isSuccess) PiggieTvColors.Focus.copy(alpha = 0.54f) else PiggieTvColors.Accent.copy(alpha = 0.54f),
+                        ),
+                    ) {
+                        Text(
+                            text = text,
+                            color = if (isSuccess) PiggieTvColors.FocusSoft else PiggieTvColors.Accent,
+                            style = MaterialTheme.typography.body2,
+                            modifier = Modifier.padding(14.dp),
+                        )
                     }
-                },
-            )
+                }
+            }
+            item {
+                Button(
+                    onClick = { if (created) onClose() else submitSignup() },
+                    enabled = created || (!isSubmitting && email.isNotBlank() && username.isNotBlank() && password.isNotBlank()),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .widthIn(max = layout.loginMaxWidth)
+                        .heightIn(min = 50.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        backgroundColor = if (created) PiggieTvColors.Focus else PiggieTvColors.Accent,
+                        contentColor = PiggieTvColors.Night,
+                        disabledBackgroundColor = PiggieTvColors.PanelHigh,
+                        disabledContentColor = PiggieTvColors.TextSecondary,
+                    ),
+                    shape = MaterialTheme.shapes.medium,
+                ) {
+                    if (isSubmitting) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            color = PiggieTvColors.TextPrimary,
+                            strokeWidth = 2.dp,
+                        )
+                    } else {
+                        if (!created) {
+                            Icon(Icons.Outlined.PersonAdd, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                        }
+                        Text(text = if (created) "Back to Sign In" else "Create Account", fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+            if (!created) {
+                item {
+                    TextButton(onClick = onClose) {
+                        Text(text = "Already have an account? Sign In", color = PiggieTvColors.FocusSoft)
+                    }
+                }
+            }
         }
     }
 }
@@ -1638,6 +1835,7 @@ private fun PiggieTextField(
     imeAction: ImeAction,
     modifier: Modifier = Modifier,
     isPassword: Boolean = false,
+    keyboardType: KeyboardType = if (isPassword) KeyboardType.Password else KeyboardType.Text,
     onGo: () -> Unit = {},
 ) {
     OutlinedTextField(
@@ -1647,8 +1845,8 @@ private fun PiggieTextField(
         label = { Text(text = label) },
         singleLine = true,
         shape = MaterialTheme.shapes.medium,
-        visualTransformation = if (isPassword) PasswordVisualTransformation() else androidx.compose.ui.text.input.VisualTransformation.None,
-        keyboardOptions = KeyboardOptions(imeAction = imeAction),
+        visualTransformation = if (isPassword) PasswordVisualTransformation() else VisualTransformation.None,
+        keyboardOptions = KeyboardOptions(keyboardType = keyboardType, imeAction = imeAction),
         keyboardActions = KeyboardActions(onGo = { onGo() }),
         colors = TextFieldDefaults.outlinedTextFieldColors(
             textColor = PiggieTvColors.TextPrimary,
@@ -1754,28 +1952,23 @@ private enum class NativeHomeTab {
     LIBRARY,
 }
 
+private enum class SignupMessageTone {
+    SUCCESS,
+    ERROR,
+}
+
 private data class NativeMediaDetailsSelection(
     val item: NativeMediaItem,
     val siblings: List<NativeMediaItem>,
 )
 
-private fun String.isSignupReturnUrl(): Boolean {
-    val uri = runCatching { Uri.parse(this) }.getOrNull() ?: return false
-    val host = uri.host.orEmpty().lowercase()
-    val normalized = lowercase()
-
-    return when {
-        host != "signup.piggietv.com" && host.endsWith("piggietv.com") -> true
-        "#/login" in normalized || "/login" in normalized -> true
-        "success" in normalized || "complete" in normalized || "created" in normalized -> true
-        "my/account" in normalized -> true
-        else -> false
-    }
-}
-
-private fun String.nativeSignupUrl(): String {
-    val baseUrl = trim().trimEnd('/')
-    return "$baseUrl/web/index.html#/signup"
+private fun validateNativeSignup(email: String, username: String, password: String, confirmPassword: String): String? = when {
+    email.isBlank() -> "Email is required."
+    "@" !in email.trim() -> "Enter a valid email address."
+    username.isBlank() -> "Username is required."
+    password.isBlank() -> "Password is required."
+    password != confirmPassword -> "Passwords do not match."
+    else -> null
 }
 
 private val playableAudioKinds = setOf(BaseItemKind.AUDIO, BaseItemKind.AUDIO_BOOK)

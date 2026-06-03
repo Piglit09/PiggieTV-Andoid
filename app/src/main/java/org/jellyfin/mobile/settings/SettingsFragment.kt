@@ -69,6 +69,7 @@ class SettingsFragment :
             setSupportActionBar(binding.toolbar)
             supportActionBar?.setDisplayHomeAsUpEnabled(true)
         }
+        binding.versionLabel.text = getString(R.string.app_version_label, Constants.APP_INFO_VERSION)
         binding.recyclerView.adapter = settingsAdapter
         return binding.root
     }

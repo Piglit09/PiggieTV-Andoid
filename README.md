@@ -13,7 +13,7 @@ The app auto-connects to PiggieTV, uses PiggieTV artwork and colors, and replace
 - Supports movies, shows, episodes, music albums, playlists, and audio playback.
 - Includes a Requests tab for Jellyseerr at `https://request.piggietv.com`.
 - Includes a native Library tab for Calibre-Web/Autocaliweb OPDS at `https://books.piggietv.com/opds`.
-- Includes signup through JFA-Go at the PiggieTV invite URL.
+- Includes PiggieTV native signup through the main web app route.
 - Includes a Discord shortcut on the login screen.
 - Adds admin dashboard access for administrator users.
 - Adds media reporting from home/details/playback with predefined issue types and custom reports.
@@ -61,7 +61,7 @@ These are configured in `app/src/main/java/org/jellyfin/mobile/utils/Constants.k
 - Requests: `https://request.piggietv.com`
 - Library: `https://books.piggietv.com`
 - Library OPDS: `https://books.piggietv.com/opds`
-- Signup: `https://signup.piggietv.com/invite/ysBDoDSMpv5fFMz9GPMxUL`
+- Signup: `https://piggietv.com/web/index.html#/signup`
 - Discord: `https://discord.gg/FbtexGYau`
 
 ## Recent Fixes And Enhancements
@@ -101,6 +101,16 @@ The generated debug APK is written under:
 ```text
 app/build/outputs/apk/proprietary/debug/
 ```
+
+## Version Bump
+
+The app version comes from `piggietv.version` in `gradle.properties` and is shown on the login and settings screens. To advance it by one patch version, run:
+
+```powershell
+.\scripts\bump-version.ps1
+```
+
+Patch values run from `1` to `99`; after `0.0.99`, the script rolls to `0.1.1`.
 
 ## Install To Device
 
