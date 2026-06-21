@@ -708,7 +708,7 @@ class NativeHomeViewModel(
         CollectionType.MOVIES -> listOf(BaseItemKind.MOVIE, BaseItemKind.VIDEO)
         CollectionType.TVSHOWS -> listOf(BaseItemKind.SERIES)
         CollectionType.MUSIC -> listOf(BaseItemKind.MUSIC_ALBUM)
-        CollectionType.BOOKS -> listOf(BaseItemKind.AUDIO_BOOK)
+        CollectionType.BOOKS -> listOf(BaseItemKind.BOOK)
         CollectionType.HOMEVIDEOS -> listOf(BaseItemKind.VIDEO, BaseItemKind.MOVIE)
         CollectionType.BOXSETS -> listOf(BaseItemKind.BOX_SET)
         CollectionType.PLAYLISTS -> listOf(BaseItemKind.PLAYLIST)

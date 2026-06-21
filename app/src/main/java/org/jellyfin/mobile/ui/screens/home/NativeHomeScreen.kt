@@ -101,6 +101,8 @@ import org.jellyfin.mobile.R
 import org.jellyfin.mobile.data.entity.ServerEntity
 import org.jellyfin.mobile.feature.library.LibraryScreen
 import org.jellyfin.mobile.feature.library.LibraryViewModel
+import org.jellyfin.mobile.feature.music.MusicScreen
+import org.jellyfin.mobile.feature.music.MusicViewModel
 import org.jellyfin.mobile.player.interaction.PlayOptions
 import org.jellyfin.mobile.reporting.MediaReportReason
 import org.jellyfin.mobile.signup.NativeSignupRepository
@@ -117,13 +119,13 @@ fun NativeHomeScreen(
     server: ServerEntity,
     viewModel: NativeHomeViewModel,
     libraryViewModel: LibraryViewModel,
+    musicViewModel: MusicViewModel,
     onOpenDownloads: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenDashboard: (String) -> Unit,
     onOpenExternalUrl: (String) -> Unit,
-    onOpenLibraryLink: (String) -> Unit,
     onDownloadLibraryBook: (Uri, String, String) -> Unit,
-    onReadLibraryBook: (Uri, String, String, String?) -> Unit,
+    onReadLibraryBook: (Uri, String, String, String?, String?, String?) -> Unit,
     onSelectServer: () -> Unit,
     onPlay: (PlayOptions) -> Unit,
     onBackHandlerChanged: ((() -> Boolean)?) -> Unit,
@@ -242,10 +244,11 @@ fun NativeHomeScreen(
                             onOpenSettings = onOpenSettings,
                             onOpenDashboard = onOpenDashboard,
                             libraryViewModel = libraryViewModel,
-                            onOpenLibraryLink = onOpenLibraryLink,
+                            musicViewModel = musicViewModel,
                             onDownloadLibraryBook = onDownloadLibraryBook,
                             onReadLibraryBook = onReadLibraryBook,
                             onBackHandlerChanged = onBackHandlerChanged,
+                            onPlay = onPlay,
                             onSignOut = {
                                 detailsSelection = null
                                 detailsHistory = emptyList()
@@ -780,10 +783,11 @@ private fun HomeContent(
     onOpenSettings: () -> Unit,
     onOpenDashboard: (String) -> Unit,
     libraryViewModel: LibraryViewModel,
-    onOpenLibraryLink: (String) -> Unit,
+    musicViewModel: MusicViewModel,
     onDownloadLibraryBook: (Uri, String, String) -> Unit,
-    onReadLibraryBook: (Uri, String, String, String?) -> Unit,
+    onReadLibraryBook: (Uri, String, String, String?, String?, String?) -> Unit,
     onBackHandlerChanged: ((() -> Boolean)?) -> Unit,
+    onPlay: (PlayOptions) -> Unit,
     onSignOut: () -> Unit,
     onItemClick: (NativeMediaItem) -> Unit,
     onItemPlay: (NativeMediaItem, List<NativeMediaItem>) -> Unit,
@@ -791,12 +795,22 @@ private fun HomeContent(
     onLibraryClick: (NativeMediaItem) -> Unit,
 ) {
     var activeTab by rememberSaveable { mutableStateOf(NativeHomeTab.HOME) }
+    var childHeaderCollapsed by remember { mutableStateOf(false) }
     val homeListState = rememberLazyListState()
     val showHeader by remember {
         derivedStateOf {
-            activeTab != NativeHomeTab.HOME ||
-                (homeListState.firstVisibleItemIndex == 0 && homeListState.firstVisibleItemScrollOffset < 24)
+            when (activeTab) {
+                NativeHomeTab.HOME -> homeListState.firstVisibleItemIndex == 0 && homeListState.firstVisibleItemScrollOffset < 24
+                NativeHomeTab.MUSIC,
+                NativeHomeTab.BOOKS,
+                -> !childHeaderCollapsed
+                else -> true
+            }
         }
+    }
+
+    LaunchedEffect(activeTab) {
+        childHeaderCollapsed = false
     }
 
     Column(
@@ -832,16 +846,27 @@ private fun HomeContent(
                 onReportItem = onReportItem,
                 onLibraryClick = onLibraryClick,
             )
+            NativeHomeTab.MUSIC -> MusicScreen(
+                viewModel = musicViewModel,
+                onBackHandlerChanged = onBackHandlerChanged,
+                onScrollHeaderCollapsedChange = { collapsed -> childHeaderCollapsed = collapsed },
+                modifier = Modifier.weight(1f),
+            )
+            NativeHomeTab.BOOKS -> LibraryScreen(
+                viewModel = libraryViewModel,
+                title = "PTV Reading",
+                onDownload = onDownloadLibraryBook,
+                onRead = onReadLibraryBook,
+                onBackHandlerChanged = onBackHandlerChanged,
+                onScrollHeaderCollapsedChange = { collapsed -> childHeaderCollapsed = collapsed },
+                modifier = Modifier.weight(1f),
+            )
             NativeHomeTab.REQUESTS -> RequestsPortal(
                 layout = layout,
                 modifier = Modifier.weight(1f),
             )
-            NativeHomeTab.LIBRARY -> LibraryScreen(
-                viewModel = libraryViewModel,
-                onOpenLink = onOpenLibraryLink,
-                onDownload = onDownloadLibraryBook,
-                onRead = onReadLibraryBook,
-                onBackHandlerChanged = onBackHandlerChanged,
+            NativeHomeTab.GAMES -> GamesHub(
+                layout = layout,
                 modifier = Modifier.weight(1f),
             )
         }
@@ -906,24 +931,16 @@ private fun HomeTabs(layout: PtvAdaptiveLayout, activeTab: NativeHomeTab, onSele
             horizontalArrangement = Arrangement.spacedBy(4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            HomeTabButton(
-                text = "Watch",
-                selected = activeTab == NativeHomeTab.HOME,
-                onClick = { onSelectTab(NativeHomeTab.HOME) },
-                modifier = Modifier.weight(1f),
-            )
-            HomeTabButton(
-                text = "Requests",
-                selected = activeTab == NativeHomeTab.REQUESTS,
-                onClick = { onSelectTab(NativeHomeTab.REQUESTS) },
-                modifier = Modifier.weight(1f),
-            )
-            HomeTabButton(
-                text = "Library",
-                selected = activeTab == NativeHomeTab.LIBRARY,
-                onClick = { onSelectTab(NativeHomeTab.LIBRARY) },
-                modifier = Modifier.weight(1f),
-            )
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                items(NativeHomeTab.entries, key = NativeHomeTab::name) { tab ->
+                    HomeTabButton(
+                        text = tab.label,
+                        selected = activeTab == tab,
+                        onClick = { onSelectTab(tab) },
+                        modifier = Modifier.widthIn(min = if (layout.compactTopBar) 84.dp else 112.dp),
+                    )
+                }
+            }
         }
     }
 }
@@ -974,6 +991,37 @@ private fun RequestsPortal(layout: PtvAdaptiveLayout, modifier: Modifier = Modif
                 }
             },
         )
+    }
+}
+
+@Composable
+private fun GamesHub(layout: PtvAdaptiveLayout, modifier: Modifier = Modifier) {
+    Surface(
+        modifier = modifier
+            .padding(horizontal = layout.edgePadding, vertical = 12.dp)
+            .fillMaxWidth(),
+        color = PiggieTvColors.Panel.copy(alpha = 0.84f),
+        shape = RoundedCornerShape(8.dp),
+        border = BorderStroke(1.dp, PiggieTvColors.Border),
+    ) {
+        Column(
+            modifier = Modifier.padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+            horizontalAlignment = Alignment.Start,
+        ) {
+            Icon(Icons.Outlined.Casino, contentDescription = null, tint = PiggieTvColors.Focus, modifier = Modifier.size(42.dp))
+            Text(
+                text = "Games",
+                color = PiggieTvColors.TextPrimary,
+                style = MaterialTheme.typography.h5,
+                fontWeight = FontWeight.ExtraBold,
+            )
+            Text(
+                text = "PiggieTV game integrations will appear here when a native game provider is configured.",
+                color = PiggieTvColors.TextSecondary,
+                style = MaterialTheme.typography.body2,
+            )
+        }
     }
 }
 
@@ -1946,10 +1994,12 @@ private data class PtvAdaptiveLayout(
     }
 }
 
-private enum class NativeHomeTab {
-    HOME,
-    REQUESTS,
-    LIBRARY,
+private enum class NativeHomeTab(val label: String) {
+    HOME("Home"),
+    MUSIC("Music"),
+    BOOKS("Reading"),
+    REQUESTS("Requests"),
+    GAMES("Games"),
 }
 
 private enum class SignupMessageTone {

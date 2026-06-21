@@ -30,6 +30,7 @@ import org.jellyfin.mobile.R
 import org.jellyfin.mobile.app.AppPreferences
 import org.jellyfin.mobile.databinding.FragmentSettingsBinding
 import org.jellyfin.mobile.downloads.DownloadMethod
+import org.jellyfin.mobile.feature.music.auto.PtvMusicAutoResumeStore
 import org.jellyfin.mobile.utils.BackPressInterceptor
 import org.jellyfin.mobile.utils.Constants
 import org.jellyfin.mobile.utils.applyWindowInsetsAsMargins
@@ -38,12 +39,15 @@ import org.jellyfin.mobile.utils.getDownloadsPaths
 import org.jellyfin.mobile.utils.isPackageInstalled
 import org.jellyfin.mobile.utils.withThemedContext
 import org.koin.android.ext.android.inject
+import java.text.DateFormat
+import java.util.Date
 
 class SettingsFragment :
     Fragment(),
     BackPressInterceptor {
 
     private val appPreferences: AppPreferences by inject()
+    private val autoResumeStore: PtvMusicAutoResumeStore by inject()
     private val settingsAdapter: PreferencesAdapter by lazy { PreferencesAdapter(buildSettingsScreen()) }
     private lateinit var startLandscapeVideoInLandscapePreference: CheckBoxPreference
     private lateinit var swipeGesturesPreference: CheckBoxPreference
@@ -55,6 +59,7 @@ class SettingsFragment :
     private lateinit var externalPlayerChoicePreference: Preference
     private lateinit var libraryUsernamePreference: Preference
     private lateinit var libraryPasswordPreference: Preference
+    private lateinit var androidAutoStatusPreference: Preference
 
     init {
         Preference.Config.titleMaxLines = 2
@@ -79,6 +84,9 @@ class SettingsFragment :
         if (::libraryUsernamePreference.isInitialized && ::libraryPasswordPreference.isInitialized) {
             updateLibraryCredentialSummaries()
         }
+        if (::androidAutoStatusPreference.isInitialized) {
+            androidAutoStatusPreference.summary = androidAutoStatusSummary()
+        }
     }
 
     override fun onInterceptBackPressed(): Boolean = settingsAdapter.goBack()
@@ -98,6 +106,10 @@ class SettingsFragment :
             titleRes = R.string.pref_music_notification_always_dismissible_title
             summaryRes = R.string.pref_music_notification_always_dismissible_summary_off
             summaryOnRes = R.string.pref_music_notification_always_dismissible_summary_on
+        }
+        androidAutoStatusPreference = pref(Constants.PREF_ANDROID_AUTO_MUSIC_STATUS) {
+            titleRes = R.string.pref_android_auto_music_status_title
+            summary = androidAutoStatusSummary()
         }
         categoryHeader(PREF_CATEGORY_VIDEO_PLAYER) {
             titleRes = R.string.pref_category_video_player
@@ -354,6 +366,44 @@ class SettingsFragment :
     private fun updateLibraryCredentialSummaries() {
         libraryUsernamePreference.summary = libraryUsernameSummary()
         libraryPasswordPreference.summary = libraryPasswordSummary()
+    }
+
+    private fun androidAutoStatusSummary(): String {
+        val status = autoResumeStore.debugStatus()
+        val connection = status.lastConnectionTimestampMs?.let { timestamp ->
+            getString(
+                R.string.pref_android_auto_music_status_connected,
+                DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(timestamp)),
+            )
+        } ?: getString(R.string.pref_android_auto_music_status_never_connected)
+        val queue = when {
+            status.savedQueueSize > 0 -> getString(
+                R.string.pref_android_auto_music_status_queue,
+                status.savedQueueSize,
+                status.savedCurrentIndex ?: 0,
+            )
+
+            else -> getString(R.string.pref_android_auto_music_status_no_queue)
+        }
+        val restore = status.lastRestoreStatus?.let { message ->
+            getString(R.string.pref_android_auto_music_status_restore, message)
+        }
+        val error = status.lastPlaybackError?.let { message ->
+            getString(R.string.pref_android_auto_music_status_error, message)
+        }
+        val runtime = listOf(
+            "Controller: ${status.controllerInstanceId ?: "unknown"}",
+            "Repository: ${status.repositoryInstanceId ?: "unknown"}",
+            "Player: ${status.playerInstanceId ?: "unknown"}",
+            "Session: ${status.mediaSessionInstanceId ?: "unknown"}",
+            "Queue: ${status.activeQueueCount}",
+            "Track: ${status.currentTrackTitle ?: status.currentTrackId ?: "none"}",
+            "Browse: ${status.lastBrowseSource ?: "none"} (${status.lastBrowseItemCount ?: 0})",
+            "Command: ${status.lastSessionCommand ?: "none"}",
+            "Service: ${status.lastServiceEvent ?: "none"}",
+        ).joinToString("\n")
+
+        return listOfNotNull(connection, queue, restore, error, runtime).joinToString("\n")
     }
 
     private fun libraryUsernameSummary(): String =

@@ -31,18 +31,25 @@ import org.jellyfin.mobile.bridge.MediaSegments
 import org.jellyfin.mobile.bridge.NativePlayer
 import org.jellyfin.mobile.downloads.DownloadsViewModel
 import org.jellyfin.mobile.events.ActivityEventHandler
-import org.jellyfin.mobile.feature.library.LibraryRepository
 import org.jellyfin.mobile.feature.library.LibraryReaderFragment
+import org.jellyfin.mobile.feature.library.LibraryReaderStore
+import org.jellyfin.mobile.feature.library.LibraryRepository
 import org.jellyfin.mobile.feature.library.LibraryViewModel
 import org.jellyfin.mobile.feature.library.OpdsClient
+import org.jellyfin.mobile.feature.music.MusicPlaybackController
+import org.jellyfin.mobile.feature.music.MusicRepository
+import org.jellyfin.mobile.feature.music.MusicSongActionHandler
+import org.jellyfin.mobile.feature.music.MusicViewModel
+import org.jellyfin.mobile.feature.music.auto.PtvMusicAutoResumeCoordinator
+import org.jellyfin.mobile.feature.music.auto.PtvMusicAutoResumeStore
 import org.jellyfin.mobile.home.NativeHomeFragment
 import org.jellyfin.mobile.player.deviceprofile.DeviceProfileBuilder
 import org.jellyfin.mobile.player.interaction.PlayerEvent
 import org.jellyfin.mobile.player.mediasegments.MediaSegmentRepository
 import org.jellyfin.mobile.player.qualityoptions.QualityOptionsProvider
 import org.jellyfin.mobile.player.source.MediaSourceResolver
-import org.jellyfin.mobile.reporting.MediaReportSender
 import org.jellyfin.mobile.player.ui.PlayerFragment
+import org.jellyfin.mobile.reporting.MediaReportSender
 import org.jellyfin.mobile.setup.ConnectionHelper
 import org.jellyfin.mobile.signup.NativeSignupRepository
 import org.jellyfin.mobile.ui.screens.home.NativeHomeViewModel
@@ -77,6 +84,7 @@ val applicationModule = module {
                 val libraryBaseUrl = appPreferences.libraryServerBaseUrl
                 val requestUrl = request.url.toString()
                 val authenticatedRequest = if (
+                    libraryBaseUrl.isNotBlank() &&
                     requestUrl.startsWith(libraryBaseUrl) &&
                     request.header("Authorization") == null
                 ) {
@@ -84,7 +92,10 @@ val applicationModule = module {
                     appPreferences.libraryBearerToken?.let { token ->
                         builder.header("Authorization", "Bearer $token")
                     } ?: appPreferences.libraryUsername?.let { username ->
-                        builder.header("Authorization", Credentials.basic(username, appPreferences.libraryPassword.orEmpty()))
+                        builder.header(
+                            "Authorization",
+                            Credentials.basic(username, appPreferences.libraryPassword.orEmpty()),
+                        )
                     }
                     builder.build()
                 } else {
@@ -106,7 +117,13 @@ val applicationModule = module {
     single { MediaReportSender(get()) }
     single { NativeSignupRepository(get()) }
     single { OpdsClient(get()) }
-    single { LibraryRepository(get(), get()) }
+    single { LibraryReaderStore(androidApplication()) }
+    single { LibraryRepository(get(), get(), get()) }
+    single { MusicRepository(get(), androidApplication()) }
+    single { PtvMusicAutoResumeStore(androidApplication()) }
+    single { MusicPlaybackController(get(), get(), get(), get(), get(), get()) }
+    single { MusicSongActionHandler(get(), get()) }
+    single { PtvMusicAutoResumeCoordinator(get(), get(), get()) }
     single { RemoteVolumeProvider(get()) }
     single(named(PLAYER_EVENT_CHANNEL)) { Channel<PlayerEvent>() }
 
@@ -125,7 +142,8 @@ val applicationModule = module {
     viewModel { MainViewModel(get(), get()) }
     viewModel { DownloadsViewModel() }
     viewModel { NativeHomeViewModel(get(), get(), get(), get()) }
-    viewModel { LibraryViewModel(get()) }
+    viewModel { LibraryViewModel(get(), get()) }
+    viewModel { MusicViewModel(get(), get(), get(), get()) }
 
     // Fragments
     fragment { WebViewFragment() }

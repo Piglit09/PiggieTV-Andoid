@@ -1,0 +1,181 @@
+package org.jellyfin.mobile.feature.music
+
+import io.kotest.matchers.collections.shouldContain
+import io.kotest.matchers.collections.shouldNotContain
+import io.kotest.matchers.shouldBe
+import io.kotest.matchers.shouldNotBe
+import io.mockk.mockk
+import org.jellyfin.sdk.api.client.ApiClient
+import org.jellyfin.sdk.model.api.BaseItemKind
+import org.junit.jupiter.api.Test
+import java.util.UUID
+
+class MusicSongActionsTest {
+    @Test
+    fun `song action request uses selected item id`() {
+        val selected = track(SELECTED_ID, title = "Selected")
+        val other = track(OTHER_ID, title = "Other")
+
+        val request = MusicSongActionRequest.forItem(
+            action = MusicSongAction.ADD_TO_PLAYLIST,
+            item = selected,
+            source = "phone",
+        )
+
+        request.itemId shouldBe selected.id
+        request.itemId shouldBe SELECTED_ID
+        request.itemId shouldNotBe other.id
+    }
+
+    @Test
+    fun `generated mix includes selected song first and avoids duplicates`() {
+        val seed = track(SELECTED_ID, title = "Seed")
+        val duplicateSeed = track(SELECTED_ID, title = "Seed duplicate")
+        val similar = track(OTHER_ID, title = "Similar")
+        val duplicateSimilar = track(OTHER_ID, title = "Similar duplicate")
+
+        val mix = MusicGeneratedMixBuilder.build(
+            seed = seed,
+            candidates = listOf(similar, duplicateSeed, duplicateSimilar),
+            notInterestedIds = emptySet(),
+            maxTracks = 50,
+        )
+
+        mix.map(MusicItem::id) shouldBe listOf(SELECTED_ID, OTHER_ID)
+        mix.first() shouldBe seed
+    }
+
+    @Test
+    fun `generated mix filters not interested candidates`() {
+        val seed = track(SELECTED_ID, title = "Seed")
+        val blocked = track(BLOCKED_ID, title = "Blocked")
+        val allowed = track(OTHER_ID, title = "Allowed")
+
+        val mix = MusicGeneratedMixBuilder.build(
+            seed = seed,
+            candidates = listOf(blocked, allowed),
+            notInterestedIds = setOf(BLOCKED_ID),
+            maxTracks = 50,
+        )
+
+        mix.map(MusicItem::id) shouldContain SELECTED_ID
+        mix.map(MusicItem::id) shouldContain OTHER_ID
+        mix.map(MusicItem::id) shouldNotContain BLOCKED_ID
+    }
+
+    @Test
+    fun `smart initial queue puts selected song first before related row candidates`() {
+        val firstRowItem = track(OTHER_ID, title = "First Row Item")
+        val selected = track(SELECTED_ID, title = "Selected")
+        val lastRowItem = track(BLOCKED_ID, title = "Last Row Item")
+
+        val queue = MusicSmartQueueBuilder.initialQueue(
+            selected = selected,
+            candidates = listOf(firstRowItem, selected, lastRowItem),
+        )
+
+        queue.map(MusicItem::id) shouldBe listOf(SELECTED_ID, OTHER_ID, BLOCKED_ID)
+    }
+
+    @Test
+    fun `play next inserts selected song after current index`() {
+        val first = track(SELECTED_ID, title = "First")
+        val current = track(OTHER_ID, title = "Current")
+        val last = track(BLOCKED_ID, title = "Last")
+        val selected = track(FOURTH_ID, title = "Play Next")
+
+        val result = MusicQueueActions.playNext(
+            queue = listOf(first, current, last),
+            currentIndex = 1,
+            item = selected,
+        )
+
+        result.queue.map(MusicItem::id) shouldBe listOf(SELECTED_ID, OTHER_ID, FOURTH_ID, BLOCKED_ID)
+        result.currentIndex shouldBe 1
+    }
+
+    @Test
+    fun `play next behaves like play when there is no active queue`() {
+        val selected = track(SELECTED_ID)
+
+        val result = MusicQueueActions.playNext(queue = emptyList(), currentIndex = -1, item = selected)
+
+        result.queue shouldBe listOf(selected)
+        result.currentIndex shouldBe 0
+        result.shouldStartPlayback shouldBe true
+    }
+
+    @Test
+    fun `add to queue appends selected song without starting playback`() {
+        val current = track(SELECTED_ID, title = "Current")
+        val selected = track(OTHER_ID, title = "Append")
+
+        val result = MusicQueueActions.addToQueue(
+            queue = listOf(current),
+            currentIndex = 0,
+            item = selected,
+        )
+
+        result.queue.map(MusicItem::id) shouldBe listOf(SELECTED_ID, OTHER_ID)
+        result.currentIndex shouldBe 0
+        result.shouldStartPlayback shouldBe false
+    }
+
+    @Test
+    fun `not interested repository toggle stores selected item locally`() {
+        val repository = MusicRepository(mockk<ApiClient>(relaxed = true))
+        val selected = track(SELECTED_ID)
+
+        repository.toggleNotInterested(selected) shouldBe true
+        repository.notInterestedItemIds() shouldContain SELECTED_ID
+        repository.toggleNotInterested(selected) shouldBe false
+        repository.notInterestedItemIds() shouldNotContain SELECTED_ID
+    }
+
+    @Test
+    fun `artist navigation reports missing fallback when artist data is absent`() {
+        MusicArtistNavigation.hasArtistTarget(track(SELECTED_ID, artist = null, artistIds = emptyList())) shouldBe false
+        MusicArtistNavigation.hasArtistTarget(track(OTHER_ID, artist = "Artist", artistIds = emptyList())) shouldBe true
+        MusicArtistNavigation.hasArtistTarget(track(BLOCKED_ID, artist = null, artistIds = listOf(FOURTH_ID))) shouldBe true
+    }
+
+    @Test
+    fun `download action returns music unavailable message`() {
+        MusicSongActionResult.Unavailable("Downloads are not ready for Music yet.").message shouldBe
+            "Downloads are not ready for Music yet."
+    }
+
+    private fun track(
+        id: UUID,
+        title: String = "Track",
+        artist: String? = "Artist",
+        artistIds: List<UUID> = emptyList(),
+    ) = MusicItem(
+        id = id,
+        title = title,
+        subtitle = artist,
+        album = "Album",
+        albumId = null,
+        artist = artist,
+        artistIds = artistIds,
+        genres = listOf("Genre"),
+        type = BaseItemKind.AUDIO,
+        collectionType = null,
+        posterUrl = null,
+        backdropUrl = null,
+        container = "mp3",
+        codec = "mp3",
+        playCount = 0,
+        progress = null,
+        isFavorite = false,
+        isFolder = false,
+        isPlayable = true,
+    )
+
+    private companion object {
+        val SELECTED_ID: UUID = UUID.fromString("11111111-1111-1111-1111-111111111111")
+        val OTHER_ID: UUID = UUID.fromString("22222222-2222-2222-2222-222222222222")
+        val BLOCKED_ID: UUID = UUID.fromString("33333333-3333-3333-3333-333333333333")
+        val FOURTH_ID: UUID = UUID.fromString("44444444-4444-4444-4444-444444444444")
+    }
+}

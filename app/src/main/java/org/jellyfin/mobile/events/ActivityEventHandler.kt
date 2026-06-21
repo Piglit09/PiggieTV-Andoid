@@ -25,9 +25,7 @@ import org.jellyfin.mobile.utils.requestDownload
 import org.jellyfin.mobile.webapp.WebappFunctionChannel
 import timber.log.Timber
 
-class ActivityEventHandler(
-    private val webappFunctionChannel: WebappFunctionChannel,
-) {
+class ActivityEventHandler(private val webappFunctionChannel: WebappFunctionChannel) {
     private val eventsFlow = MutableSharedFlow<ActivityEvent>(
         extraBufferCapacity = 10,
         onBufferOverflow = BufferOverflow.SUSPEND,
@@ -89,6 +87,8 @@ class ActivityEventHandler(
                     putString(Constants.EXTRA_LIBRARY_READER_TITLE, event.title)
                     putString(Constants.EXTRA_LIBRARY_READER_FILENAME, event.filename)
                     putString(Constants.EXTRA_LIBRARY_READER_MIME_TYPE, event.mimeType)
+                    putString(Constants.EXTRA_LIBRARY_READER_KEY, event.readerKey)
+                    putString(Constants.EXTRA_LIBRARY_READER_ITEM_ID, event.jellyfinItemId)
                 }
                 supportFragmentManager.addFragment<LibraryReaderFragment>(args)
             }

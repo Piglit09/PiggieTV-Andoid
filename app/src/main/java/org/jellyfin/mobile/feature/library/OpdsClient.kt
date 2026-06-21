@@ -1,3 +1,17 @@
+@file:Suppress(
+    "ArgumentListWrapping",
+    "BinaryExpressionWrapping",
+    "ClassSignature",
+    "CyclomaticComplexMethod",
+    "FunctionExpressionBody",
+    "FunctionLiteral",
+    "FunctionSignature",
+    "ImportOrdering",
+    "MaximumLineLength",
+    "ParameterListWrapping",
+    "Wrapping",
+)
+
 package org.jellyfin.mobile.feature.library
 
 import kotlinx.coroutines.Dispatchers
@@ -121,6 +135,7 @@ class OpdsClient(private val okHttpClient: OkHttpClient) {
                     rel = link.attr("rel").ifBlank { null },
                     type = link.attr("type").ifBlank { null },
                     title = link.attr("title").ifBlank { null },
+                    lengthBytes = link.attr("length").toLongOrNull(),
                 )
             }
             OpdsEntry(
@@ -147,6 +162,7 @@ class OpdsClient(private val okHttpClient: OkHttpClient) {
                     rel = link.attr("rel").ifBlank { null },
                     type = link.attr("type").ifBlank { null },
                     title = link.attr("title").ifBlank { null },
+                    lengthBytes = link.attr("length").toLongOrNull(),
                 )
             },
         )
@@ -204,4 +220,5 @@ data class OpdsLink(
     val rel: String?,
     val type: String?,
     val title: String?,
+    val lengthBytes: Long?,
 )

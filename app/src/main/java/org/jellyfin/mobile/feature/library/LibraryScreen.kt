@@ -1,3 +1,17 @@
+@file:Suppress(
+    "ArgumentListWrapping",
+    "BinaryExpressionWrapping",
+    "BlankLineBetweenWhenConditions",
+    "ComplexCondition",
+    "FunctionExpressionBody",
+    "FunctionSignature",
+    "LongMethod",
+    "MagicNumber",
+    "MaximumLineLength",
+    "ParameterListWrapping",
+    "TooManyFunctions",
+)
+
 package org.jellyfin.mobile.feature.library
 
 import android.net.Uri
@@ -25,28 +39,39 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.AlertDialog
 import androidx.compose.material.Button
 import androidx.compose.material.ButtonDefaults
 import androidx.compose.material.Card
 import androidx.compose.material.CircularProgressIndicator
 import androidx.compose.material.Icon
 import androidx.compose.material.IconButton
+import androidx.compose.material.LinearProgressIndicator
 import androidx.compose.material.MaterialTheme
 import androidx.compose.material.Surface
 import androidx.compose.material.Text
 import androidx.compose.material.TextButton
+import androidx.compose.material.TextField
+import androidx.compose.material.TextFieldDefaults
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.MenuBook
-import androidx.compose.material.icons.automirrored.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material.icons.outlined.Favorite
+import androidx.compose.material.icons.outlined.FavoriteBorder
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -63,16 +88,22 @@ import org.jellyfin.mobile.ui.utils.PiggieTvColors
 @Composable
 fun LibraryScreen(
     viewModel: LibraryViewModel,
-    onOpenLink: (String) -> Unit,
+    title: String = "Library",
     onDownload: (Uri, String, String) -> Unit,
-    onRead: (Uri, String, String, String?) -> Unit,
+    onRead: (Uri, String, String, String?, String?, String?) -> Unit,
     onBackHandlerChanged: ((() -> Boolean)?) -> Unit,
+    onScrollHeaderCollapsedChange: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val uiState by viewModel.uiState.collectAsState()
+    val selectedBookId = (uiState as? LibraryUiState.Content)?.selectedBook?.id
 
     LaunchedEffect(Unit) {
         viewModel.load()
+    }
+
+    LaunchedEffect(selectedBookId, uiState is LibraryUiState.Loading, uiState is LibraryUiState.Error) {
+        onScrollHeaderCollapsedChange(selectedBookId != null)
     }
 
     SideEffect {
@@ -99,9 +130,11 @@ fun LibraryScreen(
                 if (selectedBook == null) {
                     LibraryHomeContent(
                         layout = layout,
+                        title = title,
                         home = state.home,
                         onBookClick = viewModel::selectBook,
                         onRetry = { viewModel.load(force = true) },
+                        onScrollHeaderCollapsedChange = onScrollHeaderCollapsedChange,
                     )
                 } else {
                     BookDetail(
@@ -109,9 +142,10 @@ fun LibraryScreen(
                         book = selectedBook,
                         isLoading = state.isLoadingDetail,
                         onBack = viewModel::closeBook,
-                        onOpenLink = onOpenLink,
                         onDownload = onDownload,
                         onRead = onRead,
+                        onStartOver = viewModel::clearProgress,
+                        onToggleFavorite = viewModel::toggleFavorite,
                     )
                 }
             }
@@ -122,21 +156,45 @@ fun LibraryScreen(
 @Composable
 private fun LibraryHomeContent(
     layout: LibraryAdaptiveLayout,
+    title: String,
     home: LibraryHome,
     onBookClick: (LibraryBook) -> Unit,
     onRetry: () -> Unit,
+    onScrollHeaderCollapsedChange: (Boolean) -> Unit,
 ) {
+    var query by rememberSaveable { mutableStateOf("") }
+    val filteredBooks = remember(home.allBooks, query) {
+        home.allBooks.filterForQuery(query)
+    }
+    val listState = rememberLazyListState()
+    val headerCollapsed by remember {
+        derivedStateOf {
+            listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 96
+        }
+    }
+
+    LaunchedEffect(headerCollapsed) {
+        onScrollHeaderCollapsedChange(headerCollapsed)
+    }
+
     LazyColumn(
+        state = listState,
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(horizontal = layout.edgePadding, vertical = 14.dp),
-        verticalArrangement = Arrangement.spacedBy(22.dp),
+        verticalArrangement = Arrangement.spacedBy(20.dp),
     ) {
         item {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Icon(Icons.AutoMirrored.Outlined.MenuBook, contentDescription = null, tint = PiggieTvColors.Focus, modifier = Modifier.size(32.dp))
                 Column(modifier = Modifier.weight(1f)) {
-                    Text(text = "Library", color = PiggieTvColors.TextPrimary, style = MaterialTheme.typography.h5, fontWeight = FontWeight.ExtraBold)
-                    Text(text = home.serverBaseUrl, color = PiggieTvColors.TextSecondary, style = MaterialTheme.typography.caption, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(text = title, color = PiggieTvColors.TextPrimary, style = MaterialTheme.typography.h5, fontWeight = FontWeight.ExtraBold)
+                    Text(
+                        text = home.sourceLabel,
+                        color = if (home.isJellyfinBacked) PiggieTvColors.FocusSoft else PiggieTvColors.TextSecondary,
+                        style = MaterialTheme.typography.caption,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
                 TextButton(onClick = onRetry) {
                     Text(text = "Refresh", color = PiggieTvColors.FocusSoft)
@@ -144,40 +202,113 @@ private fun LibraryHomeContent(
             }
         }
 
+        item {
+            BookSearchField(
+                query = query,
+                onQueryChange = { query = it },
+            )
+        }
+
+        if (query.isNotBlank()) {
+            item {
+                Text(
+                    text = "Search results",
+                    color = PiggieTvColors.TextPrimary,
+                    style = MaterialTheme.typography.h6,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+            item {
+                if (filteredBooks.isEmpty()) {
+                    EmptyLibrary(message = "No reading items match \"$query\".")
+                } else {
+                    BookGrid(
+                        books = filteredBooks,
+                        layout = layout,
+                        onBookClick = onBookClick,
+                    )
+                }
+            }
+        }
+
+        if (home.continueReading.isNotEmpty()) {
+            item {
+                BookRow(
+                    title = "Continue Reading",
+                    books = home.continueReading,
+                    posterWidth = layout.rowPosterWidth,
+                    onBookClick = onBookClick,
+                )
+            }
+        }
+
         if (home.recentBooks.isNotEmpty()) {
             item {
-                BookRow(title = "Recent books", books = home.recentBooks, posterWidth = layout.rowPosterWidth, onBookClick = onBookClick)
+                BookRow(title = "Recently Added", books = home.recentBooks, posterWidth = layout.rowPosterWidth, onBookClick = onBookClick)
+            }
+        }
+
+        if (home.favorites.isNotEmpty()) {
+            item {
+                BookRow(title = "Favorites", books = home.favorites, posterWidth = layout.rowPosterWidth, onBookClick = onBookClick)
+            }
+        }
+
+        if (home.manga.isNotEmpty()) {
+            item {
+                BookRow(title = "Manga", books = home.manga, posterWidth = layout.rowPosterWidth, onBookClick = onBookClick)
+            }
+        }
+
+        if (home.comics.isNotEmpty()) {
+            item {
+                BookRow(title = "Comics", books = home.comics, posterWidth = layout.rowPosterWidth, onBookClick = onBookClick)
             }
         }
 
         item {
-            Text(text = "All books", color = PiggieTvColors.TextPrimary, style = MaterialTheme.typography.h6, fontWeight = FontWeight.Bold)
+            Text(text = "All Reading", color = PiggieTvColors.TextPrimary, style = MaterialTheme.typography.h6, fontWeight = FontWeight.Bold)
         }
 
         if (home.allBooks.isEmpty()) {
             item { EmptyLibrary() }
         } else {
             item {
-                LazyVerticalGrid(
-                    columns = GridCells.Adaptive(layout.gridMinWidth),
-                    modifier = Modifier.heightIn(max = layout.gridHeight),
-                    userScrollEnabled = false,
-                    verticalArrangement = Arrangement.spacedBy(layout.gridSpacing),
-                    horizontalArrangement = Arrangement.spacedBy(layout.gridSpacing),
-                ) {
-                    items(home.allBooks, key = LibraryBook::id) { book ->
-                        BookCard(book = book, posterWidth = layout.gridPosterWidth, onClick = { onBookClick(book) })
-                    }
-                }
+                BookGrid(
+                    books = home.allBooks,
+                    layout = layout,
+                    onBookClick = onBookClick,
+                )
             }
         }
 
-        if (home.authors.isNotEmpty() || home.series.isNotEmpty() || home.categories.isNotEmpty()) {
-            item {
-                FacetSummary(home = home)
-            }
+        item {
+            FacetSummary(home = home)
         }
     }
+}
+
+@Composable
+private fun BookSearchField(query: String, onQueryChange: (String) -> Unit) {
+    TextField(
+        value = query,
+        onValueChange = onQueryChange,
+        modifier = Modifier.fillMaxWidth(),
+        singleLine = true,
+        placeholder = { Text(text = "Search books, comics, manga, authors, series, or genres") },
+        leadingIcon = {
+            Icon(Icons.Outlined.Search, contentDescription = null, tint = PiggieTvColors.FocusSoft)
+        },
+        colors = TextFieldDefaults.textFieldColors(
+            textColor = PiggieTvColors.TextPrimary,
+            backgroundColor = PiggieTvColors.PanelHigh,
+            cursorColor = PiggieTvColors.Focus,
+            focusedIndicatorColor = PiggieTvColors.Focus,
+            unfocusedIndicatorColor = PiggieTvColors.Border,
+            placeholderColor = PiggieTvColors.TextSecondary,
+        ),
+        shape = RoundedCornerShape(8.dp),
+    )
 }
 
 @Composable
@@ -221,9 +352,42 @@ private fun BookCard(book: LibraryBook, posterWidth: Dp, onClick: () -> Unit) {
                 )
             }
         }
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+            BookFormatPill(book.format)
+            if (book.isFavorite) {
+                Icon(Icons.Outlined.Favorite, contentDescription = null, tint = PiggieTvColors.Focus, modifier = Modifier.size(15.dp))
+            }
+        }
+        book.progress?.let { progress ->
+            LinearProgressIndicator(
+                progress = progress.progress.coerceIn(0f, 1f),
+                modifier = Modifier.fillMaxWidth(),
+                color = PiggieTvColors.Accent,
+                backgroundColor = PiggieTvColors.Panel,
+            )
+        }
         Text(text = book.title, color = PiggieTvColors.TextPrimary, style = MaterialTheme.typography.body2, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
         book.subtitle?.let {
             Text(text = it, color = PiggieTvColors.TextSecondary, style = MaterialTheme.typography.caption, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+    }
+}
+
+@Composable
+private fun BookGrid(
+    books: List<LibraryBook>,
+    layout: LibraryAdaptiveLayout,
+    onBookClick: (LibraryBook) -> Unit,
+) {
+    LazyVerticalGrid(
+        columns = GridCells.Adaptive(layout.gridMinWidth),
+        modifier = Modifier.heightIn(max = layout.gridHeight),
+        userScrollEnabled = false,
+        verticalArrangement = Arrangement.spacedBy(layout.gridSpacing),
+        horizontalArrangement = Arrangement.spacedBy(layout.gridSpacing),
+    ) {
+        items(books, key = LibraryBook::id) { book ->
+            BookCard(book = book, posterWidth = layout.gridPosterWidth, onClick = { onBookClick(book) })
         }
     }
 }
@@ -234,9 +398,10 @@ private fun BookDetail(
     book: LibraryBook,
     isLoading: Boolean,
     onBack: () -> Unit,
-    onOpenLink: (String) -> Unit,
     onDownload: (Uri, String, String) -> Unit,
-    onRead: (Uri, String, String, String?) -> Unit,
+    onRead: (Uri, String, String, String?, String?, String?) -> Unit,
+    onStartOver: (LibraryBook) -> Unit,
+    onToggleFavorite: (LibraryBook) -> Unit,
 ) {
     LazyColumn(
         modifier = Modifier
@@ -306,7 +471,14 @@ private fun BookDetail(
                     book.series?.let {
                         Text(text = it, color = PiggieTvColors.FocusSoft, style = MaterialTheme.typography.caption, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
-                    BookActions(book = book, onOpenLink = onOpenLink, onDownload = onDownload, onRead = onRead)
+                    BookMetadata(book = book)
+                    BookActions(
+                        book = book,
+                        onDownload = onDownload,
+                        onRead = onRead,
+                        onStartOver = onStartOver,
+                        onToggleFavorite = onToggleFavorite,
+                    )
                 }
             }
         }
@@ -318,6 +490,42 @@ private fun BookDetail(
                     color = PiggieTvColors.TextSecondary,
                     style = MaterialTheme.typography.body1,
                     modifier = Modifier.padding(horizontal = layout.edgePadding),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun BookMetadata(book: LibraryBook) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            BookFormatPill(book.format)
+            book.fileSizeBytes?.let { size ->
+                Text(text = size.toFileSizeLabel(), color = PiggieTvColors.TextSecondary, style = MaterialTheme.typography.caption)
+            }
+        }
+        book.categories.takeIf(List<String>::isNotEmpty)?.let { categories ->
+            Text(
+                text = categories.take(MAX_DETAIL_CATEGORIES).joinToString("  /  "),
+                color = PiggieTvColors.TextSecondary,
+                style = MaterialTheme.typography.caption,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        book.progress?.let { progress ->
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    text = "Reading progress: ${progress.percent.coerceIn(0, 100)}%",
+                    color = PiggieTvColors.TextSecondary,
+                    style = MaterialTheme.typography.caption,
+                )
+                LinearProgressIndicator(
+                    progress = progress.progress.coerceIn(0f, 1f),
+                    modifier = Modifier.fillMaxWidth(),
+                    color = PiggieTvColors.Accent,
+                    backgroundColor = PiggieTvColors.Panel,
                 )
             }
         }
@@ -347,34 +555,104 @@ private fun BookCover(book: LibraryBook, width: Dp) {
 @Composable
 private fun BookActions(
     book: LibraryBook,
-    onOpenLink: (String) -> Unit,
     onDownload: (Uri, String, String) -> Unit,
-    onRead: (Uri, String, String, String?) -> Unit,
+    onRead: (Uri, String, String, String?, String?, String?) -> Unit,
+    onStartOver: (LibraryBook) -> Unit,
+    onToggleFavorite: (LibraryBook) -> Unit,
 ) {
+    val link = book.primaryReaderLink
+    val status = book.supportStatus
+    var confirmStartOver by rememberSaveable(book.readerKey) { mutableStateOf(false) }
+
+    if (confirmStartOver) {
+        AlertDialog(
+            onDismissRequest = { confirmStartOver = false },
+            title = {
+                Text(text = "Start over?", color = PiggieTvColors.TextPrimary)
+            },
+            text = {
+                Text(
+                    text = "PTV will clear the saved local reading position for this book and reopen it from the beginning.",
+                    color = PiggieTvColors.TextSecondary,
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmStartOver = false
+                        onStartOver(book)
+                        if (link != null && status == LibraryFormatSupport.NATIVE) {
+                            onRead(
+                                Uri.parse(link.href),
+                                book.title,
+                                book.downloadFilename(link),
+                                link.type,
+                                book.readerKey,
+                                book.jellyfinItemId,
+                            )
+                        }
+                    },
+                ) {
+                    Text(text = "Start Over", color = PiggieTvColors.FocusSoft)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmStartOver = false }) {
+                    Text(text = "Cancel", color = PiggieTvColors.TextSecondary)
+                }
+            },
+            backgroundColor = PiggieTvColors.PanelHigh,
+            shape = RoundedCornerShape(8.dp),
+        )
+    }
+
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        book.readLinks.firstOrNull()?.let { link ->
-            Button(
-                onClick = { onOpenLink(link.href) },
-                colors = ButtonDefaults.buttonColors(backgroundColor = PiggieTvColors.Accent, contentColor = PiggieTvColors.Night),
-                shape = MaterialTheme.shapes.medium,
-            ) {
-                Icon(Icons.AutoMirrored.Outlined.OpenInNew, contentDescription = null, modifier = Modifier.size(18.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TextButton(onClick = { onToggleFavorite(book) }) {
+                Icon(
+                    if (book.isFavorite) Icons.Outlined.Favorite else Icons.Outlined.FavoriteBorder,
+                    contentDescription = null,
+                    tint = PiggieTvColors.FocusSoft,
+                    modifier = Modifier.size(18.dp),
+                )
                 Spacer(modifier = Modifier.width(6.dp))
-                Text(text = "Open", fontWeight = FontWeight.Bold)
+                Text(text = if (book.isFavorite) "Favorited" else "Favorite", color = PiggieTvColors.FocusSoft)
+            }
+            if (book.progress != null) {
+                TextButton(
+                    onClick = { confirmStartOver = true },
+                ) {
+                    Text(text = "Start Over", color = PiggieTvColors.FocusSoft)
+                }
             }
         }
-        book.acquisitionLinks.firstOrNull()?.let { link ->
+
+        if (link != null && status == LibraryFormatSupport.NATIVE) {
             Button(
-                onClick = { onRead(Uri.parse(link.href), book.title, book.downloadFilename(link), link.type) },
+                onClick = {
+                    onRead(
+                        Uri.parse(link.href),
+                        book.title,
+                        book.downloadFilename(link),
+                        link.type,
+                        book.readerKey,
+                        book.jellyfinItemId,
+                    )
+                },
                 colors = ButtonDefaults.buttonColors(backgroundColor = PiggieTvColors.Accent, contentColor = PiggieTvColors.Night),
                 shape = MaterialTheme.shapes.medium,
             ) {
                 Icon(Icons.AutoMirrored.Outlined.MenuBook, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(modifier = Modifier.width(6.dp))
-                Text(text = "Read", fontWeight = FontWeight.Bold)
+                Text(text = if (book.progress != null) "Continue Reading" else "Open Reader", fontWeight = FontWeight.Bold)
             }
+        } else {
+            UnsupportedFormatNotice(format = book.format)
+        }
+
+        book.acquisitionLinks.firstOrNull()?.let { downloadLink ->
             Button(
-                onClick = { onDownload(Uri.parse(link.href), book.title, book.downloadFilename(link)) },
+                onClick = { onDownload(Uri.parse(downloadLink.href), book.title, book.downloadFilename(downloadLink)) },
                 colors = ButtonDefaults.buttonColors(backgroundColor = PiggieTvColors.Focus, contentColor = PiggieTvColors.Night),
                 shape = MaterialTheme.shapes.medium,
             ) {
@@ -382,6 +660,22 @@ private fun BookActions(
                 Spacer(modifier = Modifier.width(6.dp))
                 Text(text = "Download", fontWeight = FontWeight.Bold)
             }
+        }
+    }
+}
+
+@Composable
+private fun UnsupportedFormatNotice(format: LibraryBookFormat) {
+    val message = format.unsupportedMessage()
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = PiggieTvColors.PanelHigh,
+        shape = RoundedCornerShape(8.dp),
+        border = BorderStroke(1.dp, PiggieTvColors.Border),
+    ) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(text = message.title, color = PiggieTvColors.TextPrimary, style = MaterialTheme.typography.subtitle2, fontWeight = FontWeight.Bold)
+            Text(text = message.message, color = PiggieTvColors.TextSecondary, style = MaterialTheme.typography.caption)
         }
     }
 }
@@ -400,17 +694,35 @@ private fun FacetSummary(home: LibraryHome) {
                 text = listOf(
                     "${home.authors.size} authors",
                     "${home.series.size} series",
-                    "${home.categories.size} tags",
+                    "${home.collections.size} collections",
+                    "${home.genres.size.coerceAtLeast(home.categories.size)} genres",
                 ).joinToString("   "),
                 color = PiggieTvColors.TextSecondary,
                 style = MaterialTheme.typography.body2,
             )
+            if (
+                home.authors.isEmpty() &&
+                home.series.isEmpty() &&
+                home.collections.isEmpty() &&
+                home.genres.isEmpty() &&
+                home.categories.isEmpty()
+            ) {
+                Text(
+                    text = if (home.isJellyfinBacked) {
+                        "No author, series, collection, or genre metadata was returned by Jellyfin."
+                    } else {
+                        "No author, series, collection, or genre facets were returned by the optional OPDS fallback."
+                    },
+                    color = PiggieTvColors.TextSecondary,
+                    style = MaterialTheme.typography.caption,
+                )
+            }
         }
     }
 }
 
 @Composable
-private fun EmptyLibrary() {
+private fun EmptyLibrary(message: String = "No reading items were returned by Jellyfin Reading.") {
     Surface(
         modifier = Modifier.fillMaxWidth(),
         color = PiggieTvColors.Panel.copy(alpha = 0.76f),
@@ -418,7 +730,7 @@ private fun EmptyLibrary() {
         border = BorderStroke(1.dp, PiggieTvColors.Border),
     ) {
         Text(
-            text = "No books were returned by the OPDS feed.",
+            text = message,
             color = PiggieTvColors.TextSecondary,
             modifier = Modifier.padding(18.dp),
         )
@@ -454,9 +766,9 @@ private fun LibraryLoginRequired(onRetry: () -> Unit) {
     Box(modifier = Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Icon(Icons.AutoMirrored.Outlined.MenuBook, contentDescription = null, tint = PiggieTvColors.Focus, modifier = Modifier.size(44.dp))
-            Text(text = "Library login required", color = PiggieTvColors.TextPrimary, style = MaterialTheme.typography.h6, fontWeight = FontWeight.Bold)
+            Text(text = "OPDS fallback login required", color = PiggieTvColors.TextPrimary, style = MaterialTheme.typography.h6, fontWeight = FontWeight.Bold)
             Text(
-                text = "Add your Library username and password in PiggieTV Settings, then retry.",
+                text = "Add optional OPDS fallback credentials in PiggieTV Settings, then retry.",
                 color = PiggieTvColors.TextSecondary,
                 style = MaterialTheme.typography.body2,
             )
@@ -518,23 +830,64 @@ private data class LibraryAdaptiveLayout(
 }
 
 private fun LibraryBook.downloadFilename(link: LibraryLink): String {
-    val extension = when (link.type) {
-        "application/pdf" -> "pdf"
-        "application/x-mobipocket-ebook" -> "mobi"
-        "application/vnd.amazon.ebook" -> "azw3"
-        "application/x-cbz",
-        "application/vnd.comicbook+zip",
-        -> "cbz"
-        "application/x-cbr",
-        "application/vnd.comicbook-rar",
-        -> "cbr"
-        "text/plain" -> "txt"
-        "text/html" -> "html"
-        else -> "epub"
-    }
+    val extension = link.inferredFormat(title).preferredExtension
     return title
         .lowercase()
         .replace(Regex("[^a-z0-9]+"), "-")
         .trim('-')
         .ifBlank { "book" } + ".$extension"
 }
+
+@Composable
+private fun BookFormatPill(format: LibraryBookFormat) {
+    Surface(
+        color = when (format.supportStatus()) {
+            LibraryFormatSupport.NATIVE -> PiggieTvColors.Focus.copy(alpha = 0.26f)
+            LibraryFormatSupport.LIMITED -> PiggieTvColors.Accent.copy(alpha = 0.22f)
+            LibraryFormatSupport.UNSUPPORTED,
+            LibraryFormatSupport.UNKNOWN,
+            -> PiggieTvColors.PanelHigh
+        },
+        shape = RoundedCornerShape(6.dp),
+        border = BorderStroke(1.dp, PiggieTvColors.Border),
+    ) {
+        Text(
+            text = format.label,
+            color = PiggieTvColors.TextPrimary,
+            style = MaterialTheme.typography.overline,
+            modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
+        )
+    }
+}
+
+private fun List<LibraryBook>.filterForQuery(query: String): List<LibraryBook> {
+    val normalizedQuery = query.trim().lowercase()
+    if (normalizedQuery.isBlank()) return this
+    return filter { book ->
+        listOf(
+            book.title,
+            book.subtitle.orEmpty(),
+            book.authors.joinToString(" "),
+            book.series.orEmpty(),
+            book.categories.joinToString(" "),
+            book.format.label,
+        ).any { value -> normalizedQuery in value.lowercase() }
+    }
+}
+
+private fun Long.toFileSizeLabel(): String {
+    if (this <= 0L) return "Unknown size"
+    val units = listOf("B", "KB", "MB", "GB")
+    var value = toDouble()
+    var unitIndex = 0
+    while (value >= 1024.0 && unitIndex < units.lastIndex) {
+        value /= 1024.0
+        unitIndex += 1
+    }
+    return when (unitIndex) {
+        0 -> "${value.toInt()} ${units[unitIndex]}"
+        else -> "%.1f %s".format(value, units[unitIndex])
+    }
+}
+
+private const val MAX_DETAIL_CATEGORIES = 6

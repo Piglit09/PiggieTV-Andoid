@@ -1,0 +1,7 @@
+﻿PTV Android Auto discovery diagnostic
+Timestamp: 2026-06-13T18:44:49.7485864-05:00
+Repo root: C:\Users\Piggie\Documents\GitHub\PiggieTV-Jellyfin-Android
+Selected adb: C:\Users\Piggie\AppData\Local\Android\Sdk\platform-tools\adb.exe
+
+== ADB Devices ==
+[FAIL] no authorized adb device attached

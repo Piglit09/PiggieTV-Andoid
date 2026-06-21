@@ -1,0 +1,631 @@
+﻿PTV Android Auto discovery diagnostic
+Timestamp: 2026-06-13T06:36:00.6895466-05:00
+Repo root: C:\Users\Piggie\Documents\GitHub\PiggieTV-Jellyfin-Android
+Selected adb: C:\Users\Piggie\AppData\Local\Android\Sdk\platform-tools\adb.exe
+
+== ADB Devices ==
+adb-RFCX71XK0RY-3Ky5m3._adb-tls-connect._tcp device product:q6qsqw model:SM_F956U device:q6q transport_id:1
+Selected device: adb-RFCX71XK0RY-3Ky5m3._adb-tls-connect._tcp
+Detected package: com.piggietv.android.debug
+
+== dumpsys package com.piggietv.android.debug ==
+Activity Resolver Table:
+  Non-Data Actions:
+      android.intent.action.MAIN:
+        adacdf6 com.piggietv.android.debug/org.jellyfin.mobile.MainActivity filter c2ed5f7
+          Action: "android.intent.action.MAIN"
+          Category: "android.intent.category.LAUNCHER"
+      android.media.action.MEDIA_PLAY_FROM_SEARCH:
+        adacdf6 com.piggietv.android.debug/org.jellyfin.mobile.MainActivity filter 92c8c64
+          Action: "android.media.action.MEDIA_PLAY_FROM_SEARCH"
+          Category: "android.intent.category.DEFAULT"
+
+Receiver Resolver Table:
+  Non-Data Actions:
+      androidx.profileinstaller.action.SAVE_PROFILE:
+        4166ecd com.piggietv.android.debug/androidx.profileinstaller.ProfileInstallReceiver filter e580ad0
+          Action: "androidx.profileinstaller.action.SAVE_PROFILE"
+      androidx.profileinstaller.action.INSTALL_PROFILE:
+        4166ecd com.piggietv.android.debug/androidx.profileinstaller.ProfileInstallReceiver filter 2ddd382
+          Action: "androidx.profileinstaller.action.INSTALL_PROFILE"
+      androidx.profileinstaller.action.SKIP_FILE:
+        4166ecd com.piggietv.android.debug/androidx.profileinstaller.ProfileInstallReceiver filter 770da93
+          Action: "androidx.profileinstaller.action.SKIP_FILE"
+      androidx.profileinstaller.action.BENCHMARK_OPERATION:
+        4166ecd com.piggietv.android.debug/androidx.profileinstaller.ProfileInstallReceiver filter ba82ac9
+          Action: "androidx.profileinstaller.action.BENCHMARK_OPERATION"
+
+Service Resolver Table:
+  Non-Data Actions:
+      androidx.media3.session.MediaSessionService:
+        87b03fc com.piggietv.android.debug/org.jellyfin.mobile.feature.music.auto.PtvMusicService filter 87faa85
+          Action: "androidx.media3.session.MediaSessionService"
+          Action: "androidx.media3.session.MediaLibraryService"
+      androidx.media3.session.MediaLibraryService:
+        87b03fc com.piggietv.android.debug/org.jellyfin.mobile.feature.music.auto.PtvMusicService filter 87faa85
+          Action: "androidx.media3.session.MediaSessionService"
+          Action: "androidx.media3.session.MediaLibraryService"
+      androidx.media3.exoplayer.downloadService.action.RESTART:
+        419a5ce com.piggietv.android.debug/org.jellyfin.mobile.downloads.JellyfinDownloadService filter ac48cef
+          Action: "androidx.media3.exoplayer.downloadService.action.RESTART"
+          Category: "android.intent.category.DEFAULT"
+      android.media.browse.MediaBrowserService:
+        87b03fc com.piggietv.android.debug/org.jellyfin.mobile.feature.music.auto.PtvMusicService filter c2e50da
+          Action: "android.media.browse.MediaBrowserService"
+          Category: "android.intent.category.DEFAULT"
+
+Domain verification status:
+
+Permissions:
+  Permission [com.piggietv.android.debug.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION] (264117f):
+    sourcePackage=com.piggietv.android.debug
+    uid=10383 gids=[] type=0 prot=signature
+    perm=PermissionInfo{57c1895 com.piggietv.android.debug.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION}
+    flags=0x0
+
+Registered ContentProviders:
+  com.piggietv.android.debug/androidx.core.content.FileProvider:
+    Provider{d920daa com.piggietv.android.debug/androidx.core.content.FileProvider}
+  com.piggietv.android.debug/org.jellyfin.mobile.ui.content.ImageProvider:
+    Provider{2d5cd9b com.piggietv.android.debug/org.jellyfin.mobile.ui.content.ImageProvider}
+  com.piggietv.android.debug/androidx.startup.InitializationProvider:
+    Provider{a8ff538 com.piggietv.android.debug/androidx.startup.InitializationProvider}
+
+ContentProvider Authorities:
+  [com.piggietv.android.debug.androidx-startup]:
+    Provider{a8ff538 com.piggietv.android.debug/androidx.startup.InitializationProvider}
+      applicationInfo=ApplicationInfo{92a554c com.piggietv.android.debug}
+  [com.piggietv.android.debug.library-reader]:
+    Provider{d920daa com.piggietv.android.debug/androidx.core.content.FileProvider}
+      applicationInfo=ApplicationInfo{1cba995 com.piggietv.android.debug}
+  [com.piggietv.android.debug.image-provider]:
+    Provider{2d5cd9b com.piggietv.android.debug/org.jellyfin.mobile.ui.content.ImageProvider}
+      applicationInfo=ApplicationInfo{fa0caaa com.piggietv.android.debug}
+
+Key Set Manager:
+  [com.piggietv.android.debug]
+      Signing KeySets: 377
+
+Packages:
+  Package [com.piggietv.android.debug] (b8cf65):
+    appId=10383
+    pkg=Package{3eb2ce4 com.piggietv.android.debug}
+    codePath=/data/app/~~2iS5PkcuR1DCZG0xD-59-w==/com.piggietv.android.debug-fad3ZGNfdZqoF089YdZBjw==
+    resourcePath=/data/app/~~2iS5PkcuR1DCZG0xD-59-w==/com.piggietv.android.debug-fad3ZGNfdZqoF089YdZBjw==
+    legacyNativeLibraryDir=/data/app/~~2iS5PkcuR1DCZG0xD-59-w==/com.piggietv.android.debug-fad3ZGNfdZqoF089YdZBjw==/lib
+    extractNativeLibs=true
+    primaryCpuAbi=arm64-v8a
+    secondaryCpuAbi=null
+    cpuAbiOverride=null
+    versionCode=25299 minSdk=21 targetSdk=36
+    minExtensionVersions=[]
+    versionName=0.2.52
+    hiddenApiEnforcementPolicy=2
+    usesNonSdkApi=false
+    splits=[base]
+    apkSigningVersion=2
+    flags=[ DEBUGGABLE HAS_CODE ALLOW_CLEAR_USER_DATA ALLOW_BACKUP KILL_AFTER_RESTORE ]
+    privateFlags=[ PRIVATE_FLAG_ACTIVITIES_RESIZE_MODE_RESIZEABLE_VIA_SDK_VERSION ALLOW_AUDIO_PLAYBACK_CAPTURE PARTIALLY_DIRECT_BOOT_AWARE PRIVATE_FLAG_ALLOW_NATIVE_HEAP_POINTER_TAGGING ]
+    forceQueryable=false
+    pageSizeCompat=0
+    queriesPackages=[com.mxtech.videoplayer.ad, com.mxtech.videoplayer.pro, is.xyz.mpv, org.videolan.vlc, live.mehiz.mpvkt, com.google.android.gms.policy_cast_dynamite]
+    queriesIntents=[Intent { act=android.intent.action.VIEW dat=content://*/... typ=*/* }]
+    scannedAsStoppedSystemApp=false
+    supportsScreens=[small, medium, large, xlarge, resizeable, anyDensity]
+    timeStamp=2026-06-13 06:34:33
+    lastUpdateTime=2026-06-13 06:34:41
+    installerPackageName=null
+    installerPackageUid=-1
+    initiatingPackageName=com.android.shell
+    originatingPackageName=null
+    category=manifest: -1, override: -1, by user: -1
+    packageSource=1
+    appMetadataFilePath=null
+    appMetadataSource=0
+    signatures=PackageSignatures{10ea927 version:2, signatures:[e0e167ca], past signatures:[]}
+    installPermissionsFixed=false
+    pkgFlags=[ DEBUGGABLE HAS_CODE ALLOW_CLEAR_USER_DATA ALLOW_BACKUP KILL_AFTER_RESTORE ]
+    privatePkgFlags=[ PRIVATE_FLAG_ACTIVITIES_RESIZE_MODE_RESIZEABLE_VIA_SDK_VERSION ALLOW_AUDIO_PLAYBACK_CAPTURE PARTIALLY_DIRECT_BOOT_AWARE PRIVATE_FLAG_ALLOW_NATIVE_HEAP_POINTER_TAGGING ]
+    apexModuleName=null
+    componentsDeclared=13
+    declared permissions:
+      com.piggietv.android.debug.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION: prot=signature
+    requested permissions:
+      android.permission.POST_NOTIFICATIONS
+      android.permission.FOREGROUND_SERVICE
+      android.permission.RECEIVE_BOOT_COMPLETED
+      android.permission.BLUETOOTH_CONNECT
+      android.permission.INTERNET
+      com.piggietv.android.debug.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION
+      android.permission.FOREGROUND_SERVICE_DATA_SYNC
+      android.permission.ACCESS_NETWORK_STATE
+      android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK
+      android.permission.ACCESS_WIFI_STATE
+      android.permission.WAKE_LOCK
+    install permissions:
+      android.permission.FOREGROUND_SERVICE: granted=true
+      android.permission.RECEIVE_BOOT_COMPLETED: granted=true
+      android.permission.INTERNET: granted=true
+      com.piggietv.android.debug.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION: granted=true
+      android.permission.FOREGROUND_SERVICE_DATA_SYNC: granted=true
+      android.permission.ACCESS_NETWORK_STATE: granted=true
+      android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK: granted=true
+      android.permission.ACCESS_WIFI_STATE: granted=true
+      android.permission.WAKE_LOCK: granted=true
+    User 0: ceDataInode=2187010 deDataInode=2200339 installed=true hidden=false suspended=false distractionFlags=0 stopped=false notLaunched=false enabled=0 instant=false virtual=false quarantined=false
+      installReason=0
+      dataDir=/data/user/0/com.piggietv.android.debug
+      firstInstallTime=2026-05-27 15:53:32
+      uninstallReason=0
+      gids=[3003]
+      runtime permissions:
+        android.permission.POST_NOTIFICATIONS: granted=false, flags=[ USER_SENSITIVE_WHEN_GRANTED|USER_SENSITIVE_WHEN_DENIED]
+        android.permission.BLUETOOTH_CONNECT: granted=false, flags=[ USER_SENSITIVE_WHEN_GRANTED|USER_SENSITIVE_WHEN_DENIED]
+    User 12: ceDataInode=0 deDataInode=0 installed=false hidden=false suspended=false distractionFlags=0 stopped=true notLaunched=true enabled=0 instant=false virtual=false quarantined=false
+      installReason=0
+      dataDir=null
+      firstInstallTime=2026-05-27 15:53:32
+      uninstallReason=0
+      gids=[3003]
+      runtime permissions:
+    User 150: ceDataInode=0 deDataInode=0 installed=false hidden=false suspended=false distractionFlags=0 stopped=true notLaunched=true enabled=0 instant=false virtual=false quarantined=false
+      installReason=0
+      dataDir=null
+      firstInstallTime=2026-05-27 15:53:32
+      uninstallReason=0
+      gids=[3003]
+      runtime permissions:
+
+Queries:
+  system apps queryable: false
+  queries via forceQueryable:
+  queries via package name:
+    com.piggietv.android.debug:
+      org.videolan.vlc
+  queries via component:
+    com.samsung.android.bixby.agent:
+      com.piggietv.android.debug
+    com.android.settings.intelligence:
+      com.piggietv.android.debug
+    com.whatsapp:
+      com.piggietv.android.debug
+    com.google.android.apps.accessibility.voiceaccess:
+      com.piggietv.android.debug
+    com.google.android.as:
+      com.piggietv.android.debug
+    com.google.android.as.oss:
+      com.piggietv.android.debug
+    com.sezzle.sezzlemobile:
+      com.piggietv.android.debug
+    com.samsung.android.spay:
+      com.piggietv.android.debug
+    com.samsung.wearable.watch6plugin:
+      com.piggietv.android.debug
+    com.microsoft.office.outlook:
+      com.piggietv.android.debug
+    com.facebook.katana:
+      com.piggietv.android.debug
+    com.samsung.android.voc:
+      com.piggietv.android.debug
+    com.amazon.mShop.android.shopping:
+      com.piggietv.android.debug
+    com.tripledot.solitaire:
+      com.piggietv.android.debug
+    com.facebook.orca:
+      com.piggietv.android.debug
+    com.zhiliaoapp.musically:
+      com.piggietv.android.debug
+    com.robinhood.android:
+      com.piggietv.android.debug
+    com.dd.doordash:
+      com.piggietv.android.debug
+    com.kroger.mobile:
+      com.piggietv.android.debug
+    com.fidelity.android:
+      com.piggietv.android.debug
+    com.piggietv.android.debug:
+      com.google.android.documentsui
+      com.microsoft.skydrive
+      com.samsung.android.app.contacts
+      com.whatsapp
+      com.google.android.googlequicksearchbox
+      [com.google.android.calendar,com.google.android.syncadapters.calendar]
+      com.android.chrome
+      com.google.android.apps.tachyon
+      com.google.android.gm
+      com.google.android.apps.maps
+      com.sec.android.app.voicenote
+      com.samsung.android.calendar
+      com.samsung.android.spay
+      com.microsoft.office.outlook
+      com.spotify.music
+      com.google.android.apps.photos
+      com.samsung.android.app.notes
+      com.google.android.apps.youtube.music
+      com.google.android.apps.docs
+      com.sec.android.app.shealth
+      com.facebook.orca
+      gonemad.gmmp
+      org.videolan.vlc
+      com.cvs.launchers.cvs
+      com.adobe.reader
+      com.amazon.mp3
+      com.performance.meshview
+      com.hp.android.printservice
+      com.sec.android.app.music
+      com.snapchat.android
+      com.google.android.apps.photosgo
+      video.downloader.videodownloader
+      org.telegram.messenger
+      com.microsoft.teams
+      com.amazon.avod.thirdpartyclient
+      com.sumsg.musichub
+      com.google.android.contacts
+      [com.microsoft.office.word,com.microsoft.office.powerpoint,com.microsoft.office.excel]
+      com.dropbox.android
+      app.symfonik.music.player
+      com.openai.chatgpt
+    com.amazon.dee.app:
+      com.piggietv.android.debug
+    com.xingin.xhs:
+      com.piggietv.android.debug
+    com.adobe.reader:
+      com.piggietv.android.debug
+    com.fetchrewards.fetchrewards.hop:
+      com.piggietv.android.debug
+    net.zedge.android:
+      com.piggietv.android.debug
+    com.asus.rog.roggamingcenter3:
+      com.piggietv.android.debug
+    com.privateinternetaccess.android:
+      com.piggietv.android.debug
+    com.metamoki.weed:
+      com.piggietv.android.debug
+    com.audible.application:
+      com.piggietv.android.debug
+    com.etekcity.vesyncplatform:
+      com.piggietv.android.debug
+    com.chickfila.cfaflagship:
+      com.piggietv.android.debug
+    com.snapchat.android:
+      com.piggietv.android.debug
+    com.samsung.android.mocca:
+      com.piggietv.android.debug
+    video.downloader.videodownloader:
+      com.piggietv.android.debug
+    com.littlecaesars:
+      com.piggietv.android.debug
+    com.luckyskeletonstudios.idlebanktycoon:
+      com.piggietv.android.debug
+    com.miniclip.eightballpool:
+      com.piggietv.android.debug
+    com.paypal.android.p2pmobile:
+      com.piggietv.android.debug
+    com.instagram.android:
+      com.piggietv.android.debug
+    com.kikoff:
+      com.piggietv.android.debug
+    com.hellobrigit.Brigit:
+      com.piggietv.android.debug
+    com.run.tower.defense:
+      com.piggietv.android.debug
+    com.xfinity.digitalhome:
+      com.piggietv.android.debug
+    com.innplaylabs.animalkingdomraid:
+      com.piggietv.android.debug
+    com.wireguard.android:
+      com.piggietv.android.debug
+    com.mcdonalds.app:
+      com.piggietv.android.debug
+    com.vincentb.MobControl:
+      com.piggietv.android.debug
+    com.grubhub.android:
+      com.piggietv.android.debug
+    com.alibaba.intl.android.apps.poseidon:
+      com.piggietv.android.debug
+    com.priceline.android.negotiator:
+      com.piggietv.android.debug
+    com.justplay.app:
+      com.piggietv.android.debug
+    com.Beauchamp.Messenger.external:
+      com.piggietv.android.debug
+    com.vitastudio.mahjong:
+      com.piggietv.android.debug
+  queryable via interaction:
+    User 0:
+    User 12:
+    User 150:
+  queryable via uses-library:
+
+Dexopt state:
+  [com.piggietv.android.debug]
+    path: /data/app/~~2iS5PkcuR1DCZG0xD-59-w==/com.piggietv.android.debug-fad3ZGNfdZqoF089YdZBjw==/base.apk
+      arm64: [status=run-from-apk] [reason=unknown] [primary-abi]
+        [location is error]
+
+SPEG state:
+  Event #2: 24-01-2026 10:01:29.994 Success com.devid.musly took 2272 ms
+  Event #1: 29-10-2025 07:58:53.468 Success com.miniclip.eightballpool took 2254 ms
+  Event #0: 28-09-2025 21:55:38.217 Success com.eyecon.global took 2277 ms
+
+Profile utilization state:
+  Current state:
+    Version: 2.1.2
+    Start reason: boot-after-mainline-update
+    Start time: Fri Jun 12 23:18:44 CDT 2026 ts=1781324324420
+    Finish time: Sat Jun 13 01:03:34 CDT 2026 ts=1781330614283
+    Took time 6289sec
+    PU_StatusWatcher:
+      Initial thermal status: 2
+      Thermal status: 0
+      Screen off: true
+      Low battery: false
+    PU_DexoptTrigger:
+      Dexopt concurrency: 4
+      Dexopting: false
+      Hot apps list:
+        com.instagram.android, w=68, s=OPTIMIZED, optTimeMs=1781324914115, cancelCount=0, dexopt=PERFORMED, [primaryDex=true, reason=profile-utilization, dex2oatTimeMs=33377, filter=speed-profile]
+        com.google.android.googlequicksearchbox, w=89, s=OPTIMIZED, optTimeMs=1781324900492, cancelCount=0, dexopt=PERFORMED, [dex2oatTimeMs=19734, filter=speed-profile]
+        com.facebook.orca, w=94, s=OPTIMIZED, optTimeMs=1781324903660, cancelCount=0, dexopt=PERFORMED, [primaryDex=true, reason=profile-utilization, dex2oatTimeMs=22924, filter=speed-profile]
+        com.snapchat.android, w=107, s=OPTIMIZED, optTimeMs=1781324907857, cancelCount=0, dexopt=PERFORMED, [dex2oatTimeMs=27125, filter=speed-profile]
+        com.facebook.katana, w=115, s=OPTIMIZED, optTimeMs=1781324929366, cancelCount=0, dexopt=PERFORMED, [dex2oatTimeMs=28657, filter=speed-profile]
+        com.sec.android.app.shealth, w=121, s=OPTIMIZED, optTimeMs=1781324927675, cancelCount=0, dexopt=PERFORMED, [primaryDex=true, reason=profile-utilization, dex2oatTimeMs=23882, filter=speed-profile]
+        com.zhiliaoapp.musically, w=121, s=OPTIMIZED, optTimeMs=1781324945079, cancelCount=0, dexopt=PERFORMED, [dex2oatTimeMs=34643, filter=speed-profile], [dex2oatTimeMs=0, filter=verify], [dex2oatTimeMs=1880, filter=speed-profile], [dex2oatTimeMs=0, filter=verify], [dex2oatTimeMs=0, filter=verify]
+        com.google.android.gm, w=129, s=OPTIMIZED, optTimeMs=1781330594915, cancelCount=0, dexopt=PERFORMED, [dex2oatTimeMs=16174, filter=speed-profile]
+        com.sezzle.sezzlemobile, w=138, s=OPTIMIZED, optTimeMs=1781330584832, cancelCount=0, dexopt=PERFORMED, [dex2oatTimeMs=6098, filter=speed-profile]
+        com.google.android.apps.messaging, w=141, s=OPTIMIZED, optTimeMs=1781330593945, cancelCount=0, dexopt=PERFORMED, [dex2oatTimeMs=14934, filter=speed-profile], [primaryDex=false, reason=profile-utilization, dex2oatTimeMs=177, filter=verify], [primaryDex=false, reason=vdex, dex2oatTimeMs=0, filter=verify]
+        com.scee.psxandroid, w=147, s=OPTIMIZED, optTimeMs=1781330579908, cancelCount=0, dexopt=PERFORMED, [primaryDex=true, reason=profile-utilization, dex2oatTimeMs=1109, filter=speed-profile]
+        com.android.settings, w=149, s=OPTIMIZED, optTimeMs=1781330583712, cancelCount=0, dexopt=PERFORMED, [primaryDex=true, reason=profile-utilization, dex2oatTimeMs=3686, filter=speed-profile]
+        com.sec.android.easyMover, w=149, s=OPTIMIZED, optTimeMs=1781330587015, cancelCount=0, dexopt=PERFORMED, [primaryDex=true, reason=profile-utilization, dex2oatTimeMs=3238, filter=speed-profile]
+        com.sec.android.app.voicenote, w=153, s=OPTIMIZED, optTimeMs=1781330590055, cancelCount=0, dexopt=PERFORMED, [primaryDex=true, reason=profile-utilization, dex2oatTimeMs=5138, filter=speed-profile]
+        com.google.android.apps.maps, w=155, s=OPTIMIZED, optTimeMs=1781330606483, cancelCount=0, dexopt=PERFORMED, [primaryDex=true, reason=profile-utilization, dex2oatTimeMs=19219, filter=speed-profile]
+        com.sec.android.app.sbrowser, w=159, s=OPTIMIZED, optTimeMs=1781330593494, cancelCount=0, dexopt=PERFORMED, [primaryDex=true, reason=profile-utilization, dex2oatTimeMs=3359, filter=speed-profile]
+        com.samsung.android.shealthmonitor, w=168, s=OPTIMIZED, optTimeMs=1781330595405, cancelCount=0, dexopt=PERFORMED, [primaryDex=true, reason=profile-utilization, dex2oatTimeMs=1800, filter=speed-profile]
+        com.samsung.android.dialer, w=169, s=OPTIMIZED, optTimeMs=1781330593993, cancelCount=0, dexopt=SKIPPED, [primaryDex=true, reason=boot-after-mainline-update, dex2oatTimeMs=0, filter=speed-profile]
+        com.samsung.android.oneconnect, w=172, s=OPTIMIZED, optTimeMs=1781330609072, cancelCount=0, dexopt=PERFORMED, [primaryDex=true, reason=profile-utilization, dex2oatTimeMs=14930, filter=speed-profile]
+        com.amazon.mShop.android.shopping, w=175, s=OPTIMIZED, optTimeMs=1781330609737, cancelCount=0, dexopt=PERFORMED, [dex2oatTimeMs=14692, filter=speed-profile]
+        com.samsung.android.mdx, w=176, s=OPTIMIZED, optTimeMs=1781330596533, cancelCount=0, dexopt=PERFORMED, [dex2oatTimeMs=1045, filter=speed-profile]
+        com.immediasemi.android.blink, w=178, s=OPTIMIZED, optTimeMs=1781330610896, cancelCount=0, dexopt=PERFORMED, [dex2oatTimeMs=14132, filter=speed-profile]
+        com.google.android.apps.youtube.music, w=180, s=OPTIMIZED, optTimeMs=1781330614282, cancelCount=0, dexopt=PERFORMED, [dex2oatTimeMs=7618, filter=speed-profile]
+    PU_Storage:
+      Stored apps:
+        com.instagram.android 68
+        com.google.android.googlequicksearchbox 89
+        com.facebook.orca 94
+        com.snapchat.android 107
+        com.facebook.katana 115
+        com.sec.android.app.shealth 121
+        com.zhiliaoapp.musically 121
+        com.google.android.gm 129
+        com.sezzle.sezzlemobile 138
+        com.google.android.apps.messaging 141
+        com.scee.psxandroid 147
+        com.android.settings 149
+        com.sec.android.easyMover 149
+        com.sec.android.app.voicenote 153
+        com.google.android.apps.maps 155
+        com.sec.android.app.sbrowser 159
+        com.samsung.android.shealthmonitor 168
+        com.samsung.android.dialer 169
+        com.samsung.android.oneconnect 172
+        com.amazon.mShop.android.shopping 175
+        com.samsung.android.mdx 176
+        com.immediasemi.android.blink 178
+        com.google.android.apps.youtube.music 180
+        com.samsung.android.game.gamehome 180
+        com.samsung.android.app.watchmanager 181
+        com.samsung.android.app.contacts 186
+        com.samsung.android.bixby.agent 187
+        com.google.android.calendar 192
+        com.samsung.android.app.notes 194
+        com.google.android.apps.photos 196
+        com.creditkarma.mobile 199
+        com.dd.doordash 201
+        com.duolingo 203
+        com.exto.arrow 207
+        com.google.android.apps.chromecast.app 208
+        com.thetileapp.tile 211
+        com.discord 212
+        com.google.android.apps.tachyon 213
+        com.android.vending 220
+        com.samsung.vvm 228
+        com.att.myWireless 239
+        com.att.personalcloud 258
+        com.att.dh 261
+        com.microsoft.office.outlook 264
+        com.samsung.android.app.find 264
+        video.downloader.videodownloader 264
+    Stored PU state:
+      Service:
+        Version: 2.1.2
+        Start reason: boot-after-mainline-update
+        Start time: Fri Jun 12 23:18:44 CDT 2026 ts=1781324324420
+        Finish time: Sat Jun 13 01:03:34 CDT 2026 ts=1781330614283
+        Took time 6289sec
+      Watcher:
+        Initial thermal status: 2
+        Thermal status: 0
+        Screen off: true
+        Low battery: false
+      Metrics:
+        Predicted and launched apps: 2
+        Predicted apps: 23
+        Launched apps: 3
+        Best f1Score: 0.26666668, prefixCount: 12, precision: 0.16666667, recall: 0.6666667
+      Trigger:
+        Dexopt concurrency: 4
+        Dexopting: false
+        Hot apps list:
+          com.instagram.android, w=68, s=OPTIMIZED, optTimeMs=1781324914115, cancelCount=0, dexopt=PERFORMED, [primaryDex=true, reason=profile-utilization, dex2oatTimeMs=33377, filter=speed-profile]
+          com.google.android.googlequicksearchbox, w=89, s=OPTIMIZED, optTimeMs=1781324900492, cancelCount=0, dexopt=PERFORMED, [primaryDex=true, reason=profile-utilization, dex2oatTimeMs=19734, filter=speed-profile]
+          com.facebook.orca, w=94, s=OPTIMIZED, optTimeMs=1781324903660, cancelCount=0, dexopt=PERFORMED, [primaryDex=true, reason=profile-utilization, dex2oatTimeMs=22924, filter=speed-profile]
+          com.snapchat.android, w=107, s=OPTIMIZED, optTimeMs=1781324907857, cancelCount=0, dexopt=PERFORMED, [primaryDex=true, reason=profile-utilization, dex2oatTimeMs=27125, filter=speed-profile]
+          com.facebook.katana, w=115, s=OPTIMIZED, optTimeMs=1781324929366, cancelCount=0, dexopt=PERFORMED, [primaryDex=true, reason=profile-utilization, dex2oatTimeMs=28657, filter=speed-profile]
+          com.sec.android.app.shealth, w=121, s=OPTIMIZED, optTimeMs=1781324927675, cancelCount=0, dexopt=PERFORMED, [primaryDex=true, reason=profile-utilization, dex2oatTimeMs=23882, filter=speed-profile]
+          com.zhiliaoapp.musically, w=121, s=OPTIMIZED, optTimeMs=1781324945079, cancelCount=0, dexopt=PERFORMED, [primaryDex=true, reason=profile-utilization, dex2oatTimeMs=34643, filter=speed-profile], [primaryDex=true, reason=vdex, dex2oatTimeMs=0, filter=verify], [primaryDex=true, reason=profile-utilization, dex2oatTimeMs=1880, filter=speed-profile], [primaryDex=true, reason=vdex, dex2oatTimeMs=0, filter=verify], [primaryDex=true, reason=vdex, dex2oatTimeMs=0, filter=verify]
+          com.google.android.gm, w=129, s=OPTIMIZED, optTimeMs=1781330594915, cancelCount=0, dexopt=PERFORMED, [primaryDex=true, reason=profile-utilization, dex2oatTimeMs=16174, filter=speed-profile]
+          com.sezzle.sezzlemobile, w=138, s=OPTIMIZED, optTimeMs=1781330584832, cancelCount=0, dexopt=PERFORMED, [primaryDex=true, reason=profile-utilization, dex2oatTimeMs=6098, filter=speed-profile]
+          com.google.android.apps.messaging, w=141, s=OPTIMIZED, optTimeMs=1781330593945, cancelCount=0, dexopt=PERFORMED, [primaryDex=true, reason=profile-utilization, dex2oatTimeMs=14934, filter=speed-profile], [primaryDex=false, reason=profile-utilization, dex2oatTimeMs=177, filter=verify], [primaryDex=false, reason=vdex, dex2oatTimeMs=0, filter=verify]
+          com.scee.psxandroid, w=147, s=OPTIMIZED, optTimeMs=1781330579908, cancelCount=0, dexopt=PERFORMED, [primaryDex=true, reason=profile-utilization, dex2oatTimeMs=1109, filter=speed-profile]
+          com.android.settings, w=149, s=OPTIMIZED, optTimeMs=1781330583712, cancelCount=0, dexopt=PERFORMED, [primaryDex=true, reason=profile-utilization, dex2oatTimeMs=3686, filter=speed-profile]
+          com.sec.android.easyMover, w=149, s=OPTIMIZED, optTimeMs=1781330587015, cancelCount=0, dexopt=PERFORMED, [primaryDex=true, reason=profile-utilization, dex2oatTimeMs=3238, filter=speed-profile]
+          com.sec.android.app.voicenote, w=153, s=OPTIMIZED, optTimeMs=1781330590055, cancelCount=0, dexopt=PERFORMED, [primaryDex=true, reason=profile-utilization, dex2oatTimeMs=5138, filter=speed-profile]
+          com.google.android.apps.maps, w=155, s=OPTIMIZED, optTimeMs=1781330606483, cancelCount=0, dexopt=PERFORMED, [primaryDex=true, reason=profile-utilization, dex2oatTimeMs=19219, filter=speed-profile]
+          com.sec.android.app.sbrowser, w=159, s=OPTIMIZED, optTimeMs=1781330593494, cancelCount=0, dexopt=PERFORMED, [primaryDex=true, reason=profile-utilization, dex2oatTimeMs=3359, filter=speed-profile]
+          com.samsung.android.shealthmonitor, w=168, s=OPTIMIZED, optTimeMs=1781330595405, cancelCount=0, dexopt=PERFORMED, [primaryDex=true, reason=profile-utilization, dex2oatTimeMs=1800, filter=speed-profile]
+          com.samsung.android.dialer, w=169, s=OPTIMIZED, optTimeMs=1781330593993, cancelCount=0, dexopt=SKIPPED, [primaryDex=true, reason=boot-after-mainline-update, dex2oatTimeMs=0, filter=speed-profile]
+          com.samsung.android.oneconnect, w=172, s=OPTIMIZED, optTimeMs=1781330609072, cancelCount=0, dexopt=PERFORMED, [primaryDex=true, reason=profile-utilization, dex2oatTimeMs=14930, filter=speed-profile]
+          com.amazon.mShop.android.shopping, w=175, s=OPTIMIZED, optTimeMs=1781330609737, cancelCount=0, dexopt=PERFORMED, [primaryDex=true, reason=profile-utilization, dex2oatTimeMs=14692, filter=speed-profile]
+          com.samsung.android.mdx, w=176, s=OPTIMIZED, optTimeMs=1781330596533, cancelCount=0, dexopt=PERFORMED, [primaryDex=true, reason=profile-utilization, dex2oatTimeMs=1045, filter=speed-profile]
+          com.immediasemi.android.blink, w=178, s=OPTIMIZED, optTimeMs=1781330610896, cancelCount=0, dexopt=PERFORMED, [primaryDex=true, reason=profile-utilization, dex2oatTimeMs=14132, filter=speed-profile]
+          com.google.android.apps.youtube.music, w=180, s=OPTIMIZED, optTimeMs=1781330614282, cancelCount=0, dexopt=PERFORMED, [primaryDex=true, reason=profile-utilization, dex2oatTimeMs=7618, filter=speed-profile]
+    Stored SCPM state:
+      packages-9a07:
+        [                                            ]
+      disable-2bb4:
+        [                                            ]
+
+HeimdAllFS state:
+  [com.piggietv.android.debug]
+    path: /data/app/~~2iS5PkcuR1DCZG0xD-59-w==/com.piggietv.android.debug-fad3ZGNfdZqoF089YdZBjw==/base.apk
+    Compressed? False
+  [ Summary ]
+    # of packages: 1 / # of packages in DATA: 1 (1)
+    Compressed apks info - sum of orig size: 10491 / sum of compr size : 10491
+  [Lfo status]
+    packageName: com.samsung.android.offline.languagemodel
+    Path: /data/app/~~T6aYVpjYCbsGEi2SpTgBBQ==/com.samsung.android.offline.languagemodel-7yXkX9uAPIkyXRdPejkMtQ==/base.apk
+    Fragmented: 1
+    Extent Count: 366
+    Version: 0
+    Flag: 0
+    Level: 0
+    Count: 0
+    
+
+== query MediaLibraryService ==
+1 services found:
+  Service #0:
+    priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=false
+    com.piggietv.android.debug/org.jellyfin.mobile.feature.music.auto.PtvMusicService
+
+== query MediaSessionService ==
+1 services found:
+  Service #0:
+    priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=false
+    com.piggietv.android.debug/org.jellyfin.mobile.feature.music.auto.PtvMusicService
+
+== query MediaBrowserService ==
+1 services found:
+  Service #0:
+    priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=true
+    com.piggietv.android.debug/org.jellyfin.mobile.feature.music.auto.PtvMusicService
+
+== local merged proprietary debug manifest ==
+C:\Users\Piggie\Documents\GitHub\PiggieTV-Jellyfin-Android\app\build\intermediates\merged_manifests\proprietaryDebug\processProprietaryDebugManifest\AndroidManifest.xml
+
+== Android Auto packages ==
+Error: java.lang.SecurityException: Shell does not have permission to access user 12
+ com.android.server.am.ActivityManagerService.handleIncomingUser:8 android.app.ActivityManager.handleIncomingUser:6316 com.android.server.pm.PackageManagerShellCommand.translateUserId:24 
+Error: java.lang.SecurityException: Shell does not have permission to access user 150
+ com.android.server.am.ActivityManagerService.handleIncomingUser:8 android.app.ActivityManager.handleIncomingUser:6316 com.android.server.pm.PackageManagerShellCommand.translateUserId:24 
+
+== Android Auto / unknown source settings probe ==
+
+== dumpsys media_session ==
+MEDIA SESSION SERVICE (dumpsys media_session)
+
+14 sessions listeners.
+Global priority session is com.android.server.telecom/HeadsetMediaButton/1 (userId=0)
+  HeadsetMediaButton com.android.server.telecom/HeadsetMediaButton/1 (userId=0)
+    ownerPid=3178, ownerUid=1000, userId=0
+    package=com.android.server.telecom
+    launchIntent=null
+    mediaButtonReceiver=null
+    active=false
+    flags=65537
+    rating type=0
+    controllers: 0
+    state=null
+    audioAttrs=AudioAttributes: usage=USAGE_VOICE_COMMUNICATION content=CONTENT_TYPE_SPEECH flags=0x800(FLAG_MUTE_HAPTIC)  tags= bundle=null
+    volumeType=LOCAL, controlType=ABSOLUTE, max=0, current=0, volumeControlId=null
+    metadata: null
+    queueTitle=null, size=0
+User Records:
+Record for full_user=0, profile_user=12, profile_user=150
+  Volume key long-press listener: null
+  Volume key long-press listener package: 
+  Media key listener: null
+  Media key listener package: 
+  OnMediaKeyEventDispatchedListener: added 0 listener(s)
+  OnMediaKeyEventSessionChangedListener: added 3 listener(s)
+    from com.samsung.android.app.aodservice
+    from com.samsung.android.app.aodservice
+    from com.samsung.android.knox.app.networkfilter
+  Last MediaButtonReceiver: MBR {pi=null, componentName=ComponentInfo{com.google.android.apps.youtube.music/androidx.media.session.MediaButtonReceiver}, type=1, pkg=com.google.android.apps.youtube.music}
+  High priority mediakey receiver: null
+  Volume key long-press receiver: null
+  Media button session is null
+  Sessions Stack - have 1 sessions:
+    play_movies_media com.google.android.videos/play_movies_media/6 (userId=0)
+      ownerPid=27674, ownerUid=10335, userId=0
+      package=com.google.android.videos
+      launchIntent=null
+      mediaButtonReceiver=null
+      active=false
+      flags=3
+      rating type=0
+      controllers: 0
+      state=null
+      audioAttrs=AudioAttributes: usage=USAGE_MEDIA content=CONTENT_TYPE_UNKNOWN flags=0x800(FLAG_MUTE_HAPTIC)  tags= bundle=null
+      volumeType=LOCAL, controlType=ABSOLUTE, max=0, current=0, volumeControlId=null
+      metadata: null
+      queueTitle=null, size=0
+isAppCastingOn:false
+isMultiSoundOn:false
+Events log: MediaSession events
+06-12 23:18:43:988 registerRemoteVolumeController uid : 10052, pid : 4747, rvc : android.media.IRemoteSessionCallback$Stub$Proxy@f9c7962
+06-12 23:20:15:133 VolKeyEvt, pkg=com.android.systemui,opPkg=com.android.systemui,pid=4747,uid=10052,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
+06-12 23:20:15:136 VolKeyEvt, pkg=com.android.systemui,opPkg=com.android.systemui,pid=4747,uid=10052,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_UP,stream=-2147483648,musicOnly=false
+06-12 23:20:15:513 VolKeyEvt, pkg=com.android.systemui,opPkg=com.android.systemui,pid=4747,uid=10052,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
+06-12 23:20:15:516 VolKeyEvt, pkg=com.android.systemui,opPkg=com.android.systemui,pid=4747,uid=10052,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_UP,stream=-2147483648,musicOnly=false
+06-12 23:46:29:209 VolKeyEvt, pkg=com.duolingo,opPkg=com.duolingo,pid=20679,uid=10354,asSystem=true,code=KEYCODE_VOLUME_UP,act:ACTION_DOWN,stream=3,musicOnly=false
+06-12 23:46:29:428 VolKeyEvt, pkg=com.duolingo,opPkg=com.duolingo,pid=20679,uid=10354,asSystem=true,code=KEYCODE_VOLUME_UP,act:ACTION_UP,stream=3,musicOnly=false
+06-12 23:46:29:792 VolKeyEvt, pkg=com.duolingo,opPkg=com.duolingo,pid=20679,uid=10354,asSystem=true,code=KEYCODE_VOLUME_UP,act:ACTION_DOWN,stream=3,musicOnly=false
+06-12 23:46:29:796 VolKeyEvt, pkg=com.duolingo,opPkg=com.duolingo,pid=20679,uid=10354,asSystem=true,code=KEYCODE_VOLUME_UP,act:ACTION_UP,stream=3,musicOnly=false
+06-13 06:12:36:153 VolKeyEvt, pkg=com.android.settings,opPkg=com.android.settings,pid=4977,uid=1000,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
+06-13 06:12:36:160 VolKeyEvt, pkg=com.android.settings,opPkg=com.android.settings,pid=4977,uid=1000,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_UP,stream=-2147483648,musicOnly=false
+06-13 06:12:36:467 VolKeyEvt, pkg=com.android.settings,opPkg=com.android.settings,pid=4977,uid=1000,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
+06-13 06:12:36:469 VolKeyEvt, pkg=com.android.settings,opPkg=com.android.settings,pid=4977,uid=1000,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_UP,stream=-2147483648,musicOnly=false
+06-13 06:12:36:735 VolKeyEvt, pkg=com.android.settings,opPkg=com.android.settings,pid=4977,uid=1000,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_DOWN,stream=-2147483648,musicOnly=false
+06-13 06:12:36:739 VolKeyEvt, pkg=com.android.settings,opPkg=com.android.settings,pid=4977,uid=1000,asSystem=true,code=KEYCODE_VOLUME_DOWN,act:ACTION_UP,stream=-2147483648,musicOnly=false
+
+isSupportMediaDataPlatform:true
+Events log: MediaSessionDataPlatform logger
+06-12 23:40:04:262 getMediaType for uid: 10383 Audio
+06-12 23:40:06:265 getMediaType for uid: 10383 Video
+06-12 23:46:14:068 Succeeded: insert packageName:com.piggietv.android.debug, title:SpongeBob and Patrick's Timeline Twist-Up, artist:null, album:null, genre:null, mediaType:Video, castType:local, startTime:1781325604262, endTime:1781325974046, playingTime:369784, duration: 2698321
+06-13 06:12:07:397 getMediaType for uid: 10383 Audio
+06-13 06:12:07:636 getMediaType for uid: 10383 Audio
+06-13 06:12:09:398 getMediaType for uid: 10383 Audio
+06-13 06:12:36:766 Do not send data because playing time too short 29369ms
+
+Audio playback (lastly played comes first)
+  uid=10383 packages=com.piggietv.android.debug 
+Media session config:
+  media_button_receiver_fgs_allowlist_duration_ms: [cur: 10000, def: 10000]
+  media_session_calback_fgs_allowlist_duration_ms: [cur: 10000, def: 10000]
+  media_session_callback_fgs_while_in_use_temp_allow_duration_ms: [cur: 10000, def: 10000]
+  media_session_temp_user_engaged_duration_ms: [cur: 600000, def: 600000]
+
+== PASS/FAIL Summary ==
+[PASS] package installed - com.piggietv.android.debug
+[PASS] PtvMusicService declared
+[PASS] MediaLibraryService action resolves
+[PASS] MediaSessionService action resolves
+[PASS] MediaBrowserService action resolves
+[PASS] automotive metadata present
+[PASS] foreground media playback type
+[PASS] exported service
+[PASS] media session visible
+[WARN] Android Auto unknown sources probe - Android does not expose a stable adb setting on this device; enable Android Auto developer mode + Unknown sources manually for debug APKs.

@@ -14,7 +14,7 @@ object Constants {
     const val PIGGIETV_DEFAULT_SERVER_URL = "https://piggietv.com"
     const val PIGGIETV_TESTING_SERVER_URL = "https://testing.piggietv.com"
     const val PIGGIETV_REQUESTS_URL = "https://request.piggietv.com"
-    const val PIGGIETV_LIBRARY_DEFAULT_URL = "https://books.piggietv.com"
+    const val PIGGIETV_LIBRARY_DEFAULT_URL = ""
     const val PIGGIETV_SIGNUP_WEB_PATH = "/web/index.html#/signup"
     const val PIGGIETV_SIGNUP_CREATE_USER_PATH = "/Ptv/v1/signup/create-user"
     const val PIGGIETV_SIGNUP_URL = "$PIGGIETV_DEFAULT_SERVER_URL$PIGGIETV_SIGNUP_WEB_PATH"
@@ -40,6 +40,7 @@ object Constants {
     const val PREF_IGNORE_BLUETOOTH_PERMISSION = "pref_ignore_bluetooth_permission"
     const val PREF_DOWNLOAD_METHOD = "pref_download_method"
     const val PREF_MUSIC_NOTIFICATION_ALWAYS_DISMISSIBLE = "pref_music_notification_always_dismissible"
+    const val PREF_ANDROID_AUTO_MUSIC_STATUS = "pref_android_auto_music_status"
     const val PREF_VIDEO_PLAYER_TYPE = "pref_video_player_type"
     const val PREF_EXOPLAYER_START_LANDSCAPE_VIDEO_IN_LANDSCAPE = "pref_exoplayer_start_landscape_video_in_landscape"
     const val PREF_EXOPLAYER_ALLOW_SWIPE_GESTURES = "pref_exoplayer_allow_swipe_gestures"
@@ -156,6 +157,8 @@ object Constants {
     const val EXTRA_LIBRARY_READER_TITLE = "org.jellyfin.mobile.LIBRARY_READER_TITLE"
     const val EXTRA_LIBRARY_READER_FILENAME = "org.jellyfin.mobile.LIBRARY_READER_FILENAME"
     const val EXTRA_LIBRARY_READER_MIME_TYPE = "org.jellyfin.mobile.LIBRARY_READER_MIME_TYPE"
+    const val EXTRA_LIBRARY_READER_KEY = "org.jellyfin.mobile.LIBRARY_READER_KEY"
+    const val EXTRA_LIBRARY_READER_ITEM_ID = "org.jellyfin.mobile.LIBRARY_READER_ITEM_ID"
 
     // External player result actions
     const val MPV_PLAYER_RESULT_ACTION = "is.xyz.mpv.MPVActivity.result"

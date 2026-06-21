@@ -1,3 +1,14 @@
+@file:Suppress(
+    "ArgumentListWrapping",
+    "BinaryExpressionWrapping",
+    "ClassSignature",
+    "FunctionExpressionBody",
+    "FunctionLiteral",
+    "FunctionSignature",
+    "MaximumLineLength",
+    "ParameterListWrapping",
+)
+
 package org.jellyfin.mobile.feature.library
 
 import androidx.lifecycle.ViewModel
@@ -6,7 +17,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 
-class LibraryViewModel(private val repository: LibraryRepository) : ViewModel() {
+class LibraryViewModel(
+    private val repository: LibraryRepository,
+    private val readerStore: LibraryReaderStore,
+) : ViewModel() {
     private val _uiState = MutableStateFlow<LibraryUiState>(LibraryUiState.Loading)
     val uiState: StateFlow<LibraryUiState> get() = _uiState
 
@@ -18,8 +32,9 @@ class LibraryViewModel(private val repository: LibraryRepository) : ViewModel() 
             runCatching {
                 repository.loadHome()
             }.onSuccess { home ->
-                _uiState.value = LibraryUiState.Content(home = home)
-                loadExtras(home)
+                val enrichedHome = home.withLocalReadingState()
+                _uiState.value = LibraryUiState.Content(home = enrichedHome)
+                loadExtras(enrichedHome)
             }.onFailure { error ->
                 _uiState.value = when (error) {
                     is LibraryLoginRequiredException -> LibraryUiState.LoginRequired
@@ -35,7 +50,7 @@ class LibraryViewModel(private val repository: LibraryRepository) : ViewModel() 
                 repository.loadHomeExtras(home)
             }.onSuccess { updatedHome ->
                 val content = _uiState.value as? LibraryUiState.Content ?: return@onSuccess
-                _uiState.value = content.copy(home = updatedHome)
+                _uiState.value = content.copy(home = updatedHome.withLocalReadingState())
             }
         }
     }
@@ -43,16 +58,22 @@ class LibraryViewModel(private val repository: LibraryRepository) : ViewModel() 
     fun selectBook(book: LibraryBook) {
         viewModelScope.launch {
             val content = _uiState.value as? LibraryUiState.Content ?: return@launch
-            _uiState.value = content.copy(selectedBook = book, isLoadingDetail = true)
+            val localBook = book.withLocalReadingState()
+            _uiState.value = content.copy(selectedBook = localBook, isLoadingDetail = true)
             runCatching {
                 repository.loadBookDetail(book)
             }.onSuccess { detail ->
-                _uiState.value = content.copy(selectedBook = detail, isLoadingDetail = false)
+                val updatedHome = content.home.withUpdatedBook(detail.withLocalReadingState())
+                _uiState.value = content.copy(
+                    home = updatedHome,
+                    selectedBook = detail.withLocalReadingState(),
+                    isLoadingDetail = false,
+                )
             }.onFailure { error ->
                 _uiState.value = if (error is LibraryLoginRequiredException) {
                     LibraryUiState.LoginRequired
                 } else {
-                    content.copy(selectedBook = book, isLoadingDetail = false)
+                    content.copy(selectedBook = localBook, isLoadingDetail = false)
                 }
             }
         }
@@ -62,6 +83,60 @@ class LibraryViewModel(private val repository: LibraryRepository) : ViewModel() 
         val content = _uiState.value as? LibraryUiState.Content ?: return
         _uiState.value = content.copy(selectedBook = null, isLoadingDetail = false)
     }
+
+    fun clearProgress(book: LibraryBook) {
+        readerStore.clearResume(book.readerKey)
+        refreshLocalReadingState()
+    }
+
+    fun toggleFavorite(book: LibraryBook) {
+        readerStore.setFavorite(book.readerKey, !book.isFavorite)
+        refreshLocalReadingState()
+    }
+
+    private fun refreshLocalReadingState() {
+        val content = _uiState.value as? LibraryUiState.Content ?: return
+        val updatedHome = content.home.withLocalReadingState()
+        _uiState.value = content.copy(
+            home = updatedHome,
+            selectedBook = content.selectedBook?.let { selected ->
+                updatedHome.allBooks.firstOrNull { book -> book.readerKey == selected.readerKey }
+                    ?: selected.withLocalReadingState()
+            },
+        )
+    }
+
+    private fun LibraryHome.withUpdatedBook(updatedBook: LibraryBook): LibraryHome =
+        copy(
+            allBooks = allBooks.map { book -> if (book.readerKey == updatedBook.readerKey) updatedBook else book },
+            recentBooks = recentBooks.map { book -> if (book.readerKey == updatedBook.readerKey) updatedBook else book },
+        ).withLocalReadingState()
+
+    private fun LibraryHome.withLocalReadingState(): LibraryHome {
+        val enrichedBooks = allBooks.map { book -> book.withLocalReadingState() }
+        val byKey = enrichedBooks.associateBy(LibraryBook::readerKey)
+        val enrichedRecent = recentBooks.map { book ->
+            byKey[book.readerKey] ?: book.withLocalReadingState()
+        }
+
+        return copy(
+            allBooks = enrichedBooks,
+            recentBooks = enrichedRecent,
+            continueReading = enrichedBooks
+                .filter { book -> book.progress != null }
+                .sortedByDescending { book -> book.progress?.updatedAtMs ?: 0L },
+            favorites = enrichedBooks.filter(LibraryBook::isFavorite),
+            comics = enrichedBooks.filter { book -> book.readingKind == LibraryReadingKind.COMIC },
+            manga = enrichedBooks.filter { book -> book.readingKind == LibraryReadingKind.MANGA },
+            comicsManga = enrichedBooks.filter { book -> book.readingKind in setOf(LibraryReadingKind.COMIC, LibraryReadingKind.MANGA) },
+        )
+    }
+
+    private fun LibraryBook.withLocalReadingState(): LibraryBook =
+        withReadingState(
+            resumeState = readerStore.loadResume(readerKey),
+            favorite = isFavorite || readerStore.isFavorite(readerKey),
+        )
 }
 
 sealed interface LibraryUiState {
