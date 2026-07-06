@@ -5,6 +5,7 @@ import org.jellyfin.sdk.model.UUID
 enum class MusicSongAction {
     PLAY,
     START_MIX,
+    START_ARTIST_RADIO,
     PLAY_NEXT,
     ADD_TO_QUEUE,
     ADD_TO_PLAYLIST,
@@ -34,6 +35,14 @@ sealed interface MusicSongActionResult {
 
     data class MixStarted(val seed: MusicItem, val queue: List<MusicItem>, val source: String) : MusicSongActionResult {
         override val message: String = "Starting mix from ${seed.title}."
+    }
+
+    data class ArtistRadioStarted(
+        val seed: MusicItem,
+        val queue: List<MusicItem>,
+        val source: String,
+    ) : MusicSongActionResult {
+        override val message: String = "Starting artist radio from ${seed.artist?.takeIf(String::isNotBlank) ?: seed.title}."
     }
 
     data class QueueUpdated(override val message: String) : MusicSongActionResult
@@ -80,6 +89,26 @@ class MusicSongActionHandler(
                 val playbackQueue = mixQueue.playableQueueFor(item)
                 playbackController.play(item = item, queue = playbackQueue)
                 MusicSongActionResult.MixStarted(seed = item, queue = playbackQueue, source = request.source)
+            }
+
+            MusicSongAction.START_ARTIST_RADIO -> {
+                val artistQueue = repository.loadArtistRadioQueue(seed = item, limit = MIX_TRACK_LIMIT)
+                val playbackQueue = artistQueue.playableQueueFor(item)
+                val itemToPlay = when {
+                    item.isPlayable && playbackQueue.any { queuedItem -> queuedItem.id == item.id } -> item
+                    else -> playbackQueue.firstOrNull()
+                }
+
+                if (itemToPlay == null) {
+                    MusicSongActionResult.Unavailable("No artist radio songs were found for ${item.title}.")
+                } else {
+                    playbackController.play(item = itemToPlay, queue = playbackQueue)
+                    MusicSongActionResult.ArtistRadioStarted(
+                        seed = item,
+                        queue = playbackQueue,
+                        source = request.source,
+                    )
+                }
             }
 
             MusicSongAction.PLAY_NEXT -> {

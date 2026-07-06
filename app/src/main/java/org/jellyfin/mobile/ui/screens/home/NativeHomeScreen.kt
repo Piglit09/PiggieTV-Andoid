@@ -30,8 +30,10 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -59,11 +61,13 @@ import androidx.compose.material.icons.automirrored.outlined.Logout
 import androidx.compose.material.icons.outlined.ArrowDropDown
 import androidx.compose.material.icons.outlined.Casino
 import androidx.compose.material.icons.outlined.CloudDownload
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Dashboard
 import androidx.compose.material.icons.outlined.Flag
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.PersonAdd
 import androidx.compose.material.icons.outlined.PlayArrow
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -263,6 +267,7 @@ fun NativeHomeScreen(
                             },
                             onReportItem = { item -> reportItem = item },
                             onLibraryClick = viewModel::openLibrary,
+                            onMovieSearch = viewModel::searchMovies,
                         )
                     } else {
                         LibraryContent(
@@ -277,6 +282,7 @@ fun NativeHomeScreen(
                                 onPlay(item.toPlayOptions(siblings))
                             },
                             onReportItem = { item -> reportItem = item },
+                            onLoadMoreLibraryItems = viewModel::loadMoreLibraryItems,
                         )
                     }
                 }
@@ -793,6 +799,7 @@ private fun HomeContent(
     onItemPlay: (NativeMediaItem, List<NativeMediaItem>) -> Unit,
     onReportItem: (NativeMediaItem) -> Unit,
     onLibraryClick: (NativeMediaItem) -> Unit,
+    onMovieSearch: (String) -> Unit,
 ) {
     var activeTab by rememberSaveable { mutableStateOf(NativeHomeTab.HOME) }
     var childHeaderCollapsed by remember { mutableStateOf(false) }
@@ -845,6 +852,7 @@ private fun HomeContent(
                 onItemPlay = onItemPlay,
                 onReportItem = onReportItem,
                 onLibraryClick = onLibraryClick,
+                onMovieSearch = onMovieSearch,
             )
             NativeHomeTab.MUSIC -> MusicScreen(
                 viewModel = musicViewModel,
@@ -882,6 +890,7 @@ private fun HomeRows(
     onItemPlay: (NativeMediaItem, List<NativeMediaItem>) -> Unit,
     onReportItem: (NativeMediaItem) -> Unit,
     onLibraryClick: (NativeMediaItem) -> Unit,
+    onMovieSearch: (String) -> Unit,
 ) {
     LazyColumn(
         state = listState,
@@ -890,28 +899,182 @@ private fun HomeRows(
         contentPadding = PaddingValues(bottom = layout.bottomPadding),
         verticalArrangement = Arrangement.spacedBy(layout.sectionSpacing),
     ) {
-        state.home.hero?.let { hero ->
-            item {
-                HeroBanner(
+        item {
+            MovieSearchField(
+                query = state.movieSearchQuery,
+                isSearching = state.isSearchingMovies,
+                onQueryChange = onMovieSearch,
+                modifier = Modifier.padding(horizontal = layout.edgePadding),
+            )
+        }
+
+        if (state.movieSearchQuery.isNotBlank()) {
+            when {
+                state.isSearchingMovies -> {
+                    item {
+                        MovieSearchResultsHeader(
+                            resultCount = state.movieSearchResults.size,
+                            error = state.movieSearchError,
+                            modifier = Modifier.padding(horizontal = layout.edgePadding),
+                        )
+                    }
+                    item {
+                        MovieInlineLoading(modifier = Modifier.padding(horizontal = layout.edgePadding))
+                    }
+                }
+
+                state.movieSearchResults.isEmpty() -> {
+                    item {
+                        MovieSearchResultsHeader(
+                            resultCount = state.movieSearchResults.size,
+                            error = state.movieSearchError,
+                            modifier = Modifier.padding(horizontal = layout.edgePadding),
+                        )
+                    }
+                    item {
+                        MovieEmptySearch(
+                            message = "No movies or shows matched your search.",
+                            modifier = Modifier.padding(horizontal = layout.edgePadding),
+                        )
+                    }
+                }
+
+                else -> item {
+                    MediaSection(
+                        layout = layout,
+                        section = NativeMediaSection(
+                            id = "movie-search-results",
+                            title = "Search Results",
+                            rowKicker = "${state.movieSearchResults.size} matches",
+                            groupKicker = null,
+                            groupTitle = null,
+                            showGroupHeader = false,
+                            presentation = PtvRowPresentation.STANDARD,
+                            shape = PtvRowShape.PORTRAIT,
+                            opensLibraries = false,
+                            items = state.movieSearchResults,
+                        ),
+                        onReportItem = onReportItem,
+                        onItemPlay = { item -> onItemPlay(item, state.movieSearchResults) },
+                        onItemClick = onItemClick,
+                    )
+                }
+            }
+        } else {
+            state.home.hero?.let { hero ->
+                item {
+                    HeroBanner(
+                        layout = layout,
+                        item = hero,
+                        onClick = { onItemClick(hero) },
+                        onPlay = { onItemPlay(hero, emptyList()) },
+                        onReport = { onReportItem(hero) },
+                    )
+                }
+            }
+            items(state.home.sections) { section ->
+                MediaSection(
                     layout = layout,
-                    item = hero,
-                    onClick = { onItemClick(hero) },
-                    onPlay = { onItemPlay(hero, emptyList()) },
-                    onReport = { onReportItem(hero) },
+                    section = section,
+                    onReportItem = onReportItem,
+                    onItemPlay = { item -> onItemPlay(item, section.items) },
+                    onItemClick = { item ->
+                        if (section.opensLibraries) onLibraryClick(item) else onItemClick(item)
+                    },
                 )
             }
         }
-        items(state.home.sections) { section ->
-            MediaSection(
-                layout = layout,
-                section = section,
-                onReportItem = onReportItem,
-                onItemPlay = { item -> onItemPlay(item, section.items) },
-                onItemClick = { item ->
-                    if (section.opensLibraries) onLibraryClick(item) else onItemClick(item)
-                },
-            )
-        }
+    }
+}
+
+@Composable
+private fun MovieSearchField(query: String, isSearching: Boolean, onQueryChange: (String) -> Unit, modifier: Modifier = Modifier) {
+    OutlinedTextField(
+        value = query,
+        onValueChange = onQueryChange,
+        modifier = modifier.fillMaxWidth(),
+        label = { Text(text = "Search movies and shows") },
+        singleLine = true,
+        leadingIcon = {
+            Icon(Icons.Outlined.Search, contentDescription = null, tint = PiggieTvColors.Focus)
+        },
+        trailingIcon = {
+            when {
+                isSearching -> CircularProgressIndicator(
+                    modifier = Modifier.size(18.dp),
+                    color = PiggieTvColors.Focus,
+                    strokeWidth = 2.dp,
+                )
+
+                query.isNotBlank() -> IconButton(onClick = { onQueryChange("") }) {
+                    Icon(Icons.Outlined.Close, contentDescription = "Clear search", tint = PiggieTvColors.Focus)
+                }
+            }
+        },
+        shape = MaterialTheme.shapes.medium,
+        colors = TextFieldDefaults.outlinedTextFieldColors(
+            textColor = PiggieTvColors.TextPrimary,
+            cursorColor = PiggieTvColors.Focus,
+            focusedBorderColor = PiggieTvColors.Focus,
+            unfocusedBorderColor = PiggieTvColors.Border,
+            focusedLabelColor = PiggieTvColors.Focus,
+            unfocusedLabelColor = PiggieTvColors.TextSecondary,
+            backgroundColor = PiggieTvColors.Night.copy(alpha = 0.48f),
+        ),
+    )
+}
+
+@Composable
+private fun MovieSearchResultsHeader(resultCount: Int, error: String?, modifier: Modifier = Modifier) {
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(
+            text = "Search Results",
+            color = PiggieTvColors.TextPrimary,
+            style = MaterialTheme.typography.h6,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            text = error ?: "$resultCount matches",
+            color = if (error == null) PiggieTvColors.TextSecondary else PiggieTvColors.Accent,
+            style = MaterialTheme.typography.caption,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun MovieInlineLoading(modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        CircularProgressIndicator(
+            modifier = Modifier.size(20.dp),
+            color = PiggieTvColors.Focus,
+            strokeWidth = 2.dp,
+        )
+        Text(text = "Searching...", color = PiggieTvColors.TextSecondary, style = MaterialTheme.typography.body2)
+    }
+}
+
+@Composable
+private fun MovieEmptySearch(message: String, modifier: Modifier = Modifier) {
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        color = PiggieTvColors.Night.copy(alpha = 0.48f),
+        border = BorderStroke(1.dp, PiggieTvColors.Border),
+        shape = RoundedCornerShape(8.dp),
+    ) {
+        Text(
+            text = message,
+            color = PiggieTvColors.TextSecondary,
+            style = MaterialTheme.typography.body2,
+            modifier = Modifier.padding(14.dp),
+        )
     }
 }
 
@@ -1033,8 +1196,78 @@ private fun LibraryContent(
     onItemClick: (NativeMediaItem) -> Unit,
     onItemPlay: (NativeMediaItem, List<NativeMediaItem>) -> Unit,
     onReportItem: (NativeMediaItem) -> Unit,
+    onLoadMoreLibraryItems: () -> Unit,
 ) {
     val library = requireNotNull(state.selectedLibrary)
+    val gridState = rememberLazyGridState()
+    val coroutineScope = rememberCoroutineScope()
+    var pendingAlphaJump by remember(library.query) { mutableStateOf<String?>(null) }
+    val alphaIndexByLabel = remember(library.items) {
+        library.items.alphaIndexByLabel()
+    }
+    val activeAlphaLabel by remember(library.items) {
+        derivedStateOf {
+            library.items
+                .getOrNull(gridState.firstVisibleItemIndex)
+                ?.alphaJumpLabel()
+                .orEmpty()
+        }
+    }
+    val alphaRailEnabledLabels = remember(alphaIndexByLabel, library.items, library.hasMore) {
+        val loadedLabels = alphaIndexByLabel.keys
+
+        LIBRARY_ALPHA_LABELS.filter { label ->
+            label in loadedLabels || (library.hasMore && !library.items.hasPassedAlphaLabel(label))
+        }.toSet()
+    }
+    val shouldLoadMore by remember(library.items.size, library.hasMore, library.error, state.isLoadingLibrary) {
+        derivedStateOf {
+            val lastVisibleIndex = gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+
+            library.hasMore &&
+                library.error == null &&
+                !state.isLoadingLibrary &&
+                library.items.isNotEmpty() &&
+                lastVisibleIndex >= (library.items.lastIndex - LIBRARY_LOAD_MORE_THRESHOLD).coerceAtLeast(0)
+        }
+    }
+
+    LaunchedEffect(shouldLoadMore, library.items.size) {
+        if (shouldLoadMore) onLoadMoreLibraryItems()
+    }
+
+    LaunchedEffect(pendingAlphaJump, library.items.size, library.hasMore, state.isLoadingLibrary, library.error) {
+        val targetLabel = pendingAlphaJump ?: return@LaunchedEffect
+        val targetIndex = alphaIndexByLabel[targetLabel]
+
+        when {
+            targetIndex != null -> {
+                gridState.animateScrollToItem(targetIndex)
+                pendingAlphaJump = null
+            }
+
+            library.error != null -> pendingAlphaJump = null
+            state.isLoadingLibrary -> Unit
+            library.hasMore && !library.items.hasPassedAlphaLabel(targetLabel) -> onLoadMoreLibraryItems()
+            else -> pendingAlphaJump = null
+        }
+    }
+
+    fun jumpToAlphaLabel(label: String) {
+        alphaIndexByLabel[label]?.let { index ->
+            pendingAlphaJump = null
+            coroutineScope.launch {
+                gridState.animateScrollToItem(index)
+            }
+            return
+        }
+
+        if (library.hasMore && !library.items.hasPassedAlphaLabel(label) && !state.isLoadingLibrary) {
+            pendingAlphaJump = label
+            onLoadMoreLibraryItems()
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1080,7 +1313,7 @@ private fun LibraryContent(
             Text(
                 text = it,
                 color = PiggieTvColors.Accent,
-                modifier = Modifier.padding(horizontal = 18.dp, vertical = 8.dp),
+                modifier = Modifier.padding(horizontal = layout.edgePadding, vertical = 8.dp),
             )
         }
         if (library.items.isEmpty() && library.error == null) {
@@ -1088,23 +1321,155 @@ private fun LibraryContent(
                 Text(text = "Nothing here yet", color = PiggieTvColors.TextSecondary)
             }
         } else {
-            LazyVerticalGrid(
-                columns = GridCells.Adaptive(layout.gridMinWidth),
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(horizontal = layout.edgePadding, vertical = 10.dp),
-                verticalArrangement = Arrangement.spacedBy(layout.gridSpacing),
-                horizontalArrangement = Arrangement.spacedBy(layout.gridSpacing),
-            ) {
-                items(library.items, key = { item -> item.id.toString() }) { item ->
-                    PosterCard(
-                        layout = layout,
-                        item = item,
-                        onClick = { onItemClick(item) },
-                        onPlay = { onItemPlay(item, library.items) },
-                        onReport = { onReportItem(item) },
-                        compact = false,
-                    )
+            Box(modifier = Modifier.fillMaxSize()) {
+                LazyVerticalGrid(
+                    columns = GridCells.Adaptive(layout.gridMinWidth),
+                    state = gridState,
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(
+                        start = layout.edgePadding,
+                        top = 10.dp,
+                        end = layout.edgePadding + LIBRARY_ALPHA_RAIL_SPACE,
+                        bottom = 10.dp,
+                    ),
+                    verticalArrangement = Arrangement.spacedBy(layout.gridSpacing),
+                    horizontalArrangement = Arrangement.spacedBy(layout.gridSpacing),
+                ) {
+                    items(library.items, key = { item -> item.id.toString() }) { item ->
+                        PosterCard(
+                            layout = layout,
+                            item = item,
+                            onClick = { onItemClick(item) },
+                            onPlay = { onItemPlay(item, library.items) },
+                            onReport = { onReportItem(item) },
+                            compact = false,
+                        )
+                    }
+                    if (state.isLoadingLibrary && library.items.isNotEmpty()) {
+                        item(span = { GridItemSpan(maxLineSpan) }) {
+                            LibraryPageFooter(
+                                message = "Loading more...",
+                                isLoading = true,
+                            )
+                        }
+                    } else if (library.hasMore) {
+                        item(span = { GridItemSpan(maxLineSpan) }) {
+                            LibraryPageFooter(
+                                message = "${library.items.size} of ${library.totalCount} loaded",
+                                isLoading = false,
+                                actionLabel = if (library.error == null) "Load more" else "Retry",
+                                onAction = onLoadMoreLibraryItems,
+                            )
+                        }
+                    }
                 }
+
+                AlphabetJumpRail(
+                    enabledLabels = alphaRailEnabledLabels,
+                    selectedLabel = pendingAlphaJump ?: activeAlphaLabel,
+                    pendingLabel = pendingAlphaJump,
+                    onSelectLabel = ::jumpToAlphaLabel,
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .padding(end = 4.dp, top = 8.dp, bottom = 8.dp),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun AlphabetJumpRail(
+    enabledLabels: Set<String>,
+    selectedLabel: String,
+    pendingLabel: String?,
+    onSelectLabel: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    BoxWithConstraints(
+        modifier = modifier
+            .width(LIBRARY_ALPHA_RAIL_WIDTH)
+            .fillMaxHeight(),
+    ) {
+        val itemHeight = (maxHeight / LIBRARY_ALPHA_LABELS.size.toFloat()).coerceIn(14.dp, 24.dp)
+        val textStyle = if (itemHeight < 18.dp) MaterialTheme.typography.overline else MaterialTheme.typography.caption
+
+        Surface(
+            modifier = Modifier.fillMaxSize(),
+            color = PiggieTvColors.Night.copy(alpha = 0.58f),
+            border = BorderStroke(1.dp, PiggieTvColors.Border),
+            shape = RoundedCornerShape(8.dp),
+        ) {
+            Column(
+                modifier = Modifier.padding(vertical = 4.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                LIBRARY_ALPHA_LABELS.forEach { label ->
+                    val enabled = label in enabledLabels
+                    val selected = label == selectedLabel
+                    val pending = label == pendingLabel
+
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(itemHeight)
+                            .padding(horizontal = 3.dp, vertical = 1.dp)
+                            .clip(RoundedCornerShape(5.dp))
+                            .background(
+                                when {
+                                    pending -> PiggieTvColors.Accent.copy(alpha = 0.34f)
+                                    selected -> PiggieTvColors.Focus.copy(alpha = 0.28f)
+                                    else -> Color.Transparent
+                                },
+                            )
+                            .clickable(enabled = enabled) { onSelectLabel(label) },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = label,
+                            color = when {
+                                pending -> PiggieTvColors.Accent
+                                enabled -> PiggieTvColors.FocusSoft
+                                else -> PiggieTvColors.TextSecondary.copy(alpha = 0.42f)
+                            },
+                            style = textStyle,
+                            fontWeight = if (selected || pending) FontWeight.ExtraBold else FontWeight.Bold,
+                            maxLines = 1,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LibraryPageFooter(
+    message: String,
+    isLoading: Boolean,
+    actionLabel: String? = null,
+    onAction: (() -> Unit)? = null,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 14.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (isLoading) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(20.dp),
+                color = PiggieTvColors.Focus,
+                strokeWidth = 2.dp,
+            )
+            Spacer(modifier = Modifier.width(10.dp))
+        }
+        Text(text = message, color = PiggieTvColors.TextSecondary, style = MaterialTheme.typography.body2)
+        if (actionLabel != null && onAction != null) {
+            Spacer(modifier = Modifier.width(10.dp))
+            TextButton(onClick = onAction) {
+                Text(text = actionLabel, color = PiggieTvColors.FocusSoft)
             }
         }
     }
@@ -2007,10 +2372,39 @@ private enum class SignupMessageTone {
     ERROR,
 }
 
+private const val LIBRARY_LOAD_MORE_THRESHOLD = 12
+private val LIBRARY_ALPHA_LABELS = listOf("#") + ('A'..'Z').map(Char::toString)
+private val LIBRARY_ALPHA_RAIL_WIDTH = 30.dp
+private val LIBRARY_ALPHA_RAIL_SPACE = 38.dp
+
 private data class NativeMediaDetailsSelection(
     val item: NativeMediaItem,
     val siblings: List<NativeMediaItem>,
 )
+
+private fun List<NativeMediaItem>.alphaIndexByLabel(): Map<String, Int> = buildMap {
+    forEachIndexed { index, item ->
+        val label = item.alphaJumpLabel()
+        if (label !in this) put(label, index)
+    }
+}
+
+private fun List<NativeMediaItem>.hasPassedAlphaLabel(label: String): Boolean {
+    val lastLabel = lastOrNull()?.alphaJumpLabel() ?: return false
+
+    return lastLabel.alphaLabelOrder() > label.alphaLabelOrder()
+}
+
+private fun NativeMediaItem.alphaJumpLabel(): String {
+    val first = title.trimStart().firstOrNull() ?: return "#"
+
+    return first.uppercaseChar().takeIf { char -> char in 'A'..'Z' }?.toString() ?: "#"
+}
+
+private fun String.alphaLabelOrder(): Int = when (this) {
+    "#" -> 0
+    else -> (firstOrNull()?.uppercaseChar()?.minus('A') ?: -1) + 1
+}
 
 private fun validateNativeSignup(email: String, username: String, password: String, confirmPassword: String): String? = when {
     email.isBlank() -> "Email is required."

@@ -8,6 +8,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
@@ -57,7 +58,9 @@ class NativeHomeViewModel(
     private var currentUserId: UUID? = null
     private var currentUserName: String = ""
     private var homeRowsJob: Job? = null
+    private var movieSearchJob: Job? = null
     private var homeLoadVersion = 0
+    private var movieSearchVersion = 0
     private val genreIdsByUser = mutableMapOf<UUID, Map<String, UUID>>()
     private val studioIdsByUser = mutableMapOf<UUID, Map<String, UUID>>()
 
@@ -116,27 +119,23 @@ class NativeHomeViewModel(
         viewModelScope.launch {
             val content = uiState.value as? NativeHomeUiState.Content ?: return@launch
             _uiState.value = content.copy(isLoadingLibrary = true)
+            val query = NativeLibraryQuery(
+                parentId = library.id,
+                recursive = library.collectionType != CollectionType.TVSHOWS,
+                includeItemTypes = library.collectionType.contentTypes(),
+                sortBy = listOf(ItemSortBy.SORT_NAME),
+            )
             try {
-                val items = withContext(Dispatchers.IO) {
-                    apiClient.itemsApi.getItems(
-                        parentId = library.id,
-                        recursive = library.collectionType != CollectionType.TVSHOWS,
-                        includeItemTypes = library.collectionType.contentTypes(),
-                        sortBy = listOf(ItemSortBy.SORT_NAME),
-                        sortOrder = listOf(SortOrder.ASCENDING),
-                        fields = displayItemFields,
-                        enableUserData = true,
-                        imageTypeLimit = 1,
-                        enableImageTypes = imageTypes,
-                        limit = 120,
-                    ).content.items
-                }
+                val page = loadLibraryPage(query = query, startIndex = 0)
 
                 _uiState.value = content.copy(
                     selectedLibrary = NativeLibraryContent(
                         title = library.title,
                         subtitle = library.subtitle,
-                        items = items.map(::toNativeMediaItem),
+                        query = query,
+                        items = page.items,
+                        totalCount = page.totalCount,
+                        hasMore = page.hasMore,
                     ),
                     isLoadingLibrary = false,
                 )
@@ -145,6 +144,7 @@ class NativeHomeViewModel(
                     selectedLibrary = NativeLibraryContent(
                         title = library.title,
                         subtitle = library.subtitle,
+                        query = query,
                         items = emptyList(),
                         error = e.friendlyMessage("Could not load this library."),
                     ),
@@ -158,14 +158,23 @@ class NativeHomeViewModel(
         viewModelScope.launch {
             val content = uiState.value as? NativeHomeUiState.Content ?: return@launch
             _uiState.value = content.copy(isLoadingLibrary = true)
+            val query = NativeLibraryQuery(
+                parentId = item.id,
+                recursive = item.type == BaseItemKind.MUSIC_ARTIST,
+                includeItemTypes = item.childContentTypes(),
+                sortBy = item.childSortBy(),
+            )
             try {
-                val items = loadFolderItems(item)
+                val page = loadLibraryPage(query = query, startIndex = 0)
 
                 _uiState.value = content.copy(
                     selectedLibrary = NativeLibraryContent(
                         title = item.title,
                         subtitle = item.subtitle,
-                        items = items,
+                        query = query,
+                        items = page.items,
+                        totalCount = page.totalCount,
+                        hasMore = page.hasMore,
                     ),
                     isLoadingLibrary = false,
                 )
@@ -174,6 +183,7 @@ class NativeHomeViewModel(
                     selectedLibrary = NativeLibraryContent(
                         title = item.title,
                         subtitle = item.subtitle,
+                        query = query,
                         items = emptyList(),
                         error = e.friendlyMessage("Could not load this folder."),
                     ),
@@ -187,19 +197,99 @@ class NativeHomeViewModel(
         val includeItemTypes = item.childContentTypes()
         if (includeItemTypes.isEmpty()) return emptyList()
 
-        return withContext(Dispatchers.IO) {
-            apiClient.itemsApi.getItems(
+        return loadLibraryPage(
+            query = NativeLibraryQuery(
                 parentId = item.id,
                 recursive = item.type == BaseItemKind.MUSIC_ARTIST,
                 includeItemTypes = includeItemTypes,
                 sortBy = item.childSortBy(),
+            ),
+            startIndex = 0,
+            limit = FOLDER_DETAIL_ITEM_LIMIT,
+        ).items
+    }
+
+    private suspend fun loadLibraryPage(
+        query: NativeLibraryQuery,
+        startIndex: Int,
+        limit: Int = LIBRARY_PAGE_SIZE,
+    ): NativeLibraryPage {
+        if (query.includeItemTypes.isEmpty()) return NativeLibraryPage(emptyList(), totalCount = 0, startIndex = startIndex)
+
+        return withContext(Dispatchers.IO) {
+            val result = apiClient.itemsApi.getItems(
+                parentId = query.parentId,
+                recursive = query.recursive,
+                includeItemTypes = query.includeItemTypes,
+                sortBy = query.sortBy,
                 sortOrder = listOf(SortOrder.ASCENDING),
                 fields = displayItemFields,
                 enableUserData = true,
                 imageTypeLimit = 1,
                 enableImageTypes = imageTypes,
-                limit = 200,
-            ).content.items.map(::toNativeMediaItem)
+                enableTotalRecordCount = true,
+                startIndex = startIndex,
+                limit = limit,
+            ).content
+            val totalCount = when {
+                result.totalRecordCount > 0 -> result.totalRecordCount
+                result.items.size >= limit -> startIndex + result.items.size + 1
+                else -> startIndex + result.items.size
+            }
+
+            NativeLibraryPage(
+                items = result.items.map(::toNativeMediaItem),
+                totalCount = totalCount,
+                startIndex = result.startIndex,
+            )
+        }
+    }
+
+    fun loadMoreLibraryItems() {
+        val content = _uiState.value as? NativeHomeUiState.Content ?: return
+        val library = content.selectedLibrary ?: return
+        if (content.isLoadingLibrary || !library.hasMore || library.query.includeItemTypes.isEmpty()) return
+
+        viewModelScope.launch {
+            _uiState.value = content.copy(isLoadingLibrary = true)
+            runCatching {
+                loadLibraryPage(query = library.query, startIndex = library.items.size)
+            }.onSuccess { page ->
+                _uiState.update { state ->
+                    when (state) {
+                        is NativeHomeUiState.Content -> {
+                            val currentLibrary = state.selectedLibrary ?: return@update state
+                            if (currentLibrary.query != library.query) return@update state
+
+                            val updatedItems = (currentLibrary.items + page.items).distinctBy(NativeMediaItem::id)
+                            state.copy(
+                                selectedLibrary = currentLibrary.copy(
+                                    items = updatedItems,
+                                    totalCount = page.totalCount,
+                                    hasMore = page.hasMore && page.items.isNotEmpty(),
+                                    error = null,
+                                ),
+                                isLoadingLibrary = false,
+                            )
+                        }
+
+                        else -> state
+                    }
+                }
+            }.onFailure { error ->
+                _uiState.update { state ->
+                    when (state) {
+                        is NativeHomeUiState.Content -> state.copy(
+                            selectedLibrary = state.selectedLibrary?.copy(
+                                error = error.friendlyMessage("Could not load more items."),
+                            ),
+                            isLoadingLibrary = false,
+                        )
+
+                        else -> state
+                    }
+                }
+            }
         }
     }
 
@@ -212,10 +302,75 @@ class NativeHomeViewModel(
         }
     }
 
+    fun searchMovies(query: String) {
+        val content = _uiState.value as? NativeHomeUiState.Content ?: return
+        val trimmedQuery = query.trim()
+        val version = ++movieSearchVersion
+
+        movieSearchJob?.cancel()
+        _uiState.value = content.copy(
+            movieSearchQuery = query,
+            movieSearchResults = if (trimmedQuery.isBlank()) emptyList() else content.movieSearchResults,
+            isSearchingMovies = trimmedQuery.isNotBlank(),
+            movieSearchError = null,
+        )
+
+        if (trimmedQuery.isBlank()) return
+
+        movieSearchJob = viewModelScope.launch {
+            delay(MOVIE_SEARCH_DEBOUNCE_MS)
+
+            runCatching {
+                val userId = currentUserId ?: withContext(Dispatchers.IO) {
+                    apiClient.userApi.getCurrentUser().content.id
+                }.also { id -> currentUserId = id }
+
+                withContext(Dispatchers.IO) {
+                    getPtvItems(
+                        userId = userId,
+                        searchTerm = trimmedQuery,
+                        includeItemTypes = movieSearchTypes,
+                        sortBy = listOf(ItemSortBy.SORT_NAME),
+                        sortOrder = listOf(SortOrder.ASCENDING),
+                        fields = displayItemFields,
+                        limit = MOVIE_SEARCH_LIMIT,
+                    ).map(::toNativeMediaItem)
+                }
+            }.onSuccess { results ->
+                if (version != movieSearchVersion) return@onSuccess
+                _uiState.update { state ->
+                    when (state) {
+                        is NativeHomeUiState.Content -> state.copy(
+                            movieSearchResults = results,
+                            isSearchingMovies = false,
+                        )
+
+                        else -> state
+                    }
+                }
+            }.onFailure { error ->
+                if (version != movieSearchVersion) return@onFailure
+                _uiState.update { state ->
+                    when (state) {
+                        is NativeHomeUiState.Content -> state.copy(
+                            movieSearchResults = emptyList(),
+                            isSearchingMovies = false,
+                            movieSearchError = error.message ?: "Movie search failed.",
+                        )
+
+                        else -> state
+                    }
+                }
+            }
+        }
+    }
+
     fun signOut(server: ServerEntity) {
         viewModelScope.launch {
             homeRowsJob?.cancel()
+            movieSearchJob?.cancel()
             homeLoadVersion++
+            movieSearchVersion++
             _uiState.value = NativeHomeUiState.Loading
             apiClientController.logoutCurrentUser()
             currentUserId = null
@@ -309,6 +464,8 @@ class NativeHomeViewModel(
         currentUserId = user.id
         val loadVersion = ++homeLoadVersion
         homeRowsJob?.cancel()
+        movieSearchJob?.cancel()
+        movieSearchVersion++
         _uiState.value = NativeHomeUiState.Loading
         try {
             val userViews = withContext(Dispatchers.IO) {
@@ -761,7 +918,7 @@ class NativeHomeViewModel(
             else -> serialName.replaceFirstChar { char -> char.uppercase() }
         }
 
-    private fun Exception.friendlyMessage(fallback: String) = message?.takeIf(String::isNotBlank) ?: fallback
+    private fun Throwable.friendlyMessage(fallback: String) = message?.takeIf(String::isNotBlank) ?: fallback
 
     private fun ServerEntity.dashboardUrl(): String = "${hostname.trimEnd('/')}/web/index.html#!/dashboard.html"
 
@@ -770,6 +927,10 @@ class NativeHomeViewModel(
         const val PTV_ROW_FETCH_CONCURRENCY = 4
         const val PTV_SEARCH_TERM_FETCH_CONCURRENCY = 3
         const val RANDOM_PLAYABLE_CANDIDATE_LIMIT = 50
+        const val MOVIE_SEARCH_DEBOUNCE_MS = 300L
+        const val MOVIE_SEARCH_LIMIT = 60
+        const val LIBRARY_PAGE_SIZE = 120
+        const val FOLDER_DETAIL_ITEM_LIMIT = 200
 
         val imageTypes = listOf(ImageType.PRIMARY, ImageType.BACKDROP, ImageType.BANNER, ImageType.THUMB)
         val displayItemFields = listOf(
@@ -789,6 +950,7 @@ class NativeHomeViewModel(
         )
         val latestSortBy = listOf(ItemSortBy.PREMIERE_DATE, ItemSortBy.DATE_CREATED, ItemSortBy.SORT_NAME)
         val videoTypes = listOf(BaseItemKind.MOVIE, BaseItemKind.EPISODE, BaseItemKind.VIDEO)
+        val movieSearchTypes = listOf(BaseItemKind.MOVIE, BaseItemKind.SERIES, BaseItemKind.EPISODE, BaseItemKind.VIDEO)
         val playableVideoTypes = setOf(BaseItemKind.MOVIE, BaseItemKind.EPISODE, BaseItemKind.VIDEO)
         val randomPlayableTypes = listOf(BaseItemKind.MOVIE, BaseItemKind.EPISODE, BaseItemKind.VIDEO)
         val playableAudioTypes = setOf(BaseItemKind.AUDIO, BaseItemKind.AUDIO_BOOK)
@@ -819,6 +981,10 @@ sealed interface NativeHomeUiState {
         val home: NativeHomeContent,
         val selectedLibrary: NativeLibraryContent? = null,
         val isLoadingLibrary: Boolean = false,
+        val movieSearchQuery: String = "",
+        val movieSearchResults: List<NativeMediaItem> = emptyList(),
+        val isSearchingMovies: Boolean = false,
+        val movieSearchError: String? = null,
     ) : NativeHomeUiState
     data class Error(val message: String) : NativeHomeUiState
 }
@@ -832,10 +998,29 @@ data class NativeHomeContent(
     val sections: List<NativeMediaSection>,
 )
 
+data class NativeLibraryQuery(
+    val parentId: UUID,
+    val recursive: Boolean,
+    val includeItemTypes: List<BaseItemKind>,
+    val sortBy: List<ItemSortBy>,
+)
+
+data class NativeLibraryPage(
+    val items: List<NativeMediaItem>,
+    val totalCount: Int,
+    val startIndex: Int,
+) {
+    val hasMore: Boolean
+        get() = startIndex + items.size < totalCount
+}
+
 data class NativeLibraryContent(
     val title: String,
     val subtitle: String?,
+    val query: NativeLibraryQuery,
     val items: List<NativeMediaItem>,
+    val totalCount: Int = items.size,
+    val hasMore: Boolean = false,
     val error: String? = null,
 )
 

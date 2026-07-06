@@ -485,6 +485,8 @@ class MusicViewModel(
 
             is MusicSongActionResult.MixStarted -> setActionMessage(result.message)
 
+            is MusicSongActionResult.ArtistRadioStarted -> setActionMessage(result.message)
+
             is MusicSongActionResult.QueueUpdated -> setActionMessage(result.message)
 
             is MusicSongActionResult.PlaylistUpdated -> setActionMessage(result.message)
@@ -584,6 +586,7 @@ class MusicViewModel(
         -> false
 
         MusicSongAction.START_MIX,
+        MusicSongAction.START_ARTIST_RADIO,
         MusicSongAction.ADD_TO_PLAYLIST,
         MusicSongAction.GO_TO_ARTIST,
         MusicSongAction.TOGGLE_FAVORITE,

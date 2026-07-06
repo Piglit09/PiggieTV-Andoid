@@ -362,7 +362,9 @@ private tailrec fun Context.findActivity(): Activity? = when (this) {
 }
 
 private fun MusicSongAction.needsMusicNotificationPermission(): Boolean =
-    this == MusicSongAction.PLAY || this == MusicSongAction.START_MIX
+    this == MusicSongAction.PLAY ||
+        this == MusicSongAction.START_MIX ||
+        this == MusicSongAction.START_ARTIST_RADIO
 
 @Composable
 private fun MusicHomeContent(
@@ -1715,6 +1717,12 @@ private fun MusicSongActionDialog(
                     icon = { Icon(painterResource(R.drawable.ic_music_note_white_24dp), contentDescription = null) },
                     enabled = item.isPlayable,
                     onClick = { onAction(MusicSongAction.START_MIX) },
+                )
+                MusicSongActionRow(
+                    label = "Artist Radio",
+                    icon = { Icon(painterResource(R.drawable.ic_artist), contentDescription = null) },
+                    enabled = artistEnabled,
+                    onClick = { onAction(MusicSongAction.START_ARTIST_RADIO) },
                 )
                 MusicSongActionRow(
                     label = "Play Next",

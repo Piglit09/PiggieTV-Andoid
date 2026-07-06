@@ -651,22 +651,41 @@ internal class PtvMusicLibrarySessionCallback(
     ): MediaItemsWithStartPosition {
         val selectedItem = selectedMediaItem.mediaId.toCachedMusicItem()
             ?: throw UnsupportedOperationException("PTV Music Auto could not resolve the selected item.")
-        val queue = selectedItem.resolvePlaybackQueue()
+        val activePlaybackState = playbackController.state.value
+        val activeQueue = activePlaybackState.queue.filterPlayableDistinct()
+        val activeQueueContainsSelection = activeQueue.any { item -> item.id == selectedItem.id }
+        val selectedItemIsCurrent = activePlaybackState.currentItem?.id == selectedItem.id
+        val queue = when {
+            selectedItem.isPlayable && activeQueueContainsSelection -> activeQueue
+            else -> selectedItem.resolvePlaybackQueue()
+        }
         val itemToPlay = when {
             selectedItem.isPlayable -> selectedItem
             else -> queue.firstOrNull()
         } ?: throw UnsupportedOperationException("PTV Music Auto found no playable songs.")
-        val startPosition = startPositionMs.takeIf { it != C.TIME_UNSET }?.coerceAtLeast(0) ?: 0
+        val startPosition = startPositionMs.takeIf { it != C.TIME_UNSET }?.coerceAtLeast(0)
+            ?: activePlaybackState.positionMs.takeIf { selectedItemIsCurrent }?.coerceAtLeast(0)
+            ?: 0
         val playbackQueue = queue.ensureContains(itemToPlay)
         val playbackIndex = playbackQueue.indexOfFirst { item -> item.id == itemToPlay.id }.coerceAtLeast(0)
 
-        playbackController.play(
-            item = itemToPlay,
-            queue = playbackQueue,
-            startPositionMs = startPosition,
-        )
+        if (selectedItemIsCurrent && activeQueueContainsSelection && activePlaybackState.hasCurrent) {
+            rememberItems(playbackQueue)
+            Timber.i(
+                "PTV Music Auto reused active queue for current item selectedMediaId=${selectedMediaItem.mediaId} " +
+                    "queueSize=${playbackQueue.size} currentIndex=$playbackIndex position=${startPosition}ms",
+            )
+        } else {
+            playbackController.play(
+                item = itemToPlay,
+                queue = playbackQueue,
+                startPositionMs = startPosition,
+            )
+        }
         resumeStore.markLastPlaybackError(null)
-        resumeStore.markSessionCommand("play ${itemToPlay.id}")
+        resumeStore.markSessionCommand(
+            "play ${itemToPlay.id} activeQueue=$activeQueueContainsSelection current=$selectedItemIsCurrent",
+        )
 
         return MediaItemsWithStartPosition(
             playbackQueue.map { item -> item.toAutoMediaItem() },
@@ -747,7 +766,7 @@ internal class PtvMusicLibrarySessionCallback(
             }
 
         val cachedCandidates = when {
-            mediaId == PtvMusicAutoIds.AUTO_PICKS -> emptyList()
+            mediaId == PtvMusicAutoIds.AUTO_PICKS -> cachedAutoPicksCandidates()
             mix != null -> cachedMixCandidates(mix)
             else -> emptyList()
         }
@@ -766,7 +785,7 @@ internal class PtvMusicLibrarySessionCallback(
 
         val freshCandidates = withTimeoutOrNull(AUTO_GENERATED_FRESH_TIMEOUT_MS) {
             when {
-                mediaId == PtvMusicAutoIds.AUTO_PICKS -> repository.loadAutoPlaylistTracks(limit = MIX_TRACK_LIMIT)
+                mediaId == PtvMusicAutoIds.AUTO_PICKS -> loadFreshAutoPicksCandidates()
                 mix != null -> loadFreshMixCandidates(mix)
                 else -> emptyList()
             }
@@ -879,6 +898,29 @@ internal class PtvMusicLibrarySessionCallback(
         PtvMusicAutoMix.HEAVY_ROTATION -> repository.loadHeavyRotationTracks(limit = MIX_TRACK_LIMIT)
 
         PtvMusicAutoMix.LATEST -> repository.loadRecentlyAddedTracks(limit = MIX_TRACK_LIMIT)
+    }
+
+    private suspend fun loadFreshAutoPicksCandidates(): List<MusicItem> =
+        repository.loadAutoPicksQueue(
+            seed = playbackController.state.value.currentItem,
+            limit = MIX_TRACK_LIMIT,
+        )
+
+    private fun cachedAutoPicksCandidates(): List<MusicItem> {
+        val activeQueue = activeQueueCandidates()
+        val favorites = cachedBrowseCandidates(MusicBrowseKind.FAVORITES)
+        val recent = cachedBrowseCandidates(MusicBrowseKind.RECENTLY_PLAYED)
+        val recommendations = cachedBrowseCandidates(MusicBrowseKind.RECOMMENDATIONS)
+        val songs = cachedBrowseCandidates(MusicBrowseKind.SONGS)
+        val currentItem = playbackController.state.value.currentItem
+
+        return (listOfNotNull(currentItem?.takeIf(MusicItem::isPlayable)) +
+            recommendations +
+            favorites +
+            recent +
+            activeQueue +
+            songs)
+            .filterPlayableDistinct()
     }
 
     private fun cachedMixCandidates(mix: PtvMusicAutoMix): List<MusicItem> {

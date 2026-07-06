@@ -215,7 +215,7 @@ internal val PTV_MUSIC_AUTO_ROOT_ITEMS: List<PtvMusicAutoRootItem> = listOf(
     PtvMusicAutoRootItem(
         mediaId = PtvMusicAutoIds.AUTO_PICKS,
         title = "PTV Auto Picks",
-        subtitle = "Your saved PTV driving playlist",
+        subtitle = "Liked, played, and similar songs for driving",
     ),
     PtvMusicAutoRootItem(
         mediaId = PtvMusicAutoIds.MORE,
