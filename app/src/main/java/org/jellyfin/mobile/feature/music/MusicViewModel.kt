@@ -35,7 +35,13 @@ class MusicViewModel(
             _uiState.value = MusicUiState.Loading
             runCatching {
                 apiClientController.loadSavedServerUser()
-                repository.loadHome()
+                repository.loadHome { home ->
+                    _uiState.value = MusicUiState.Content(
+                        home = home,
+                        songsError = home.songsError,
+                        notInterestedItemIds = repository.notInterestedItemIds(),
+                    )
+                }
             }.onSuccess { home ->
                 Timber.i(
                     "PTV music UI rendering home albums=${home.albumsTotalCount} artists=${home.artistsTotalCount} " +
@@ -48,7 +54,9 @@ class MusicViewModel(
                     notInterestedItemIds = repository.notInterestedItemIds(),
                 )
             }.onFailure { error ->
-                _uiState.value = MusicUiState.Error(error.message ?: "Could not load PiggieTV Music.")
+                if (_uiState.value !is MusicUiState.Content) {
+                    _uiState.value = MusicUiState.Error(error.message ?: "Could not load PiggieTV Music.")
+                }
             }
         }
     }

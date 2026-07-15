@@ -14,6 +14,9 @@ The app auto-connects to PiggieTV, uses PiggieTV artwork and colors, and replace
 - Includes a Requests tab for Jellyseerr at `https://request.piggietv.com`.
 - Includes a native Library tab for Calibre-Web/Autocaliweb OPDS at `https://books.piggietv.com/opds`.
 - Includes PiggieTV native signup through the main web app route.
+- Supports the current PiggieTV email-verification and password-reset account flows.
+- Includes native Discover browsing for the current user's authenticated Jellyfin libraries, without an embedded web login.
+- Keeps native tabs free of embedded web surfaces; the Requests tab remains an explicit external-service portal.
 - Includes a Discord shortcut on the login screen.
 - Adds admin dashboard access for administrator users.
 - Adds media reporting from home/details/playback with predefined issue types and custom reports.
@@ -22,6 +25,7 @@ The app auto-connects to PiggieTV, uses PiggieTV artwork and colors, and replace
 ## Current PiggieTV Features
 
 - Native PiggieTV login screen with signup and Discord actions.
+- Native forgot-password flow using the PiggieTV plugin's emailed reset codes.
 - Fast progressive native home loading so the app becomes usable before every row finishes.
 - PiggieTV row groups for home, continue watching, latest media, genres, franchises, libraries, and music.
 - Random title button that plays a random playable movie, episode, or video.
@@ -62,6 +66,8 @@ These are configured in `app/src/main/java/org/jellyfin/mobile/utils/Constants.k
 - Library: `https://books.piggietv.com`
 - Library OPDS: `https://books.piggietv.com/opds`
 - Signup: `https://piggietv.com/web/index.html#/signup`
+- Account: `https://signup.piggietv.com/my/account`
+- Games: `https://emu.piggietv.com`
 - Discord: `https://discord.gg/FbtexGYau`
 
 ## Recent Fixes And Enhancements

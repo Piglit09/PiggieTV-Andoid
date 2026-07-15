@@ -15,4 +15,12 @@ class NativeSignupRepositoryTest {
     fun `signup verification url keeps web app signup route`() {
         signupVerificationBaseUrl("https://piggietv.com/") shouldBe Constants.PIGGIETV_SIGNUP_URL
     }
+
+    @Test
+    fun `password reset endpoints use selected server`() {
+        signupPasswordResetRequestUrl("https://testing.piggietv.com/") shouldBe
+            "${Constants.PIGGIETV_TESTING_SERVER_URL}${Constants.PIGGIETV_SIGNUP_PASSWORD_RESET_REQUEST_PATH}"
+        signupPasswordResetConfirmUrl("https://testing.piggietv.com/") shouldBe
+            "${Constants.PIGGIETV_TESTING_SERVER_URL}${Constants.PIGGIETV_SIGNUP_PASSWORD_RESET_CONFIRM_PATH}"
+    }
 }

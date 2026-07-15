@@ -60,8 +60,8 @@ import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.Logout
 import androidx.compose.material.icons.outlined.ArrowDropDown
 import androidx.compose.material.icons.outlined.Casino
-import androidx.compose.material.icons.outlined.CloudDownload
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.CloudDownload
 import androidx.compose.material.icons.outlined.Dashboard
 import androidx.compose.material.icons.outlined.Flag
 import androidx.compose.material.icons.outlined.FolderOpen
@@ -109,6 +109,7 @@ import org.jellyfin.mobile.feature.music.MusicScreen
 import org.jellyfin.mobile.feature.music.MusicViewModel
 import org.jellyfin.mobile.player.interaction.PlayOptions
 import org.jellyfin.mobile.reporting.MediaReportReason
+import org.jellyfin.mobile.signup.NativePasswordResetConfirmRequest
 import org.jellyfin.mobile.signup.NativeSignupRepository
 import org.jellyfin.mobile.signup.NativeSignupRequest
 import org.jellyfin.mobile.ui.utils.PiggieTvBackground
@@ -148,7 +149,9 @@ fun NativeHomeScreen(
         if (parent == null) {
             val closingDetails = detailsSelection
             detailsSelection = null
-            if (closingDetails?.siblings?.isEmpty() == true && (uiState as? NativeHomeUiState.Content)?.selectedLibrary != null) {
+            if (closingDetails?.siblings?.isEmpty() == true &&
+                (uiState as? NativeHomeUiState.Content)?.selectedLibrary != null
+            ) {
                 viewModel.closeLibrary()
             }
         } else {
@@ -196,14 +199,17 @@ fun NativeHomeScreen(
                     reportItem = null
                     true
                 }
+
                 detailsSelection != null -> {
                     goBackFromDetails()
                     true
                 }
+
                 state is NativeHomeUiState.Content && state.selectedLibrary != null -> {
                     closeLibraryOrDetailsParent()
                     true
                 }
+
                 else -> false
             }
         }
@@ -219,6 +225,7 @@ fun NativeHomeScreen(
 
             when (val state = uiState) {
                 NativeHomeUiState.Loading -> LoadingScreen(layout = layout)
+
                 is NativeHomeUiState.Login -> LoginScreen(
                     layout = layout,
                     state = state,
@@ -226,6 +233,7 @@ fun NativeHomeScreen(
                     onOpenDiscord = { onOpenExternalUrl(Constants.PIGGIETV_DISCORD_URL) },
                     onSelectServer = onSelectServer,
                 )
+
                 is NativeHomeUiState.Content -> {
                     val details = detailsSelection
                     if (details != null) {
@@ -286,6 +294,7 @@ fun NativeHomeScreen(
                         )
                     }
                 }
+
                 is NativeHomeUiState.Error -> ErrorScreen(
                     layout = layout,
                     message = state.message,
@@ -340,12 +349,22 @@ private fun LoginScreen(
     var username by rememberSaveable(state.serverName) { mutableStateOf(state.username) }
     var password by rememberSaveable(state.serverName) { mutableStateOf("") }
     var showSignup by rememberSaveable(state.serverName) { mutableStateOf(false) }
+    var showPasswordReset by rememberSaveable(state.serverName) { mutableStateOf(false) }
 
     if (showSignup) {
         NativeSignupScreen(
             layout = layout,
             server = state.serverName,
             onClose = { showSignup = false },
+        )
+        return
+    }
+
+    if (showPasswordReset) {
+        NativePasswordResetScreen(
+            layout = layout,
+            server = state.serverName,
+            onClose = { showPasswordReset = false },
         )
         return
     }
@@ -395,7 +414,13 @@ private fun LoginScreen(
                     items(state.publicUsers) { user ->
                         Surface(
                             shape = MaterialTheme.shapes.medium,
-                            color = if (username == user) PiggieTvColors.Focus.copy(alpha = 0.24f) else PiggieTvColors.Panel.copy(alpha = 0.82f),
+                            color = if (username == user) {
+                                PiggieTvColors.Focus.copy(
+                                alpha = 0.24f
+                            )
+                            } else {
+                                PiggieTvColors.Panel.copy(alpha = 0.82f)
+                            },
                             border = BorderStroke(1.dp, PiggieTvColors.Border),
                             modifier = Modifier.clickable { username = user },
                         ) {
@@ -474,6 +499,11 @@ private fun LoginScreen(
             }
         }
         item {
+            TextButton(onClick = { showPasswordReset = true }) {
+                Text(text = "Forgot password?", color = PiggieTvColors.FocusSoft)
+            }
+        }
+        item {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -528,6 +558,233 @@ private fun LoginScreen(
                 color = PiggieTvColors.TextSecondary,
                 style = MaterialTheme.typography.caption,
             )
+        }
+    }
+}
+
+@Composable
+@Suppress("CyclomaticComplexMethod", "LongMethod", "MagicNumber")
+private fun NativePasswordResetScreen(
+    layout: PtvAdaptiveLayout,
+    server: String,
+    onClose: () -> Unit,
+    signupRepository: NativeSignupRepository = koinInject(),
+) {
+    val scope = rememberCoroutineScope()
+    var mode by rememberSaveable(server) { mutableStateOf(PasswordResetMode.REQUEST_CODE) }
+    var email by rememberSaveable(server) { mutableStateOf("") }
+    var resetCode by rememberSaveable(server) { mutableStateOf("") }
+    var password by rememberSaveable(server) { mutableStateOf("") }
+    var confirmPassword by rememberSaveable(server) { mutableStateOf("") }
+    var isSubmitting by rememberSaveable(server) { mutableStateOf(false) }
+    var isComplete by rememberSaveable(server) { mutableStateOf(false) }
+    var message by rememberSaveable(server) { mutableStateOf<String?>(null) }
+    var messageTone by rememberSaveable(server) { mutableStateOf(SignupMessageTone.ERROR) }
+
+    fun showError(text: String) {
+        messageTone = SignupMessageTone.ERROR
+        message = text
+    }
+
+    fun submit() {
+        if (isSubmitting || isComplete) return
+        validatePasswordReset(mode, email, resetCode, password, confirmPassword)?.let {
+            showError(it)
+            return
+        }
+
+        isSubmitting = true
+        message = null
+        scope.launch {
+            runCatching {
+                when (mode) {
+                    PasswordResetMode.REQUEST_CODE -> signupRepository.requestPasswordReset(server, email)
+
+                    PasswordResetMode.CONFIRM -> signupRepository.confirmPasswordReset(
+                        serverUrl = server,
+                        resetRequest = NativePasswordResetConfirmRequest(
+                            email = email,
+                            code = resetCode,
+                            password = password,
+                            confirmPassword = confirmPassword,
+                        ),
+                    )
+                }
+            }.onSuccess { result ->
+                messageTone = SignupMessageTone.SUCCESS
+                message = result.message
+                if (mode == PasswordResetMode.REQUEST_CODE) {
+                    mode = PasswordResetMode.CONFIRM
+                } else {
+                    password = ""
+                    confirmPassword = ""
+                    resetCode = ""
+                    isComplete = true
+                }
+            }.onFailure { error ->
+                showError(error.message ?: "PiggieTV could not reset your password. Please try again.")
+            }
+            isSubmitting = false
+        }
+    }
+
+    Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = layout.edgePadding / 2, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconButton(onClick = onClose) {
+                Icon(
+                    Icons.AutoMirrored.Outlined.ArrowBack,
+                    contentDescription = null,
+                    tint = PiggieTvColors.TextPrimary
+                )
+            }
+            Text(
+                text = "Reset PiggieTV Password",
+                color = PiggieTvColors.TextPrimary,
+                style = MaterialTheme.typography.h6,
+                fontWeight = FontWeight.Bold,
+            )
+        }
+        LazyColumn(
+            modifier = Modifier.fillMaxWidth().weight(1f),
+            contentPadding = PaddingValues(horizontal = layout.edgePadding, vertical = 18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            item {
+                Image(
+                    painter = painterResource(R.drawable.app_logo),
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxWidth(
+                        0.68f
+                    ).widthIn(max = layout.loginMaxWidth).height(layout.loadingLogoHeight),
+                    contentScale = ContentScale.Fit,
+                )
+            }
+            item {
+                Text(
+                    text = if (mode ==
+                        PasswordResetMode.REQUEST_CODE
+                    ) {
+                            "Email me a reset code"
+                        } else {
+                            "Enter your reset code"
+                        },
+                    color = PiggieTvColors.TextPrimary,
+                    style = MaterialTheme.typography.h5,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+            item {
+                PiggieTextField(
+                    value = email,
+                    onValueChange = { email = it },
+                    label = "Email",
+                    imeAction = if (mode == PasswordResetMode.REQUEST_CODE) ImeAction.Go else ImeAction.Next,
+                    keyboardType = KeyboardType.Email,
+                    onGo = ::submit,
+                    modifier = Modifier.fillMaxWidth().widthIn(max = layout.loginMaxWidth),
+                )
+            }
+            if (mode == PasswordResetMode.CONFIRM && !isComplete) {
+                item {
+                    PiggieTextField(
+                        value = resetCode,
+                        onValueChange = { resetCode = it },
+                        label = "Reset code",
+                        imeAction = ImeAction.Next,
+                        keyboardType = KeyboardType.Number,
+                        modifier = Modifier.fillMaxWidth().widthIn(max = layout.loginMaxWidth),
+                    )
+                }
+                item {
+                    PiggieTextField(
+                        value = password,
+                        onValueChange = { password = it },
+                        label = "New password",
+                        imeAction = ImeAction.Next,
+                        isPassword = true,
+                        modifier = Modifier.fillMaxWidth().widthIn(max = layout.loginMaxWidth),
+                    )
+                }
+                item {
+                    PiggieTextField(
+                        value = confirmPassword,
+                        onValueChange = { confirmPassword = it },
+                        label = "Confirm new password",
+                        imeAction = ImeAction.Go,
+                        isPassword = true,
+                        onGo = ::submit,
+                        modifier = Modifier.fillMaxWidth().widthIn(max = layout.loginMaxWidth),
+                    )
+                }
+            }
+            message?.let { text ->
+                item {
+                    val messageColor = if (messageTone ==
+                        SignupMessageTone.SUCCESS
+                    ) {
+                            PiggieTvColors.Focus
+                        } else {
+                            PiggieTvColors.Accent
+                        }
+                    Surface(
+                        modifier = Modifier.fillMaxWidth().widthIn(max = layout.loginMaxWidth),
+                        color = messageColor.copy(alpha = 0.14f),
+                        shape = MaterialTheme.shapes.medium,
+                        border = BorderStroke(1.dp, messageColor.copy(alpha = 0.54f)),
+                    ) {
+                        Text(
+                            text = text,
+                            color = if (messageTone ==
+                                SignupMessageTone.SUCCESS
+                            ) {
+                                    PiggieTvColors.FocusSoft
+                                } else {
+                                    PiggieTvColors.Accent
+                                },
+                            modifier = Modifier.padding(14.dp),
+                        )
+                    }
+                }
+            }
+            item {
+                Button(
+                    onClick = { if (isComplete) onClose() else submit() },
+                    enabled = isComplete || (!isSubmitting && email.isNotBlank()),
+                    modifier = Modifier.fillMaxWidth().widthIn(max = layout.loginMaxWidth).heightIn(min = 50.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        backgroundColor = if (isComplete) PiggieTvColors.Focus else PiggieTvColors.Accent,
+                        contentColor = PiggieTvColors.Night,
+                        disabledBackgroundColor = PiggieTvColors.PanelHigh,
+                    ),
+                ) {
+                    if (isSubmitting) {
+                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                    } else {
+                        Text(
+                            text = when {
+                                isComplete -> "Back to Sign In"
+                                mode == PasswordResetMode.REQUEST_CODE -> "Send Reset Code"
+                                else -> "Reset Password"
+                            },
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
+                }
+            }
+            if (mode == PasswordResetMode.CONFIRM && !isComplete) {
+                item {
+                    TextButton(onClick = {
+                        mode = PasswordResetMode.REQUEST_CODE
+                        message = null
+                    }) {
+                        Text(text = "Send a new code", color = PiggieTvColors.FocusSoft)
+                    }
+                }
+            }
         }
     }
 }
@@ -603,7 +860,11 @@ private fun NativeSignupScreen(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             IconButton(onClick = onClose) {
-                Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = null, tint = PiggieTvColors.TextPrimary)
+                Icon(
+                    Icons.AutoMirrored.Outlined.ArrowBack,
+                    contentDescription = null,
+                    tint = PiggieTvColors.TextPrimary
+                )
             }
             Text(
                 text = "Create PiggieTV Account",
@@ -723,11 +984,23 @@ private fun NativeSignupScreen(
                         modifier = Modifier
                             .fillMaxWidth()
                             .widthIn(max = layout.loginMaxWidth),
-                        color = if (isSuccess) PiggieTvColors.Focus.copy(alpha = 0.14f) else PiggieTvColors.Accent.copy(alpha = 0.14f),
+                        color = if (isSuccess) {
+                            PiggieTvColors.Focus.copy(
+                            alpha = 0.14f
+                        )
+                        } else {
+                            PiggieTvColors.Accent.copy(alpha = 0.14f)
+                        },
                         shape = MaterialTheme.shapes.medium,
                         border = BorderStroke(
                             1.dp,
-                            if (isSuccess) PiggieTvColors.Focus.copy(alpha = 0.54f) else PiggieTvColors.Accent.copy(alpha = 0.54f),
+                            if (isSuccess) {
+                                PiggieTvColors.Focus.copy(
+                                alpha = 0.54f
+                            )
+                            } else {
+                                PiggieTvColors.Accent.copy(alpha = 0.54f)
+                            },
                         ),
                     ) {
                         Text(
@@ -742,7 +1015,9 @@ private fun NativeSignupScreen(
             item {
                 Button(
                     onClick = { if (created) onClose() else submitSignup() },
-                    enabled = created || (!isSubmitting && email.isNotBlank() && username.isNotBlank() && password.isNotBlank()),
+                    enabled =
+                    created ||
+                        (!isSubmitting && email.isNotBlank() && username.isNotBlank() && password.isNotBlank()),
                     modifier = Modifier
                         .fillMaxWidth()
                         .widthIn(max = layout.loginMaxWidth)
@@ -780,6 +1055,7 @@ private fun NativeSignupScreen(
         }
     }
 }
+
 @Composable
 private fun HomeContent(
     layout: PtvAdaptiveLayout,
@@ -807,10 +1083,14 @@ private fun HomeContent(
     val showHeader by remember {
         derivedStateOf {
             when (activeTab) {
-                NativeHomeTab.HOME -> homeListState.firstVisibleItemIndex == 0 && homeListState.firstVisibleItemScrollOffset < 24
+                NativeHomeTab.HOME ->
+                    homeListState.firstVisibleItemIndex == 0 &&
+                    homeListState.firstVisibleItemScrollOffset < 24
+
                 NativeHomeTab.MUSIC,
                 NativeHomeTab.BOOKS,
                 -> !childHeaderCollapsed
+
                 else -> true
             }
         }
@@ -854,12 +1134,21 @@ private fun HomeContent(
                 onLibraryClick = onLibraryClick,
                 onMovieSearch = onMovieSearch,
             )
+
+            NativeHomeTab.DISCOVER -> NativeDiscoverScreen(
+                layout = layout,
+                libraries = state.home.libraries,
+                onLibraryClick = onLibraryClick,
+                modifier = Modifier.weight(1f),
+            )
+
             NativeHomeTab.MUSIC -> MusicScreen(
                 viewModel = musicViewModel,
                 onBackHandlerChanged = onBackHandlerChanged,
                 onScrollHeaderCollapsedChange = { collapsed -> childHeaderCollapsed = collapsed },
                 modifier = Modifier.weight(1f),
             )
+
             NativeHomeTab.BOOKS -> LibraryScreen(
                 viewModel = libraryViewModel,
                 title = "PTV Reading",
@@ -869,10 +1158,12 @@ private fun HomeContent(
                 onScrollHeaderCollapsedChange = { collapsed -> childHeaderCollapsed = collapsed },
                 modifier = Modifier.weight(1f),
             )
+
             NativeHomeTab.REQUESTS -> RequestsPortal(
                 layout = layout,
                 modifier = Modifier.weight(1f),
             )
+
             NativeHomeTab.GAMES -> GamesHub(
                 layout = layout,
                 modifier = Modifier.weight(1f),
@@ -988,7 +1279,12 @@ private fun HomeRows(
 }
 
 @Composable
-private fun MovieSearchField(query: String, isSearching: Boolean, onQueryChange: (String) -> Unit, modifier: Modifier = Modifier) {
+private fun MovieSearchField(
+    query: String,
+    isSearching: Boolean,
+    onQueryChange: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
     OutlinedTextField(
         value = query,
         onValueChange = onQueryChange,
@@ -1158,6 +1454,63 @@ private fun RequestsPortal(layout: PtvAdaptiveLayout, modifier: Modifier = Modif
 }
 
 @Composable
+private fun NativeDiscoverScreen(
+    layout: PtvAdaptiveLayout,
+    libraries: List<NativeMediaItem>,
+    onLibraryClick: (NativeMediaItem) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    LazyColumn(
+        modifier = modifier.fillMaxWidth(),
+        contentPadding = PaddingValues(bottom = layout.bottomPadding),
+        verticalArrangement = Arrangement.spacedBy(layout.sectionSpacing),
+    ) {
+        item {
+            Column(
+                modifier = Modifier.padding(horizontal = layout.edgePadding, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text("Discover", color = PiggieTvColors.TextPrimary, style = MaterialTheme.typography.h5, fontWeight = FontWeight.Bold)
+                Text(
+                    "Browse your Jellyfin libraries with your current app session.",
+                    color = PiggieTvColors.TextSecondary,
+                    style = MaterialTheme.typography.body2,
+                )
+            }
+        }
+        if (libraries.isEmpty()) {
+            item {
+                MovieEmptySearch(
+                    message = "No Jellyfin libraries are available for this user.",
+                    modifier = Modifier.padding(horizontal = layout.edgePadding),
+                )
+            }
+        } else {
+            item {
+                MediaSection(
+                    layout = layout,
+                    section = NativeMediaSection(
+                        id = "discover-libraries",
+                        title = "Your Libraries",
+                        rowKicker = "Movies, shows, anime, cartoons, collections, and more",
+                        groupKicker = null,
+                        groupTitle = null,
+                        showGroupHeader = false,
+                        presentation = PtvRowPresentation.STANDARD,
+                        shape = PtvRowShape.PORTRAIT,
+                        opensLibraries = true,
+                        items = libraries,
+                    ),
+                    onReportItem = {},
+                    onItemPlay = {},
+                    onItemClick = onLibraryClick,
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun GamesHub(layout: PtvAdaptiveLayout, modifier: Modifier = Modifier) {
     Surface(
         modifier = modifier
@@ -1168,22 +1521,14 @@ private fun GamesHub(layout: PtvAdaptiveLayout, modifier: Modifier = Modifier) {
         border = BorderStroke(1.dp, PiggieTvColors.Border),
     ) {
         Column(
-            modifier = Modifier.padding(18.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-            horizontalAlignment = Alignment.Start,
+            modifier = Modifier.fillMaxSize().padding(24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
         ) {
-            Icon(Icons.Outlined.Casino, contentDescription = null, tint = PiggieTvColors.Focus, modifier = Modifier.size(42.dp))
-            Text(
-                text = "Games",
-                color = PiggieTvColors.TextPrimary,
-                style = MaterialTheme.typography.h5,
-                fontWeight = FontWeight.ExtraBold,
-            )
-            Text(
-                text = "PiggieTV game integrations will appear here when a native game provider is configured.",
-                color = PiggieTvColors.TextSecondary,
-                style = MaterialTheme.typography.body2,
-            )
+            Icon(Icons.Outlined.Casino, contentDescription = null, tint = PiggieTvColors.Focus, modifier = Modifier.size(54.dp))
+            Spacer(Modifier.height(12.dp))
+            Text("PiggieTV Games", color = PiggieTvColors.TextPrimary, style = MaterialTheme.typography.h6, fontWeight = FontWeight.Bold)
+            Text("Native games are coming soon.", color = PiggieTvColors.TextSecondary, style = MaterialTheme.typography.body2)
         }
     }
 }
@@ -1247,8 +1592,11 @@ private fun LibraryContent(
             }
 
             library.error != null -> pendingAlphaJump = null
+
             state.isLoadingLibrary -> Unit
+
             library.hasMore && !library.items.hasPassedAlphaLabel(targetLabel) -> onLoadMoreLibraryItems()
+
             else -> pendingAlphaJump = null
         }
     }
@@ -1928,7 +2276,11 @@ private fun MediaDetailsScreen(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = null, tint = PiggieTvColors.TextPrimary)
+                        Icon(
+                            Icons.AutoMirrored.Outlined.ArrowBack,
+                            contentDescription = null,
+                            tint = PiggieTvColors.TextPrimary
+                        )
                     }
                     Spacer(modifier = Modifier.weight(1f))
                     IconButton(onClick = { onReport(mediaItem) }) {
@@ -1988,7 +2340,11 @@ private fun MediaDetailsScreen(
                                 ),
                                 shape = MaterialTheme.shapes.medium,
                             ) {
-                                Icon(Icons.Outlined.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Icon(
+                                    Icons.Outlined.PlayArrow,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Text(text = "Play", fontWeight = FontWeight.Bold)
                             }
@@ -2002,7 +2358,11 @@ private fun MediaDetailsScreen(
                                 ),
                                 shape = MaterialTheme.shapes.medium,
                             ) {
-                                Icon(Icons.Outlined.FolderOpen, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Icon(
+                                    Icons.Outlined.FolderOpen,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Text(text = "Browse", fontWeight = FontWeight.Bold)
                             }
@@ -2046,6 +2406,7 @@ private fun MediaDetailsScreen(
                         )
                     }
                 }
+
                 else -> {
                     if (children.isEmpty()) {
                         item {
@@ -2082,13 +2443,19 @@ private fun MediaDetailsScreen(
 
 private fun PtvAdaptiveLayout.rowCardWidth(section: NativeMediaSection): Dp = when (section.shape) {
     PtvRowShape.BACKDROP -> rowPosterWidth * 1.48f
+
     PtvRowShape.SQUARE -> rowPosterWidth * 0.92f
+
     PtvRowShape.PORTRAIT -> when (section.presentation) {
         PtvRowPresentation.FEATURED -> rowPosterWidth * 1.08f
+
         PtvRowPresentation.COMPACT -> rowPosterWidth * 0.9f
+
         PtvRowPresentation.MINI -> rowPosterWidth * 0.82f
+
         PtvRowPresentation.LIBRARY_HUB,
-        PtvRowPresentation.STANDARD -> rowPosterWidth
+        PtvRowPresentation.STANDARD,
+        -> rowPosterWidth
     }
 }
 
@@ -2315,6 +2682,7 @@ private data class PtvAdaptiveLayout(
                 gridMinWidth = 136.dp,
                 compactTopBar = true,
             )
+
             width < 840.dp -> PtvAdaptiveLayout(
                 edgePadding = 28.dp,
                 topPadding = 34.dp,
@@ -2335,6 +2703,7 @@ private data class PtvAdaptiveLayout(
                 gridMinWidth = 158.dp,
                 compactTopBar = false,
             )
+
             else -> PtvAdaptiveLayout(
                 edgePadding = 48.dp,
                 topPadding = 44.dp,
@@ -2361,6 +2730,7 @@ private data class PtvAdaptiveLayout(
 
 private enum class NativeHomeTab(val label: String) {
     HOME("Home"),
+    DISCOVER("Discover"),
     MUSIC("Music"),
     BOOKS("Reading"),
     REQUESTS("Requests"),
@@ -2372,15 +2742,17 @@ private enum class SignupMessageTone {
     ERROR,
 }
 
+private enum class PasswordResetMode {
+    REQUEST_CODE,
+    CONFIRM,
+}
+
 private const val LIBRARY_LOAD_MORE_THRESHOLD = 12
 private val LIBRARY_ALPHA_LABELS = listOf("#") + ('A'..'Z').map(Char::toString)
 private val LIBRARY_ALPHA_RAIL_WIDTH = 30.dp
 private val LIBRARY_ALPHA_RAIL_SPACE = 38.dp
 
-private data class NativeMediaDetailsSelection(
-    val item: NativeMediaItem,
-    val siblings: List<NativeMediaItem>,
-)
+private data class NativeMediaDetailsSelection(val item: NativeMediaItem, val siblings: List<NativeMediaItem>,)
 
 private fun List<NativeMediaItem>.alphaIndexByLabel(): Map<String, Int> = buildMap {
     forEachIndexed { index, item ->
@@ -2406,12 +2778,28 @@ private fun String.alphaLabelOrder(): Int = when (this) {
     else -> (firstOrNull()?.uppercaseChar()?.minus('A') ?: -1) + 1
 }
 
-private fun validateNativeSignup(email: String, username: String, password: String, confirmPassword: String): String? = when {
+private fun validateNativeSignup(email: String, username: String, password: String, confirmPassword: String): String? =
+    when {
+        email.isBlank() -> "Email is required."
+        "@" !in email.trim() -> "Enter a valid email address."
+        username.isBlank() -> "Username is required."
+        password.isBlank() -> "Password is required."
+        password != confirmPassword -> "Passwords do not match."
+        else -> null
+    }
+
+private fun validatePasswordReset(
+    mode: PasswordResetMode,
+    email: String,
+    code: String,
+    password: String,
+    confirmPassword: String,
+): String? = when {
     email.isBlank() -> "Email is required."
     "@" !in email.trim() -> "Enter a valid email address."
-    username.isBlank() -> "Username is required."
-    password.isBlank() -> "Password is required."
-    password != confirmPassword -> "Passwords do not match."
+    mode == PasswordResetMode.CONFIRM && code.isBlank() -> "Reset code is required."
+    mode == PasswordResetMode.CONFIRM && password.isBlank() -> "New password is required."
+    mode == PasswordResetMode.CONFIRM && password != confirmPassword -> "Passwords do not match."
     else -> null
 }
 
@@ -2422,7 +2810,8 @@ private val NativeMediaItem.showsChildrenOnDetails: Boolean
 
 private fun NativeMediaItem.toPlayOptions(siblings: List<NativeMediaItem> = emptyList()): PlayOptions {
     val queue = when {
-        type in playableAudioKinds -> siblings
+        type in playableAudioKinds ->
+            siblings
             .filter { sibling -> sibling.isPlayable && sibling.type in playableAudioKinds }
             .ifEmpty { listOf(this) }
 

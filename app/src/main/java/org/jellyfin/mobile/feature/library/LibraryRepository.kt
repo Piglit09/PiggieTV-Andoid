@@ -75,38 +75,18 @@ class LibraryRepository(
 
     private suspend fun loadJellyfinHome(): LibraryHome = coroutineScope {
         val userId = apiClient.userApi.getCurrentUser().content.id
-        val readingLibraries = loadReadingLibraries()
+        val readingLibraries = loadReadingLibraries(userId)
 
-        val recentlyAdded = async {
-            getJellyfinBooksAcrossLibraries(
-                userId = userId,
-                libraries = readingLibraries,
-                sortBy = listOf(ItemSortBy.DATE_CREATED),
-                sortOrder = listOf(SortOrder.DESCENDING),
-                limit = RECENT_FALLBACK_LIMIT,
-            )
-        }
-        val allBooks = async {
-            getJellyfinBooksAcrossLibraries(
-                userId = userId,
-                libraries = readingLibraries,
-                sortBy = listOf(ItemSortBy.SORT_NAME),
-                limit = JELLYFIN_BOOK_LIMIT,
-            )
-        }
-        val favoriteBooks = async {
-            getJellyfinBooksAcrossLibraries(
-                userId = userId,
-                libraries = readingLibraries,
-                sortBy = listOf(ItemSortBy.SORT_NAME),
-                isFavorite = true,
-                limit = JELLYFIN_ROW_LIMIT,
-            )
-        }
-
-        val loadedBooks = allBooks.await()
-        val loadedRecent = recentlyAdded.await().ifEmpty { loadedBooks.take(RECENT_FALLBACK_LIMIT) }
-        val loadedFavorites = favoriteBooks.await().ifEmpty { loadedBooks.filter(LibraryBook::isFavorite) }
+        val loadedBooks = getJellyfinBooksAcrossLibraries(
+            userId = userId,
+            libraries = readingLibraries,
+            sortBy = listOf(ItemSortBy.SORT_NAME),
+            limit = JELLYFIN_BOOK_LIMIT,
+        )
+        val loadedRecent = loadedBooks
+            .sortedForReading(listOf(ItemSortBy.DATE_CREATED), listOf(SortOrder.DESCENDING))
+            .take(RECENT_FALLBACK_LIMIT)
+        val loadedFavorites = loadedBooks.filter(LibraryBook::isFavorite).take(JELLYFIN_ROW_LIMIT)
         val sourceName = when (readingLibraries.size) {
             0 -> "Jellyfin Reading"
             1 -> readingLibraries.first().name.takeIf(String::isNotBlank) ?: "Jellyfin Reading"
@@ -141,11 +121,27 @@ class LibraryRepository(
         return item.toJellyfinBook(book.readingKind).copy(progress = book.progress)
     }
 
-    private suspend fun loadReadingLibraries(): List<JellyfinBooksLibrary> =
-        apiClient.userViewsApi.getUserViews(
+    private suspend fun loadReadingLibraries(userId: UUID): List<JellyfinBooksLibrary> = supervisorScope {
+        val views = apiClient.userViewsApi.getUserViews(
             includeExternalContent = false,
             includeHidden = false,
-        ).content.items.filter { item -> item.isReadingLibrary() }
+        ).content.items
+        val explicitReadingViews = views.filter { view -> view.isReadingLibrary() }
+        val detectedReadingViews = views
+            .filterNot { view -> explicitReadingViews.any { explicit -> explicit.id == view.id } }
+            .map { view ->
+                async {
+                    val containsBooks = withTimeoutOrNull(JELLYFIN_LIBRARY_PROBE_TIMEOUT_MS) {
+                        containsJellyfinBooks(userId, view.id)
+                    } == true
+                    view.takeIf { containsBooks }
+                }
+            }
+            .awaitAll()
+            .filterNotNull()
+
+        (explicitReadingViews + detectedReadingViews)
+            .distinctBy(BaseItemDto::id)
             .map { item ->
                 JellyfinBooksLibrary(
                     id = item.id,
@@ -153,6 +149,37 @@ class LibraryRepository(
                     kind = item.readingKind(),
                 )
             }
+    }
+
+    private suspend fun containsJellyfinBooks(userId: UUID, parentId: UUID): Boolean {
+        val directOrRecursive = runCatching {
+            apiClient.itemsApi.getItems(
+                userId = userId,
+                parentId = parentId,
+                includeItemTypes = listOf(BaseItemKind.BOOK),
+                recursive = true,
+                enableTotalRecordCount = false,
+                enableImages = false,
+                limit = 1,
+            ).content.items.isNotEmpty()
+        }.getOrDefault(false)
+        if (directOrRecursive) return true
+
+        return loadJellyfinBookContainers(userId, parentId, limit = JELLYFIN_PROBE_CONTAINER_LIMIT)
+            .any { container ->
+                runCatching {
+                    apiClient.itemsApi.getItems(
+                        userId = userId,
+                        parentId = container.id,
+                        includeItemTypes = listOf(BaseItemKind.BOOK),
+                        recursive = true,
+                        enableTotalRecordCount = false,
+                        enableImages = false,
+                        limit = 1,
+                    ).content.items.isNotEmpty()
+                }.getOrDefault(false)
+            }
+    }
 
     private suspend fun getJellyfinBooksAcrossLibraries(
         userId: UUID,
@@ -194,23 +221,85 @@ class LibraryRepository(
         sortOrder: List<SortOrder> = emptyList(),
         isFavorite: Boolean? = null,
         limit: Int,
-    ): List<LibraryBook> =
-        apiClient.itemsApi.getItems(
-            userId = userId,
-            parentId = library?.id,
-            includeItemTypes = listOf(BaseItemKind.BOOK),
-            recursive = true,
-            sortBy = sortBy,
-            sortOrder = sortOrder,
-            isFavorite = isFavorite,
-            fields = jellyfinBookFields,
-            enableUserData = true,
-            imageTypeLimit = 1,
-            enableImageTypes = imageTypes,
-            enableTotalRecordCount = false,
-            enableImages = true,
-            limit = limit,
-        ).content.items.map { item -> item.toJellyfinBook(library?.kind, library?.name) }
+    ): List<LibraryBook> {
+        val primaryItems = runCatching {
+            getJellyfinBookItems(
+                userId = userId,
+                parentId = library?.id,
+                sortBy = sortBy,
+                sortOrder = sortOrder,
+                isFavorite = isFavorite,
+                limit = limit,
+            )
+        }.onFailure { error ->
+            Timber.w(error, "PTV Reading primary book query failed for library=${library?.name}")
+        }.getOrDefault(emptyList())
+        if (primaryItems.isNotEmpty() || library == null) {
+            return primaryItems.map { item -> item.toJellyfinBook(library?.kind, library?.name) }
+        }
+
+        val nestedItems = supervisorScope {
+            loadJellyfinBookContainers(userId, library.id, JELLYFIN_CONTAINER_SCAN_LIMIT)
+                .map { container ->
+                    async {
+                        runCatching {
+                            getJellyfinBookItems(
+                                userId = userId,
+                                parentId = container.id,
+                                sortBy = sortBy,
+                                sortOrder = sortOrder,
+                                isFavorite = isFavorite,
+                                limit = limit,
+                            )
+                        }.getOrDefault(emptyList())
+                    }
+                }
+                .awaitAll()
+                .flatten()
+        }
+        return nestedItems
+            .distinctBy(BaseItemDto::id)
+            .take(limit)
+            .map { item -> item.toJellyfinBook(library.kind, library.name) }
+    }
+
+    private suspend fun getJellyfinBookItems(
+        userId: UUID,
+        parentId: UUID?,
+        sortBy: List<ItemSortBy>,
+        sortOrder: List<SortOrder>,
+        isFavorite: Boolean?,
+        limit: Int,
+    ): List<BaseItemDto> = apiClient.itemsApi.getItems(
+        userId = userId,
+        parentId = parentId,
+        includeItemTypes = listOf(BaseItemKind.BOOK),
+        recursive = true,
+        sortBy = sortBy,
+        sortOrder = sortOrder,
+        isFavorite = isFavorite,
+        fields = jellyfinBookFields,
+        enableUserData = true,
+        imageTypeLimit = 1,
+        enableImageTypes = imageTypes,
+        enableTotalRecordCount = false,
+        enableImages = true,
+        limit = limit,
+    ).content.items
+
+    private suspend fun loadJellyfinBookContainers(userId: UUID, parentId: UUID, limit: Int): List<BaseItemDto> =
+        runCatching {
+            apiClient.itemsApi.getItems(
+                userId = userId,
+                parentId = parentId,
+                includeItemTypes = listOf(BaseItemKind.FOLDER, BaseItemKind.BOX_SET),
+                recursive = false,
+                sortBy = listOf(ItemSortBy.SORT_NAME),
+                enableTotalRecordCount = false,
+                enableImages = false,
+                limit = limit,
+            ).content.items
+        }.getOrDefault(emptyList())
 
     private fun BaseItemDto.toJellyfinBook(libraryKind: LibraryReadingKind? = null, libraryName: String? = null): LibraryBook {
         val primaryTag = imageTags?.get(ImageType.PRIMARY)
@@ -624,6 +713,9 @@ class LibraryRepository(
         const val JELLYFIN_BOOK_LIMIT = 96
         const val JELLYFIN_ROW_LIMIT = 36
         const val JELLYFIN_MIN_PER_LIBRARY_LIMIT = 24
+        const val JELLYFIN_CONTAINER_SCAN_LIMIT = 24
+        const val JELLYFIN_PROBE_CONTAINER_LIMIT = 8
+        const val JELLYFIN_LIBRARY_PROBE_TIMEOUT_MS = 4_000L
         const val MAX_FILENAME_LENGTH = 96
         const val JELLYFIN_DOWNLOAD_REL = "jellyfin-download"
         const val LEGACY_PIGGIETV_BOOKS_HOST = "books.piggietv.com"

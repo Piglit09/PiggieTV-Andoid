@@ -59,7 +59,7 @@ class MusicRepository(private val apiClient: ApiClient, context: Context? = null
         )
     }
 
-    suspend fun loadHome(): MusicHome = withContext(Dispatchers.IO) {
+    suspend fun loadHome(onInitialHome: (MusicHome) -> Unit = {}): MusicHome = withContext(Dispatchers.IO) {
         logRepositoryCall("loadHome") {
             val userId = logRepositoryCall("getCurrentUser") {
                 apiClient.userApi.getCurrentUser().content.id
@@ -87,6 +87,7 @@ class MusicRepository(private val apiClient: ApiClient, context: Context? = null
                         source = MusicHomeSource.RECENTLY_ADDED_ALBUMS,
                         cachedItems = previousHome?.recentlyAddedAlbums?.takeIf { it.isNotEmpty() }
                             ?: cachedItemsFor(MusicBrowseKind.RECENTLY_ADDED),
+                        timeoutMs = HOME_INITIAL_ROW_TIMEOUT_MS,
                     ) {
                         getMusicItemsPageWithLibraryFallback(
                             queryName = "home.recentlyAddedAlbums",
@@ -219,6 +220,28 @@ class MusicRepository(private val apiClient: ApiClient, context: Context? = null
                     }
                 }
 
+                val loadedRecentlyAddedAlbums = recentlyAddedAlbums.await()
+                val initialHome = previousHome?.copy(
+                    library = musicLibrary,
+                    recentlyAddedAlbums = loadedRecentlyAddedAlbums.items,
+                ) ?: MusicHome(
+                    library = musicLibrary,
+                    recentlyAddedAlbums = loadedRecentlyAddedAlbums.items,
+                    albums = emptyList(),
+                    albumsTotalCount = 0,
+                    artists = emptyList(),
+                    artistsTotalCount = 0,
+                    songs = emptyList(),
+                    songsTotalCount = 0,
+                    genres = emptyList(),
+                    playlists = emptyList(),
+                    favorites = emptyList(),
+                    recentlyPlayed = emptyList(),
+                    recommendations = emptyList(),
+                )
+                runCatching { onInitialHome(initialHome) }
+                    .onFailure { error -> Timber.w(error, "PTV music initial home observer failed") }
+
                 val loadedSongs = songs.await()
                 val loadedAlbums = albums.await()
                 val loadedArtists = artists.await()
@@ -240,7 +263,6 @@ class MusicRepository(private val apiClient: ApiClient, context: Context? = null
                         fallbackSongs = loadedSongs.page.items,
                     )
                 }
-                val loadedRecentlyAddedAlbums = recentlyAddedAlbums.await()
                 val loadedPlaylists = playlists.await()
                 val sourceResults = listOf(
                     loadedRecentlyAddedAlbums,
@@ -2340,6 +2362,7 @@ class MusicRepository(private val apiClient: ApiClient, context: Context? = null
         const val AUTO_PLAYLIST_NAME = "PTV Auto Picks"
         const val DETAIL_LIMIT = 160
         const val HOME_CORE_ROW_TIMEOUT_MS = 20_000L
+        const val HOME_INITIAL_ROW_TIMEOUT_MS = 5_000L
         const val HOME_SECONDARY_ROW_TIMEOUT_MS = 8_000L
         const val AUTO_PICK_SOURCE_TIMEOUT_MS = 3_000L
         const val RECOMMENDATION_GENRE_LIMIT = 4

@@ -17,6 +17,8 @@ object Constants {
     const val PIGGIETV_LIBRARY_DEFAULT_URL = ""
     const val PIGGIETV_SIGNUP_WEB_PATH = "/web/index.html#/signup"
     const val PIGGIETV_SIGNUP_CREATE_USER_PATH = "/Ptv/v1/signup/create-user"
+    const val PIGGIETV_SIGNUP_PASSWORD_RESET_REQUEST_PATH = "/Ptv/v1/signup/password-reset/request"
+    const val PIGGIETV_SIGNUP_PASSWORD_RESET_CONFIRM_PATH = "/Ptv/v1/signup/password-reset/confirm"
     const val PIGGIETV_SIGNUP_URL = "$PIGGIETV_DEFAULT_SERVER_URL$PIGGIETV_SIGNUP_WEB_PATH"
     const val PIGGIETV_DISCORD_URL = "https://discord.gg/FbtexGYau"
 
