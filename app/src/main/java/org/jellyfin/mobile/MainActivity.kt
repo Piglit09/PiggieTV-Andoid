@@ -20,6 +20,7 @@ import androidx.lifecycle.withStarted
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import org.jellyfin.mobile.events.ActivityEventHandler
+import org.jellyfin.mobile.core.PtvCoreRuntime
 import org.jellyfin.mobile.home.NativeHomeFragment
 import org.jellyfin.mobile.player.cast.Chromecast
 import org.jellyfin.mobile.player.cast.IChromecast
@@ -96,6 +97,7 @@ class MainActivity : AppCompatActivity() {
             statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
         )
         super.onCreate(savedInstanceState)
+        PtvCoreRuntime.initialize(applicationContext)
         setContentView(R.layout.activity_main)
 
         // Bind player service

@@ -7,6 +7,7 @@ import coil3.SingletonImageLoader
 import org.jellyfin.mobile.app.apiModule
 import org.jellyfin.mobile.app.applicationModule
 import org.jellyfin.mobile.data.databaseModule
+import org.jellyfin.mobile.core.PtvCoreRuntime
 import org.jellyfin.mobile.utils.JellyTree
 import org.jellyfin.mobile.utils.isWebViewSupported
 import org.koin.android.ext.koin.androidContext
@@ -45,5 +46,7 @@ class JellyfinApplication : Application(), KoinComponent {
         SingletonImageLoader.setSafe {
             get<ImageLoader>()
         }
+
+        PtvCoreRuntime.initialize(this)
     }
 }
