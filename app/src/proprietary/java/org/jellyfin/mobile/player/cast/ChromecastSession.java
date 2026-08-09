@@ -24,11 +24,13 @@ import org.json.JSONObject;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import timber.log.Timber;
 
 /*
  * All of the Chromecast session specific functions should start here.
  */
 public class ChromecastSession {
+    private static final String TAG = "ChromecastSession";
     /**
      * The current context.
      */
@@ -79,9 +81,19 @@ public class ChromecastSession {
      * @param castSession the session to use
      */
     public void setSession(CastSession castSession) {
-        activity.runOnUiThread(() -> {
+        Timber.tag(TAG).d("setSession called with castSession=%s", castSession == null ? "null" : castSession.getSessionId());
+        if (activity == null) {
+            Timber.tag(TAG).w("setSession skipped because activity is null");
+            return;
+        }
+        runOnUiThreadSafely(() -> {
             if (castSession == null) {
                 client = null;
+                session = null;
+                mediaQueueCallback = null;
+                setQueueReloadCallback(null);
+                setQueueStatusUpdatedCallback(null);
+                lastMediaObject = null;
                 return;
             }
             if (castSession.equals(session)) {
@@ -91,9 +103,16 @@ public class ChromecastSession {
             session = castSession;
             client = session.getRemoteMediaClient();
             if (client == null) {
+                Timber.tag(TAG).w("Session has no RemoteMediaClient");
+                mediaQueueCallback = null;
+                setQueueReloadCallback(null);
+                setQueueStatusUpdatedCallback(null);
                 return;
             }
             setupQueue();
+            if (mediaQueueCallback == null) {
+                Timber.tag(TAG).w("Queue callback unavailable after setup");
+            }
             client.registerCallback(new RemoteMediaClient.Callback() {
                 private Integer prevItemId;
 
@@ -103,6 +122,10 @@ public class ChromecastSession {
                     if (requestingMedia
                             || queueStatusUpdatedCallback != null
                             || queueReloadCallback != null) {
+                        return;
+                    }
+                    if (mediaQueueCallback == null) {
+                        Timber.tag(TAG).w("onStatusUpdated ignored: queue controller is null");
                         return;
                     }
 
@@ -174,6 +197,15 @@ public class ChromecastSession {
         });
     }
 
+    private void runOnUiThreadSafely(Runnable action) {
+        final Activity uiActivity = activity;
+        if (uiActivity == null) {
+            Timber.tag(TAG).w("runOnUiThreadSafely skipped: activity is null");
+            return;
+        }
+        uiActivity.runOnUiThread(action);
+    }
+
     /**
      * Adds a message listener if one does not already exist.
      *
@@ -183,7 +215,10 @@ public class ChromecastSession {
         if (client == null || session == null) {
             return;
         }
-        activity.runOnUiThread(() -> {
+        if (activity == null) {
+            return;
+        }
+        runOnUiThreadSafely(() -> {
             try {
                 session.setMessageReceivedCallbacks(namespace, clientListener);
             } catch (IOException e) {
@@ -204,7 +239,11 @@ public class ChromecastSession {
             callback.error("session_error");
             return;
         }
-        activity.runOnUiThread(() -> session.sendMessage(namespace, message).setResultCallback(result -> {
+        if (activity == null) {
+            callback.error("session_error");
+            return;
+        }
+        runOnUiThreadSafely(() -> session.sendMessage(namespace, message).setResultCallback(result -> {
             if (result.isSuccess()) {
                 callback.success();
             } else {
@@ -234,7 +273,11 @@ public class ChromecastSession {
             callback.error("session_error");
             return;
         }
-        activity.runOnUiThread(() -> {
+        if (activity == null) {
+            callback.error("session_error");
+            return;
+        }
+        runOnUiThreadSafely(() -> {
             MediaInfo mediaInfo = ChromecastUtilities.createMediaInfo(contentId, customData, contentType, duration, streamType, metadata, textTrackStyle);
             MediaLoadRequestData loadRequest = new MediaLoadRequestData.Builder()
                     .setMediaInfo(mediaInfo)
@@ -264,7 +307,11 @@ public class ChromecastSession {
             callback.error("session_error");
             return;
         }
-        activity.runOnUiThread(() -> client.play()
+        if (activity == null) {
+            callback.error("session_error");
+            return;
+        }
+        runOnUiThreadSafely(() -> client.play()
                 .setResultCallback(getResultCallback(callback, "Failed to play.")));
     }
 
@@ -278,7 +325,11 @@ public class ChromecastSession {
             callback.error("session_error");
             return;
         }
-        activity.runOnUiThread(() -> client.pause()
+        if (activity == null) {
+            callback.error("session_error");
+            return;
+        }
+        runOnUiThreadSafely(() -> client.pause()
                 .setResultCallback(getResultCallback(callback, "Failed to pause.")));
     }
 
@@ -294,7 +345,11 @@ public class ChromecastSession {
             callback.error("session_error");
             return;
         }
-        activity.runOnUiThread(() -> {
+        if (activity == null) {
+            callback.error("session_error");
+            return;
+        }
+        runOnUiThreadSafely(() -> {
             int resState;
             switch (resumeState) {
                 case "PLAYBACK_START":
@@ -327,7 +382,11 @@ public class ChromecastSession {
             callback.error("session_error");
             return;
         }
-        activity.runOnUiThread(() -> {
+        if (activity == null) {
+            callback.error("session_error");
+            return;
+        }
+        runOnUiThreadSafely(() -> {
             // Figure out the number of callbacks we expect to receive
             int calls = 0;
             if (level != null) {
@@ -396,7 +455,11 @@ public class ChromecastSession {
             callback.error("session_error");
             return;
         }
-        activity.runOnUiThread(() -> client.stop()
+        if (activity == null) {
+            callback.error("session_error");
+            return;
+        }
+        runOnUiThreadSafely(() -> client.stop()
                 .setResultCallback(getResultCallback(callback, "Failed to stop.")));
     }
 
@@ -412,7 +475,11 @@ public class ChromecastSession {
             callback.error("session_error");
             return;
         }
-        activity.runOnUiThread(() -> {
+        if (activity == null) {
+            callback.error("session_error");
+            return;
+        }
+        runOnUiThreadSafely(() -> {
             client.setActiveMediaTracks(activeTracksIds)
                     .setResultCallback(getResultCallback(callback, "Failed to set active media tracks."));
             client.setTextTrackStyle(ChromecastUtilities.parseTextTrackStyle(textTrackStyle))
@@ -434,7 +501,14 @@ public class ChromecastSession {
      * Sets up the objects and listeners required for queue functionality.
      */
     private void setupQueue() {
+        if (client == null) {
+            return;
+        }
         MediaQueue queue = client.getMediaQueue();
+        if (queue == null) {
+            Timber.tag(TAG).w("setupQueue: media queue is null");
+            return;
+        }
         setQueueReloadCallback(null);
         mediaQueueCallback = new MediaQueueController(queue);
         queue.registerCallback(mediaQueueCallback);
@@ -483,6 +557,9 @@ public class ChromecastSession {
         }
 
         private int getCurrentItemIndex() {
+            if (client == null || client.getMediaStatus() == null) {
+                return -1;
+            }
             return queue.indexOfItemWithId(client.getMediaStatus().getCurrentItemId());
         }
 
@@ -586,15 +663,27 @@ public class ChromecastSession {
             callback.error("session_error");
             return;
         }
-        activity.runOnUiThread(() -> {
+        if (activity == null) {
+            callback.error("session_error");
+            return;
+        }
+        runOnUiThreadSafely(() -> {
             try {
                 JSONArray qItems = queueLoadRequest.getJSONArray("items");
+                if (qItems.length() == 0) {
+                    callback.error(ChromecastUtilities.createError("invalid_parameter", "Queue must contain at least one item"));
+                    return;
+                }
                 MediaQueueItem[] items = new MediaQueueItem[qItems.length()];
                 for (int i = 0; i < qItems.length(); i++) {
                     items[i] = ChromecastUtilities.createMediaQueueItem(qItems.getJSONObject(i));
                 }
 
                 int startIndex = queueLoadRequest.getInt("startIndex");
+                if (startIndex < 0 || startIndex >= items.length) {
+                    callback.error(ChromecastUtilities.createError("invalid_parameter", "startIndex out of queue bounds"));
+                    return;
+                }
                 int repeatMode = ChromecastUtilities.getAndroidRepeatMode(queueLoadRequest.getString("repeatMode"));
                 long playPosition = Double.valueOf(items[startIndex].getStartTime() * 1000).longValue();
                 JSONObject customData = null;
@@ -627,8 +716,15 @@ public class ChromecastSession {
             callback.error("session_error");
             return;
         }
-
-        activity.runOnUiThread(() -> {
+        if (mediaQueueCallback == null) {
+            callback.error("session_error");
+            return;
+        }
+        if (activity == null) {
+            callback.error("session_error");
+            return;
+        }
+        runOnUiThreadSafely(() -> {
             setQueueStatusUpdatedCallback(() -> clientListener.onMediaUpdate(createMediaObject(MediaStatus.IDLE_REASON_INTERRUPTED)));
             client.queueJumpToItem(itemId, null).setResultCallback(result -> {
                 if (result.getStatus().isSuccess()) {
@@ -659,7 +755,11 @@ public class ChromecastSession {
             callback.error("session_error");
             return;
         }
-        activity.runOnUiThread(() -> {
+        if (activity == null) {
+            callback.error("session_error");
+            return;
+        }
+        runOnUiThreadSafely(() -> {
             try {
                 session.setVolume(volume);
                 callback.success();
@@ -680,7 +780,11 @@ public class ChromecastSession {
             callback.error("session_error");
             return;
         }
-        activity.runOnUiThread(() -> {
+        if (activity == null) {
+            callback.error("session_error");
+            return;
+        }
+        runOnUiThreadSafely(() -> {
             try {
                 session.setMute(muted);
                 callback.success();
@@ -707,7 +811,7 @@ public class ChromecastSession {
                 JSONObject errorResult = result.getCustomData();
                 String error = errorMsg;
                 if (errorResult != null) {
-                    error += "\nError details: " + errorMsg;
+                    error += "\nError details: " + errorResult;
                 }
                 callback.error(error);
             }

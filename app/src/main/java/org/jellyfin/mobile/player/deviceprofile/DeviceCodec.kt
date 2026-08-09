@@ -9,8 +9,8 @@ import org.jellyfin.mobile.player.deviceprofile.CodecHelpers.getVideoLevel
 import org.jellyfin.mobile.player.deviceprofile.CodecHelpers.getVideoProfile
 import kotlin.math.max
 
-sealed class DeviceCodec(val name: String, val mimeType: String, val profiles: Set<String>, val maxBitrate: Int,) {
-    class Video(name: String, mimeType: String, profiles: Set<String>, private val levels: Set<Int>, maxBitrate: Int,) :
+sealed class DeviceCodec(val name: String, val mimeType: String, val profiles: Set<String>, val maxBitrate: Int) {
+    class Video(name: String, mimeType: String, profiles: Set<String>, private val levels: Set<Int>, maxBitrate: Int) :
         DeviceCodec(name, mimeType, profiles, maxBitrate) {
 
         fun mergeCodec(codecToMerge: Video): Video = Video(

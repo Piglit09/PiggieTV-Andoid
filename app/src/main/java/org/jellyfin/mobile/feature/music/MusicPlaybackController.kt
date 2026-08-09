@@ -6,9 +6,10 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.AudioManager
 import android.os.Build
-import androidx.core.net.toUri
 import androidx.core.content.ContextCompat
+import androidx.core.net.toUri
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
@@ -17,6 +18,7 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.MediaSource
 import kotlinx.coroutines.CoroutineScope
@@ -30,16 +32,23 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import org.jellyfin.mobile.feature.music.auto.PtvMusicAutoResumeStore
 import org.jellyfin.mobile.feature.music.auto.PtvMusicService
+import org.jellyfin.mobile.feature.music.auto.PtvMusicSessionInvalidator
 import org.jellyfin.mobile.player.deviceprofile.DeviceProfileBuilder
 import org.jellyfin.mobile.player.source.MediaSourceResolver
 import org.jellyfin.mobile.player.source.RemoteJellyfinMediaSource
 import org.jellyfin.mobile.utils.applyDefaultAudioAttributes
 import org.jellyfin.sdk.api.client.ApiClient
 import org.jellyfin.sdk.api.client.extensions.audioApi
+import org.jellyfin.sdk.api.client.extensions.playStateApi
 import org.jellyfin.sdk.api.client.extensions.universalAudioApi
 import org.jellyfin.sdk.model.api.MediaProtocol
 import org.jellyfin.sdk.model.api.MediaStreamProtocol
 import org.jellyfin.sdk.model.api.PlayMethod
+import org.jellyfin.sdk.model.api.PlaybackOrder
+import org.jellyfin.sdk.model.api.PlaybackProgressInfo
+import org.jellyfin.sdk.model.api.PlaybackStartInfo
+import org.jellyfin.sdk.model.api.PlaybackStopInfo
+import org.jellyfin.sdk.model.api.RepeatMode
 import timber.log.Timber
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
@@ -52,6 +61,7 @@ class MusicPlaybackController(
     deviceProfileBuilder: DeviceProfileBuilder,
     private val mediaSourceFactory: MediaSource.Factory,
     private val autoResumeStore: PtvMusicAutoResumeStore,
+    private val musicSessionInvalidator: PtvMusicSessionInvalidator,
 ) : Player.Listener,
     DefaultLifecycleObserver {
     val instanceId: String = runtimeInstanceId(this)
@@ -60,9 +70,22 @@ class MusicPlaybackController(
     private val appContext = context.applicationContext
     private val deviceProfile = deviceProfileBuilder.getDeviceProfile()
     private val audioApi = apiClient.audioApi
+    private val playStateApi = apiClient.playStateApi
     private val universalAudioApi = apiClient.universalAudioApi
+    private val audioManager = appContext.getSystemService(AudioManager::class.java)
     private val player = ExoPlayer.Builder(appContext)
         .setWakeMode(C.WAKE_MODE_NETWORK)
+        .setLoadControl(
+            DefaultLoadControl.Builder()
+                .setBufferDurationsMs(
+                    MUSIC_MIN_BUFFER_MS,
+                    MUSIC_MAX_BUFFER_MS,
+                    MUSIC_PLAYBACK_BUFFER_MS,
+                    MUSIC_REBUFFER_MS,
+                )
+                .setPrioritizeTimeOverSizeThresholds(true)
+                .build(),
+        )
         .build().apply {
             addListener(this@MusicPlaybackController)
             applyDefaultAudioAttributes(C.AUDIO_CONTENT_TYPE_MUSIC)
@@ -92,6 +115,7 @@ class MusicPlaybackController(
     private var playbackServiceStartRequested = false
     private var lastPlaybackServiceStartRequestAtMs = 0L
     private val prefetchedSources = ConcurrentHashMap<java.util.UUID, RemoteJellyfinMediaSource>()
+    private val reportTracker = MusicPlaybackReportTracker()
     private val failedTrackIds = mutableSetOf<java.util.UUID>()
     private val trackRetryCounts = mutableMapOf<java.util.UUID, Int>()
     val playerInstanceId: String
@@ -104,12 +128,12 @@ class MusicPlaybackController(
                 "host=${apiClient.safeBaseHost()}",
         )
         ProcessLifecycleOwner.get().lifecycle.addObserver(this)
+        musicSessionInvalidator.attach { reason -> stop(source = "session:$reason") }
     }
 
     fun play(item: MusicItem, queue: List<MusicItem>, startPositionMs: Long = 0, shuffle: Boolean = false) {
         if (!item.isPlayable || released) return
 
-        ensurePlaybackServiceStarted(source = "play")
         scope.launch {
             val shuffleEnabled = shuffle || _state.value.shuffleEnabled
             failedTrackIds.clear()
@@ -262,7 +286,6 @@ class MusicPlaybackController(
     }
 
     fun playCurrent() {
-        ensurePlaybackServiceStarted(source = "playCurrent")
         scope.launch {
             if (!state.value.hasCurrent || released) return@launch
             playPreparedOrLoadCurrent()
@@ -277,7 +300,9 @@ class MusicPlaybackController(
                 "currentItemId=${state.value.currentItem?.id} queueSize=${state.value.queue.size} " +
                 "playing=${state.value.isPlaying} buffering=${state.value.isBuffering}",
         )
-        ensurePlaybackServiceStarted(source = source)
+        if (state.value.isPlaying || state.value.isBuffering) {
+            ensurePlaybackServiceStarted(source = source)
+        }
         publishPlayerState()
     }
 
@@ -295,12 +320,20 @@ class MusicPlaybackController(
     fun pause() {
         scope.launch {
             if (released) return@launch
+            loadJob?.cancel()
+            loadVersion++
+            pendingItemId = null
+            pendingReadyItemId = null
             player.pause()
             publishPlayerState()
         }
     }
 
     fun stop(source: String = COMMAND_SOURCE_CONTROLLER) {
+        autoResumeStore.clearPlaybackState()
+        lastPersistedAtMs = 0L
+        lastPersistedItemId = null
+        lastPersistedPositionMs = 0L
         scope.launch {
             if (released) return@launch
             Timber.i(
@@ -310,6 +343,7 @@ class MusicPlaybackController(
             loadJob?.cancel()
             prefetchJob?.cancel()
             progressJob?.cancel()
+            dispatchPlaybackReports(reportTracker.finish(player.currentPosition.toPlaybackTicks()))
             prefetchedSources.clear()
             failedTrackIds.clear()
             trackRetryCounts.clear()
@@ -324,7 +358,6 @@ class MusicPlaybackController(
             _state.update { currentState ->
                 MusicPlaybackState(isAppInForeground = currentState.isAppInForeground)
             }
-            persistPlaybackState(force = true)
         }
     }
 
@@ -353,7 +386,6 @@ class MusicPlaybackController(
             )
             when {
                 previousIndex != null -> startAt(previousIndex)
-
                 else -> player.seekTo(0)
             }
         }
@@ -443,6 +475,28 @@ class MusicPlaybackController(
         _state.update { it.copy(errorMessage = null) }
     }
 
+    fun suspendForPlaybackServiceFailure() {
+        if (released) return
+        loadJob?.cancel()
+        loadVersion++
+        pendingItemId = null
+        pendingReadyItemId = null
+        player.playWhenReady = false
+        player.pause()
+        playbackServiceStartRequested = false
+        val message = "PTV could not start protected background playback. Please try again."
+        autoResumeStore.markLastPlaybackError(message)
+        _state.update {
+            it.copy(
+                isPlaying = false,
+                isBuffering = false,
+                errorMessage = message,
+                canRetry = it.hasCurrent,
+            )
+        }
+        persistPlaybackState(force = true)
+    }
+
     fun retryFailed() {
         val failedItem = state.value.failedItem ?: state.value.currentItem ?: return
         failedTrackIds.remove(failedItem.id)
@@ -466,8 +520,10 @@ class MusicPlaybackController(
         if (released) return
         Timber.i("PTV music playback controller releasing shared player")
         persistPlaybackState(force = true)
+        dispatchPlaybackReports(reportTracker.finish(player.currentPosition.toPlaybackTicks()))
         released = true
         ProcessLifecycleOwner.get().lifecycle.removeObserver(this)
+        musicSessionInvalidator.detach()
         loadJob?.cancel()
         prefetchJob?.cancel()
         progressJob?.cancel()
@@ -560,6 +616,7 @@ class MusicPlaybackController(
             }
 
             Player.STATE_ENDED -> handleTrackEnded(trigger = "playerStateEnded")
+
             else -> publishPlayerState()
         }
         ensureProgressTicker()
@@ -630,7 +687,22 @@ class MusicPlaybackController(
             "PTV music media item transition mediaId=${mediaItem?.mediaId} reason=$reason " +
                 "currentIndex=$currentIndex queueSize=${playbackQueue.size}",
         )
+        syncCurrentIndexFromPlayer()
+        val transitionedItem = playbackQueue.getOrNull(currentIndex)
+        val transitionedSource = transitionedItem?.let { item -> prefetchedSources.remove(item.id) }
+        if (transitionedSource != null) {
+            dispatchPlaybackReports(
+                reportTracker.transitionTo(
+                    session = transitionedSource.toPlaybackReportSession(),
+                    positionTicks = 0L,
+                    isPaused = !player.playWhenReady,
+                    nowMs = System.currentTimeMillis(),
+                ),
+            )
+        }
+        resetTrackEndGuard()
         publishPlayerState()
+        prefetchNextItem()
     }
 
     private fun startAt(index: Int, startPositionMs: Long = 0) {
@@ -649,6 +721,7 @@ class MusicPlaybackController(
 
     private fun playPreparedOrLoadCurrent() {
         if (hasPreparedCurrentSource()) {
+            if (!ensurePlaybackServiceStarted(source = "playPrepared")) return
             player.play()
         } else {
             val resumePositionMs = state.value.positionMs
@@ -671,7 +744,9 @@ class MusicPlaybackController(
         val knownDurationMs = currentDurationMs()
         val targetPositionMs = when {
             positionMs <= 0 -> 0
+
             knownDurationMs != null -> positionMs.coerceIn(0, knownDurationMs)
+
             else -> {
                 Timber.w(
                     "PTV music seek ignored until duration is known; " +
@@ -721,8 +796,10 @@ class MusicPlaybackController(
             }
 
             is MusicTrackEndDecision.AdvanceTo -> startAt(decision.index)
+
             MusicTrackEndDecision.Stop -> {
                 Timber.i("PTV music queue ended repeat=off stopping cleanly")
+                dispatchPlaybackReports(reportTracker.finish(player.currentPosition.toPlaybackTicks()))
                 player.stop()
                 publishPlayerState()
             }
@@ -746,6 +823,7 @@ class MusicPlaybackController(
 
             fromTrackEnd -> {
                 Timber.i("PTV music queue ended repeat=off stopping cleanly")
+                dispatchPlaybackReports(reportTracker.finish(player.currentPosition.toPlaybackTicks()))
                 player.stop()
                 publishPlayerState()
             }
@@ -765,13 +843,16 @@ class MusicPlaybackController(
         )
     }
 
-    private fun failedQueueIndexes(): Set<Int> =
-        playbackQueue.mapIndexedNotNull { index, item ->
-            index.takeIf { item.id in failedTrackIds }
-        }.toSet()
+    private fun failedQueueIndexes(): Set<Int> = playbackQueue.mapIndexedNotNull { index, item ->
+        index.takeIf { item.id in failedTrackIds }
+    }.toSet()
 
-    private fun ensurePlaybackServiceStarted(source: String) {
-        if (released) return
+    private fun ensurePlaybackServiceStarted(source: String): Boolean {
+        if (released) return false
+        if (PtvMusicService.isRunning) {
+            playbackServiceStartRequested = true
+            return true
+        }
 
         val alreadyRequested = playbackServiceStartRequested
         val playbackActive = state.value.hasCurrent || player.isPlaying || player.playWhenReady
@@ -781,7 +862,7 @@ class MusicPlaybackController(
             source == "publishPlayerState" &&
             (!playbackActive || now - lastPlaybackServiceStartRequestAtMs < SERVICE_RESTART_REFRESH_MS)
         ) {
-            return
+            return true
         }
         val notificationsGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             ContextCompat.checkSelfPermission(
@@ -795,14 +876,14 @@ class MusicPlaybackController(
             .setClass(appContext, PtvMusicService::class.java)
             .putExtra(PtvMusicService.EXTRA_START_SOURCE, source)
 
-        runCatching {
-            appContext.startService(intent)
+        return runCatching {
+            ContextCompat.startForegroundService(appContext, intent)
         }.onSuccess {
             playbackServiceStartRequested = true
             lastPlaybackServiceStartRequestAtMs = now
             Timber.i(
                 "PTV music media service start requested source=$source " +
-                    "foreground=false media3WillPromoteWhenNotificationPosts=true " +
+                    "foreground=true placeholderNotificationExpected=true " +
                     "alreadyRequested=$alreadyRequested " +
                     "notificationPermissionGranted=$notificationsGranted " +
                     "currentItemId=${state.value.currentItem?.id} queueSize=${state.value.queue.size}",
@@ -819,10 +900,12 @@ class MusicPlaybackController(
                 "PTV music media service start failed source=$source " +
                     "notificationPermissionGranted=$notificationsGranted",
             )
-        }
+            suspendForPlaybackServiceFailure()
+        }.isSuccess
     }
 
     private fun beginLoadCurrent(startPositionMs: Long, playWhenReady: Boolean) {
+        if (playWhenReady && !ensurePlaybackServiceStarted(source = "loadCurrent")) return
         loadJob?.cancel()
         loadJob = scope.launch {
             loadCurrent(startPositionMs = startPositionMs, playWhenReady = playWhenReady)
@@ -856,6 +939,14 @@ class MusicPlaybackController(
                 pendingPrepareStartedAtMs = System.currentTimeMillis()
                 pendingReadyItemId = item.id
                 pendingReadyPlayWhenReady = playWhenReady
+                dispatchPlaybackReports(
+                    reportTracker.transitionTo(
+                        session = jellyfinMediaSource.toPlaybackReportSession(),
+                        positionTicks = restorePositionMs.toPlaybackTicks(),
+                        isPaused = !playWhenReady,
+                        nowMs = System.currentTimeMillis(),
+                    ),
+                )
                 player.setMediaSource(mediaSource)
                 player.prepare()
                 Timber.i(
@@ -872,7 +963,11 @@ class MusicPlaybackController(
                         currentItem = item,
                         currentIndex = currentIndex,
                         queue = playbackQueue,
-                        isBuffering = player.playbackState == Player.STATE_BUFFERING && !player.isPlaying,
+                        isBuffering = isActiveMusicBuffering(
+                            playbackState = player.playbackState,
+                            playWhenReady = player.playWhenReady,
+                            isPlaying = player.isPlaying,
+                        ),
                         isPlaying = player.isPlaying,
                         isEnded = player.playbackState == Player.STATE_ENDED,
                         codecCapability = jellyfinMediaSource.toCodecCapability(),
@@ -1116,10 +1211,14 @@ class MusicPlaybackController(
         val bufferedPositionMs = player.bufferedPosition
             .sanitizePositionMs(fallbackMs = state.value.bufferedPositionMs)
             .coerceAtLeast(positionMs)
-        val bufferActive = playbackState == Player.STATE_BUFFERING && !playerIsPlaying
+        val bufferActive = isActiveMusicBuffering(
+            playbackState = playbackState,
+            playWhenReady = player.playWhenReady,
+            isPlaying = playerIsPlaying,
+        )
         val ended = playbackState == Player.STATE_ENDED
         if (playerIsPlaying || bufferActive || player.playWhenReady) {
-            ensurePlaybackServiceStarted(source = "publishPlayerState")
+            if (!ensurePlaybackServiceStarted(source = "publishPlayerState")) return
         }
         _state.update {
             it.copy(
@@ -1137,6 +1236,13 @@ class MusicPlaybackController(
                 isReleased = released,
             )
         }
+        dispatchPlaybackReports(
+            reportTracker.progress(
+                positionTicks = positionMs.toPlaybackTicks(),
+                isPaused = !player.playWhenReady,
+                nowMs = System.currentTimeMillis(),
+            ),
+        )
         persistPlaybackState()
         resetTrackEndGuardIfPlaybackMovedAway(currentItemId = playbackQueue.getOrNull(currentIndex)?.id)
         maybeHandlePlaybackEndFallback(
@@ -1159,10 +1265,13 @@ class MusicPlaybackController(
         }
     }
 
-    private fun shouldRunProgressTicker(): Boolean =
-        !released &&
-            state.value.hasCurrent &&
-            (state.value.isPlaying || state.value.isBuffering || player.playbackState == Player.STATE_BUFFERING)
+    private fun shouldRunProgressTicker(): Boolean = !released &&
+        state.value.hasCurrent &&
+        (
+            state.value.isPlaying ||
+                state.value.isBuffering ||
+                (player.playWhenReady && player.playbackState == Player.STATE_BUFFERING)
+            )
 
     private fun syncCurrentIndexFromPlayer() {
         val mediaId = player.currentMediaItem?.mediaId ?: return
@@ -1183,7 +1292,7 @@ class MusicPlaybackController(
 
     private suspend fun resolveMediaSource(item: MusicItem): Result<RemoteJellyfinMediaSource> {
         prefetchedSources.remove(item.id)?.let { source ->
-            Timber.i("PTV music stream prefetch hit itemId=${item.id}")
+            Timber.i("PTV music stream prefetch cache hit")
             return Result.success(source)
         }
 
@@ -1205,7 +1314,10 @@ class MusicPlaybackController(
             skipFailed = true,
         ) ?: return
         val item = playbackQueue.getOrNull(nextIndex) ?: return
-        if (prefetchedSources.containsKey(item.id)) return
+        prefetchedSources[item.id]?.let { source ->
+            bufferResolvedNextItem(item = item, nextIndex = nextIndex, source = source)
+            return
+        }
 
         prefetchJob?.cancel()
         prefetchJob = scope.launch {
@@ -1213,14 +1325,45 @@ class MusicPlaybackController(
             resolveMediaSource(item).onSuccess { source ->
                 prefetchedSources[item.id] = source
                 trimPrefetchedSources()
+                bufferResolvedNextItem(item = item, nextIndex = nextIndex, source = source)
                 Timber.i(
-                    "PTV music stream prefetched itemId=${item.id} index=$nextIndex " +
+                    "PTV music stream prefetched index=$nextIndex " +
                         "in ${System.currentTimeMillis() - startedAt}ms",
                 )
             }.onFailure { error ->
-                Timber.w(error, "PTV music stream prefetch failed itemId=${item.id} index=$nextIndex")
+                Timber.w(error, "PTV music stream prefetch failed index=$nextIndex")
             }
         }
+    }
+
+    private fun bufferResolvedNextItem(item: MusicItem, nextIndex: Int, source: RemoteJellyfinMediaSource) {
+        if (released || playbackQueue.getOrNull(nextIndex)?.id != item.id) return
+        val expectedNextIndex = findNextIndex(
+            allowWrap = state.value.repeatMode == MusicRepeatMode.ALL,
+            skipFailed = true,
+        )
+        if (expectedNextIndex != nextIndex) return
+
+        val playerIndex = player.currentMediaItemIndex
+        val currentMediaId = player.currentMediaItem?.mediaId
+        val expectedCurrentId = playbackQueue.getOrNull(currentIndex)?.id?.toString()
+        if (playerIndex < 0 || currentMediaId != expectedCurrentId || player.playbackState == Player.STATE_IDLE) return
+
+        val bufferedIndex = playerIndex + 1
+        val bufferedMediaId = if (bufferedIndex < player.mediaItemCount) {
+            player.getMediaItemAt(bufferedIndex).mediaId
+        } else {
+            null
+        }
+        if (bufferedMediaId == item.id.toString()) return
+        if (player.mediaItemCount > bufferedIndex) {
+            player.removeMediaItems(bufferedIndex, player.mediaItemCount)
+        }
+        player.addMediaSource(createAudioMediaSource(source, item))
+        Timber.i(
+            "PTV music Media3 next-source buffer queued queueIndex=$nextIndex " +
+                "playerIndex=${player.currentMediaItemIndex} policy=min30s-max120s",
+        )
     }
 
     private fun trimPrefetchedSources() {
@@ -1229,6 +1372,89 @@ class MusicPlaybackController(
             .take(PREFETCH_CACHE_SIZE + 1)
             .mapTo(mutableSetOf(), MusicItem::id)
         prefetchedSources.keys.removeIf { itemId -> itemId !in keepIds }
+    }
+
+    private fun dispatchPlaybackReports(events: List<MusicPlaybackReportEvent>) {
+        events.forEach { event ->
+            scope.launch(Dispatchers.IO) {
+                val startedAt = System.currentTimeMillis()
+                runCatching {
+                    when (event) {
+                        is MusicPlaybackReportEvent.Playing -> playStateApi.reportPlaybackStart(
+                            PlaybackStartInfo(
+                                itemId = event.session.itemId,
+                                playMethod = event.session.playMethod,
+                                playSessionId = event.session.playSessionId,
+                                liveStreamId = event.session.liveStreamId,
+                                audioStreamIndex = event.session.audioStreamIndex,
+                                subtitleStreamIndex = null,
+                                isPaused = event.isPaused,
+                                isMuted = false,
+                                canSeek = true,
+                                positionTicks = event.positionTicks,
+                                volumeLevel = currentVolumePercent(),
+                                repeatMode = RepeatMode.REPEAT_NONE,
+                                playbackOrder = PlaybackOrder.DEFAULT,
+                            ),
+                        )
+
+                        is MusicPlaybackReportEvent.Progress -> playStateApi.reportPlaybackProgress(
+                            PlaybackProgressInfo(
+                                itemId = event.session.itemId,
+                                playMethod = event.session.playMethod,
+                                playSessionId = event.session.playSessionId,
+                                liveStreamId = event.session.liveStreamId,
+                                audioStreamIndex = event.session.audioStreamIndex,
+                                subtitleStreamIndex = null,
+                                isPaused = event.isPaused,
+                                isMuted = false,
+                                canSeek = true,
+                                positionTicks = event.positionTicks,
+                                volumeLevel = currentVolumePercent(),
+                                repeatMode = RepeatMode.REPEAT_NONE,
+                                playbackOrder = PlaybackOrder.DEFAULT,
+                            ),
+                        )
+
+                        is MusicPlaybackReportEvent.Stopped -> playStateApi.reportPlaybackStopped(
+                            PlaybackStopInfo(
+                                itemId = event.session.itemId,
+                                positionTicks = event.positionTicks,
+                                playSessionId = event.session.playSessionId,
+                                liveStreamId = event.session.liveStreamId,
+                                failed = false,
+                            ),
+                        )
+                    }
+                }.onSuccess {
+                    Timber.d(
+                        "PTV music playback report type=${event::class.simpleName} " +
+                            "latencyMs=${System.currentTimeMillis() - startedAt}",
+                    )
+                }.onFailure { error ->
+                    Timber.w(
+                        error,
+                        "PTV music playback report failed event=${event::class.simpleName} " +
+                            "latencyMs=${System.currentTimeMillis() - startedAt}",
+                    )
+                }
+            }
+        }
+    }
+
+    private fun RemoteJellyfinMediaSource.toPlaybackReportSession(): MusicPlaybackReportSession =
+        MusicPlaybackReportSession(
+            itemId = itemId,
+            playMethod = playMethod,
+            playSessionId = playSessionId,
+            liveStreamId = liveStreamId,
+            audioStreamIndex = selectedAudioStream?.index,
+        )
+
+    private fun currentVolumePercent(): Int {
+        val maximum = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        if (maximum <= 0) return 0
+        return (audioManager.getStreamVolume(AudioManager.STREAM_MUSIC) * 100 / maximum).coerceIn(0, 100)
     }
 
     private fun logReadyTiming() {
@@ -1447,6 +1673,10 @@ class MusicPlaybackController(
         const val PERSIST_MIN_INTERVAL_MS = 5_000L
         const val PERSIST_POSITION_DELTA_MS = 5_000L
         const val PREFETCH_CACHE_SIZE = 3
+        const val MUSIC_MIN_BUFFER_MS = 30_000
+        const val MUSIC_MAX_BUFFER_MS = 120_000
+        const val MUSIC_PLAYBACK_BUFFER_MS = 1_000
+        const val MUSIC_REBUFFER_MS = 2_500
         const val RESTART_TRACK_THRESHOLD_MS = 5_000L
         const val SERVICE_RESTART_REFRESH_MS = 15_000L
         const val COMMAND_SOURCE_CONTROLLER = "controller"
@@ -1497,3 +1727,8 @@ class MusicPlaybackController(
         )
     }
 }
+
+private fun Long.toPlaybackTicks(): Long = coerceIn(0L, Long.MAX_VALUE / 10_000L) * 10_000L
+
+internal fun isActiveMusicBuffering(playbackState: Int, playWhenReady: Boolean, isPlaying: Boolean): Boolean =
+    playbackState == Player.STATE_BUFFERING && playWhenReady && !isPlaying

@@ -43,6 +43,25 @@ class MusicRepositoryAutoPlaylistTest {
     }
 
     @Test
+    fun `saved session user avoids redundant current user request`() {
+        runBlocking {
+            val apiClient = FakePlaylistApiClient(
+                playlists = mutableListOf(PlaylistRecord(AUTO_PLAYLIST_ID, AUTO_PLAYLIST_NAME)),
+                playlistItems = mutableMapOf(AUTO_PLAYLIST_ID to mutableSetOf()),
+            )
+            val repository = MusicRepository(
+                apiClient = apiClient,
+                savedUserIdProvider = { USER_ID },
+            )
+
+            repository.addToAutoPlaylist(trackItem(), source = "phone")
+
+            apiClient.paths shouldNotContain "GET /Users/Me"
+            apiClient.paths shouldContain "GET /Items"
+        }
+    }
+
+    @Test
     fun `missing auto playlist creates then adds current track`() {
         runBlocking {
             val apiClient = FakePlaylistApiClient()
@@ -92,12 +111,8 @@ class MusicRepositoryAutoPlaylistTest {
             override fun <T : OutboundWebSocketMessage> subscribe(messageType: KClass<T>): Flow<T> = emptyFlow()
         }
 
-        override fun update(
-            baseUrl: String?,
-            accessToken: String?,
-            clientInfo: ClientInfo,
-            deviceInfo: DeviceInfo,
-        ) = Unit
+        override fun update(baseUrl: String?, accessToken: String?, clientInfo: ClientInfo, deviceInfo: DeviceInfo,) =
+            Unit
 
         override suspend fun request(
             method: HttpMethod,
@@ -154,6 +169,7 @@ class MusicRepositoryAutoPlaylistTest {
 
                 "POST /Playlists/{playlistId}/Items" -> {
                     val playlistId = pathParameters["playlistId"] as UUID
+
                     @Suppress("UNCHECKED_CAST")
                     val ids = queryParameters["ids"] as Collection<UUID>
                     playlistItems.getOrPut(playlistId) { mutableSetOf() }.addAll(ids)

@@ -6,8 +6,8 @@ import coil3.ImageLoader
 import coil3.SingletonImageLoader
 import org.jellyfin.mobile.app.apiModule
 import org.jellyfin.mobile.app.applicationModule
-import org.jellyfin.mobile.data.databaseModule
 import org.jellyfin.mobile.core.PtvCoreRuntime
+import org.jellyfin.mobile.data.databaseModule
 import org.jellyfin.mobile.utils.JellyTree
 import org.jellyfin.mobile.utils.isWebViewSupported
 import org.koin.android.ext.koin.androidContext
@@ -18,7 +18,9 @@ import org.koin.core.context.startKoin
 import timber.log.Timber
 
 @Suppress("unused")
-class JellyfinApplication : Application(), KoinComponent {
+class JellyfinApplication :
+    Application(),
+    KoinComponent {
     override fun onCreate() {
         super.onCreate()
 

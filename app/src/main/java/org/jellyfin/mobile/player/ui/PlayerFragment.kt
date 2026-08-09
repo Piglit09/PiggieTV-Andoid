@@ -29,7 +29,9 @@ import androidx.core.view.setPadding
 import androidx.core.view.updatePadding
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.viewModels
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.media3.common.Player
 import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.Job
@@ -120,6 +122,13 @@ class PlayerFragment :
         viewModel.error.observe(this) { message ->
             val safeMessage = message.ifEmpty { requireContext().getString(R.string.player_error_unspecific_exception) }
             requireContext().toast(safeMessage)
+        }
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                viewModel.mediaReportMessages.collect { message ->
+                    requireContext().toast(message)
+                }
+            }
         }
         viewModel.queueManager.currentMediaSource.observe(this) { mediaSource ->
             if (mediaSource.selectedVideoStream?.isLandscape == false) {
@@ -386,7 +395,6 @@ class PlayerFragment :
 
     private fun submitMediaReport(reason: MediaReportReason, details: String?) {
         viewModel.submitMediaReport(reason, details)
-        requireContext().toast("Report sent")
     }
 
     fun onSkipToPrevious() {

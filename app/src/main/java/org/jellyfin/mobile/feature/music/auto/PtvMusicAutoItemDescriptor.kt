@@ -16,33 +16,29 @@ internal data class PtvMusicAutoItemDescriptor(
 )
 
 @Suppress("FunctionExpressionBody")
-internal fun PtvMusicAutoCategory.toPtvMusicAutoDescriptor(): PtvMusicAutoItemDescriptor {
-    return PtvMusicAutoItemDescriptor(
-        mediaId = mediaId,
-        title = title,
-        subtitle = subtitle,
-        artist = null,
-        album = null,
-        artworkUri = null,
-        isBrowsable = true,
-        isPlayable = false,
-        grid = grid,
-    )
-}
+internal fun PtvMusicAutoCategory.toPtvMusicAutoDescriptor(): PtvMusicAutoItemDescriptor = PtvMusicAutoItemDescriptor(
+    mediaId = mediaId,
+    title = title,
+    subtitle = subtitle,
+    artist = null,
+    album = null,
+    artworkUri = null,
+    isBrowsable = true,
+    isPlayable = false,
+    grid = grid,
+)
 
 @Suppress("FunctionExpressionBody")
-internal fun MusicItem.toPtvMusicAutoDescriptor(): PtvMusicAutoItemDescriptor {
-    return PtvMusicAutoItemDescriptor(
-        mediaId = if (isPlayable) PtvMusicAutoIds.track(id) else PtvMusicAutoIds.item(id),
-        title = title,
-        subtitle = subtitle,
-        artist = artist,
-        album = album,
-        artworkUri = posterUrl,
-        isBrowsable = isFolder && !isPlayable,
-        isPlayable = isPlayable,
-    )
-}
+internal fun MusicItem.toPtvMusicAutoDescriptor(): PtvMusicAutoItemDescriptor = PtvMusicAutoItemDescriptor(
+    mediaId = if (isPlayable) PtvMusicAutoIds.track(id) else PtvMusicAutoIds.item(id),
+    title = title,
+    subtitle = subtitle,
+    artist = artist,
+    album = album,
+    artworkUri = posterUrl,
+    isBrowsable = isFolder && !isPlayable,
+    isPlayable = isPlayable,
+)
 
 internal fun MusicPage.toPtvMusicAutoDescriptors(): List<PtvMusicAutoItemDescriptor> =
     items.map(MusicItem::toPtvMusicAutoDescriptor)

@@ -175,4 +175,8 @@
     <string name="downloading_desc">Downloading %1$d titles</string>
     <string name="downloaded">Downloaded %1$s</string>
     <string name="special_episode">Special</string>
+    <string name="media_report_sent">Report sent</string>
+    <string name="media_report_unavailable">Reporting is not available on this PiggieTV server</string>
+    <string name="media_report_rate_limited">Too many reports were sent. Please try again later</string>
+    <string name="media_report_failed">Could not send the report. Please try again</string>
 </resources>

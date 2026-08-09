@@ -30,7 +30,7 @@ class LibraryService : MediaLibraryService() {
         }
     }
 
-    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo,): MediaLibrarySession? = mediaLibrarySession
+    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession? = mediaLibrarySession
 
     override fun onCreate() {
         super.onCreate()

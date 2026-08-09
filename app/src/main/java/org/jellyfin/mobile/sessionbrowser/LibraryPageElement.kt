@@ -13,7 +13,7 @@ sealed interface LibraryPageElement {
     /**
      * A group of items displayed as a section within Android Auto.
      */
-    data class Group(val title: String, val items: List<Item>,) : LibraryPageElement
+    data class Group(val title: String, val items: List<Item>) : LibraryPageElement
 
     /**
      * An item with custom metadata.

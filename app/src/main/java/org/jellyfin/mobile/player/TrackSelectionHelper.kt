@@ -11,7 +11,7 @@ import org.jellyfin.sdk.model.api.MediaStreamType
 import org.jellyfin.sdk.model.api.PlayMethod
 import org.jellyfin.sdk.model.api.SubtitleDeliveryMethod
 
-class TrackSelectionHelper(private val viewModel: PlayerViewModel, private val trackSelector: DefaultTrackSelector,) {
+class TrackSelectionHelper(private val viewModel: PlayerViewModel, private val trackSelector: DefaultTrackSelector) {
     private val mediaSourceOrNull: JellyfinMediaSource?
         get() = viewModel.mediaSourceOrNull
 

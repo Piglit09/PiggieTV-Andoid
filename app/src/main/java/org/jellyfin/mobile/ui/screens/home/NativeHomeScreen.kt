@@ -36,6 +36,7 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -88,8 +89,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -115,6 +118,7 @@ import org.jellyfin.mobile.signup.NativeSignupRequest
 import org.jellyfin.mobile.ui.utils.PiggieTvBackground
 import org.jellyfin.mobile.ui.utils.PiggieTvColors
 import org.jellyfin.mobile.utils.Constants
+import org.jellyfin.mobile.utils.toast
 import org.jellyfin.sdk.model.api.BaseItemKind
 import org.koin.compose.koinInject
 import kotlin.time.Duration.Companion.ZERO
@@ -136,6 +140,7 @@ fun NativeHomeScreen(
     onBackHandlerChanged: ((() -> Boolean)?) -> Unit,
 ) {
     val uiState by viewModel.uiState.collectAsState()
+    val context = LocalContext.current
     var reportItem by remember { mutableStateOf<NativeMediaItem?>(null) }
     var detailsSelection by remember { mutableStateOf<NativeMediaDetailsSelection?>(null) }
     var detailsHistory by remember { mutableStateOf<List<NativeMediaDetailsSelection>>(emptyList()) }
@@ -189,6 +194,10 @@ fun NativeHomeScreen(
         viewModel.load(server)
         detailsSelection = null
         detailsHistory = emptyList()
+    }
+
+    LaunchedEffect(viewModel) {
+        viewModel.mediaReportMessages.collect(context::toast)
     }
 
     SideEffect {
@@ -276,6 +285,8 @@ fun NativeHomeScreen(
                             onReportItem = { item -> reportItem = item },
                             onLibraryClick = viewModel::openLibrary,
                             onMovieSearch = viewModel::searchMovies,
+                            onSearchFilterChange = viewModel::selectSearchFilter,
+                            onSearchCategoryClick = viewModel::openSearchCategory,
                         )
                     } else {
                         LibraryContent(
@@ -416,8 +427,8 @@ private fun LoginScreen(
                             shape = MaterialTheme.shapes.medium,
                             color = if (username == user) {
                                 PiggieTvColors.Focus.copy(
-                                alpha = 0.24f
-                            )
+                                    alpha = 0.24f,
+                                )
                             } else {
                                 PiggieTvColors.Panel.copy(alpha = 0.82f)
                             },
@@ -637,7 +648,7 @@ private fun NativePasswordResetScreen(
                 Icon(
                     Icons.AutoMirrored.Outlined.ArrowBack,
                     contentDescription = null,
-                    tint = PiggieTvColors.TextPrimary
+                    tint = PiggieTvColors.TextPrimary,
                 )
             }
             Text(
@@ -658,7 +669,7 @@ private fun NativePasswordResetScreen(
                     painter = painterResource(R.drawable.app_logo),
                     contentDescription = null,
                     modifier = Modifier.fillMaxWidth(
-                        0.68f
+                        0.68f,
                     ).widthIn(max = layout.loginMaxWidth).height(layout.loadingLogoHeight),
                     contentScale = ContentScale.Fit,
                 )
@@ -668,10 +679,10 @@ private fun NativePasswordResetScreen(
                     text = if (mode ==
                         PasswordResetMode.REQUEST_CODE
                     ) {
-                            "Email me a reset code"
-                        } else {
-                            "Enter your reset code"
-                        },
+                        "Email me a reset code"
+                    } else {
+                        "Enter your reset code"
+                    },
                     color = PiggieTvColors.TextPrimary,
                     style = MaterialTheme.typography.h5,
                     fontWeight = FontWeight.Bold,
@@ -726,10 +737,10 @@ private fun NativePasswordResetScreen(
                     val messageColor = if (messageTone ==
                         SignupMessageTone.SUCCESS
                     ) {
-                            PiggieTvColors.Focus
-                        } else {
-                            PiggieTvColors.Accent
-                        }
+                        PiggieTvColors.Focus
+                    } else {
+                        PiggieTvColors.Accent
+                    }
                     Surface(
                         modifier = Modifier.fillMaxWidth().widthIn(max = layout.loginMaxWidth),
                         color = messageColor.copy(alpha = 0.14f),
@@ -741,10 +752,10 @@ private fun NativePasswordResetScreen(
                             color = if (messageTone ==
                                 SignupMessageTone.SUCCESS
                             ) {
-                                    PiggieTvColors.FocusSoft
-                                } else {
-                                    PiggieTvColors.Accent
-                                },
+                                PiggieTvColors.FocusSoft
+                            } else {
+                                PiggieTvColors.Accent
+                            },
                             modifier = Modifier.padding(14.dp),
                         )
                     }
@@ -863,7 +874,7 @@ private fun NativeSignupScreen(
                 Icon(
                     Icons.AutoMirrored.Outlined.ArrowBack,
                     contentDescription = null,
-                    tint = PiggieTvColors.TextPrimary
+                    tint = PiggieTvColors.TextPrimary,
                 )
             }
             Text(
@@ -986,8 +997,8 @@ private fun NativeSignupScreen(
                             .widthIn(max = layout.loginMaxWidth),
                         color = if (isSuccess) {
                             PiggieTvColors.Focus.copy(
-                            alpha = 0.14f
-                        )
+                                alpha = 0.14f,
+                            )
                         } else {
                             PiggieTvColors.Accent.copy(alpha = 0.14f)
                         },
@@ -996,8 +1007,8 @@ private fun NativeSignupScreen(
                             1.dp,
                             if (isSuccess) {
                                 PiggieTvColors.Focus.copy(
-                                alpha = 0.54f
-                            )
+                                    alpha = 0.54f,
+                                )
                             } else {
                                 PiggieTvColors.Accent.copy(alpha = 0.54f)
                             },
@@ -1076,6 +1087,8 @@ private fun HomeContent(
     onReportItem: (NativeMediaItem) -> Unit,
     onLibraryClick: (NativeMediaItem) -> Unit,
     onMovieSearch: (String) -> Unit,
+    onSearchFilterChange: (NativeSearchFilter) -> Unit,
+    onSearchCategoryClick: (NativeMediaItem) -> Unit,
 ) {
     var activeTab by rememberSaveable { mutableStateOf(NativeHomeTab.HOME) }
     var childHeaderCollapsed by remember { mutableStateOf(false) }
@@ -1085,7 +1098,7 @@ private fun HomeContent(
             when (activeTab) {
                 NativeHomeTab.HOME ->
                     homeListState.firstVisibleItemIndex == 0 &&
-                    homeListState.firstVisibleItemScrollOffset < 24
+                        homeListState.firstVisibleItemScrollOffset < 24
 
                 NativeHomeTab.MUSIC,
                 NativeHomeTab.BOOKS,
@@ -1133,6 +1146,8 @@ private fun HomeContent(
                 onReportItem = onReportItem,
                 onLibraryClick = onLibraryClick,
                 onMovieSearch = onMovieSearch,
+                onSearchFilterChange = onSearchFilterChange,
+                onSearchCategoryClick = onSearchCategoryClick,
             )
 
             NativeHomeTab.DISCOVER -> NativeDiscoverScreen(
@@ -1182,7 +1197,13 @@ private fun HomeRows(
     onReportItem: (NativeMediaItem) -> Unit,
     onLibraryClick: (NativeMediaItem) -> Unit,
     onMovieSearch: (String) -> Unit,
+    onSearchFilterChange: (NativeSearchFilter) -> Unit,
+    onSearchCategoryClick: (NativeMediaItem) -> Unit,
 ) {
+    val searchResultCount = state.movieSearchResults.size +
+        state.searchGenreResults.size +
+        state.searchStudioResults.size
+
     LazyColumn(
         state = listState,
         modifier = Modifier
@@ -1198,44 +1219,38 @@ private fun HomeRows(
                 modifier = Modifier.padding(horizontal = layout.edgePadding),
             )
         }
+        item {
+            SearchFilterRow(
+                selected = state.searchFilter,
+                onSelect = onSearchFilterChange,
+                modifier = Modifier.padding(horizontal = layout.edgePadding),
+            )
+        }
 
         if (state.movieSearchQuery.isNotBlank()) {
-            when {
-                state.isSearchingMovies -> {
-                    item {
-                        MovieSearchResultsHeader(
-                            resultCount = state.movieSearchResults.size,
-                            error = state.movieSearchError,
-                            modifier = Modifier.padding(horizontal = layout.edgePadding),
-                        )
-                    }
-                    item {
-                        MovieInlineLoading(modifier = Modifier.padding(horizontal = layout.edgePadding))
-                    }
+            item {
+                MovieSearchResultsHeader(
+                    resultCount = searchResultCount,
+                    error = state.movieSearchError,
+                    modifier = Modifier.padding(horizontal = layout.edgePadding),
+                )
+            }
+            if (state.isSearchingMovies) {
+                item {
+                    MovieInlineLoading(modifier = Modifier.padding(horizontal = layout.edgePadding))
                 }
-
-                state.movieSearchResults.isEmpty() -> {
-                    item {
-                        MovieSearchResultsHeader(
-                            resultCount = state.movieSearchResults.size,
-                            error = state.movieSearchError,
-                            modifier = Modifier.padding(horizontal = layout.edgePadding),
-                        )
-                    }
-                    item {
-                        MovieEmptySearch(
-                            message = "No movies or shows matched your search.",
-                            modifier = Modifier.padding(horizontal = layout.edgePadding),
-                        )
-                    }
-                }
-
-                else -> item {
+            }
+            if (state.movieSearchResults.isNotEmpty()) {
+                item {
                     MediaSection(
                         layout = layout,
                         section = NativeMediaSection(
                             id = "movie-search-results",
-                            title = "Search Results",
+                            title = when (state.searchFilter) {
+                                NativeSearchFilter.MOVIES -> "Movies"
+                                NativeSearchFilter.SHOWS -> "Shows"
+                                else -> "Movies & Shows"
+                            },
                             rowKicker = "${state.movieSearchResults.size} matches",
                             groupKicker = null,
                             groupTitle = null,
@@ -1248,6 +1263,58 @@ private fun HomeRows(
                         onReportItem = onReportItem,
                         onItemPlay = { item -> onItemPlay(item, state.movieSearchResults) },
                         onItemClick = onItemClick,
+                    )
+                }
+            }
+            if (state.searchGenreResults.isNotEmpty()) {
+                item {
+                    MediaSection(
+                        layout = layout,
+                        section = NativeMediaSection(
+                            id = "genre-search-results",
+                            title = "Genres",
+                            rowKicker = "${state.searchGenreResults.size} video and music matches",
+                            groupKicker = null,
+                            groupTitle = null,
+                            showGroupHeader = false,
+                            presentation = PtvRowPresentation.STANDARD,
+                            shape = PtvRowShape.SQUARE,
+                            opensLibraries = false,
+                            items = state.searchGenreResults,
+                        ),
+                        onReportItem = onReportItem,
+                        onItemPlay = {},
+                        onItemClick = onSearchCategoryClick,
+                    )
+                }
+            }
+            if (state.searchStudioResults.isNotEmpty()) {
+                item {
+                    MediaSection(
+                        layout = layout,
+                        section = NativeMediaSection(
+                            id = "studio-search-results",
+                            title = "Studios",
+                            rowKicker = "${state.searchStudioResults.size} matches",
+                            groupKicker = null,
+                            groupTitle = null,
+                            showGroupHeader = false,
+                            presentation = PtvRowPresentation.STANDARD,
+                            shape = PtvRowShape.SQUARE,
+                            opensLibraries = false,
+                            items = state.searchStudioResults,
+                        ),
+                        onReportItem = onReportItem,
+                        onItemPlay = {},
+                        onItemClick = onSearchCategoryClick,
+                    )
+                }
+            }
+            if (searchResultCount == 0 && !state.isSearchingMovies) {
+                item {
+                    MovieEmptySearch(
+                        message = "No results matched this search.",
+                        modifier = Modifier.padding(horizontal = layout.edgePadding),
                     )
                 }
             }
@@ -1283,13 +1350,13 @@ private fun MovieSearchField(
     query: String,
     isSearching: Boolean,
     onQueryChange: (String) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
 ) {
     OutlinedTextField(
         value = query,
         onValueChange = onQueryChange,
         modifier = modifier.fillMaxWidth(),
-        label = { Text(text = "Search movies and shows") },
+        label = { Text(text = "Search PiggieTV") },
         singleLine = true,
         leadingIcon = {
             Icon(Icons.Outlined.Search, contentDescription = null, tint = PiggieTvColors.Focus)
@@ -1318,6 +1385,29 @@ private fun MovieSearchField(
             backgroundColor = PiggieTvColors.Night.copy(alpha = 0.48f),
         ),
     )
+}
+
+@Composable
+private fun SearchFilterRow(
+    selected: NativeSearchFilter,
+    onSelect: (NativeSearchFilter) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    LazyRow(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(48.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        items(NativeSearchFilter.entries, key = NativeSearchFilter::name) { filter ->
+            HomeTabButton(
+                text = filter.label,
+                selected = filter == selected,
+                onClick = { onSelect(filter) },
+                modifier = Modifier.widthIn(min = 88.dp),
+            )
+        }
+    }
 }
 
 @Composable
@@ -1410,7 +1500,7 @@ private fun HomeTabButton(text: String, selected: Boolean, onClick: () -> Unit, 
         modifier = modifier
             .fillMaxHeight()
             .clip(RoundedCornerShape(6.dp))
-            .clickable(onClick = onClick),
+            .selectable(selected = selected, role = Role.Tab, onClick = onClick),
         color = if (selected) PiggieTvColors.PanelHigh else PiggieTvColors.Night.copy(alpha = 0.04f),
         contentColor = if (selected) PiggieTvColors.TextPrimary else PiggieTvColors.TextSecondary,
         shape = RoundedCornerShape(6.dp),
@@ -1470,7 +1560,12 @@ private fun NativeDiscoverScreen(
                 modifier = Modifier.padding(horizontal = layout.edgePadding, vertical = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                Text("Discover", color = PiggieTvColors.TextPrimary, style = MaterialTheme.typography.h5, fontWeight = FontWeight.Bold)
+                Text(
+                    "Discover",
+                    color = PiggieTvColors.TextPrimary,
+                    style = MaterialTheme.typography.h5,
+                    fontWeight = FontWeight.Bold,
+                )
                 Text(
                     "Browse your Jellyfin libraries with your current app session.",
                     color = PiggieTvColors.TextSecondary,
@@ -1525,10 +1620,24 @@ private fun GamesHub(layout: PtvAdaptiveLayout, modifier: Modifier = Modifier) {
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center,
         ) {
-            Icon(Icons.Outlined.Casino, contentDescription = null, tint = PiggieTvColors.Focus, modifier = Modifier.size(54.dp))
+            Icon(
+                Icons.Outlined.Casino,
+                contentDescription = null,
+                tint = PiggieTvColors.Focus,
+                modifier = Modifier.size(54.dp),
+            )
             Spacer(Modifier.height(12.dp))
-            Text("PiggieTV Games", color = PiggieTvColors.TextPrimary, style = MaterialTheme.typography.h6, fontWeight = FontWeight.Bold)
-            Text("Native games are coming soon.", color = PiggieTvColors.TextSecondary, style = MaterialTheme.typography.body2)
+            Text(
+                "PiggieTV Games",
+                color = PiggieTvColors.TextPrimary,
+                style = MaterialTheme.typography.h6,
+                fontWeight = FontWeight.Bold,
+            )
+            Text(
+                "Native games are coming soon.",
+                color = PiggieTvColors.TextSecondary,
+                style = MaterialTheme.typography.body2,
+            )
         }
     }
 }
@@ -2090,7 +2199,7 @@ private fun MediaSection(
             horizontalArrangement = Arrangement.spacedBy(layout.rowSpacing),
             contentPadding = PaddingValues(horizontal = layout.edgePadding),
         ) {
-            items(section.items, key = { item -> item.id.toString() }) { item ->
+            items(section.items, key = { item -> "${item.type.serialName}:${item.id}" }) { item ->
                 PosterCard(
                     layout = layout,
                     item = item,
@@ -2147,20 +2256,22 @@ private fun PosterCard(
                     placeholder = painterResource(R.drawable.ic_splash),
                     fallback = painterResource(R.drawable.ic_splash),
                 )
-                Surface(
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .padding(7.dp),
-                    color = PiggieTvColors.Night.copy(alpha = 0.78f),
-                    shape = RoundedCornerShape(8.dp),
-                ) {
-                    IconButton(onClick = onReport, modifier = Modifier.size(32.dp)) {
-                        Icon(
-                            Icons.Outlined.Flag,
-                            contentDescription = "Report media",
-                            tint = PiggieTvColors.Focus,
-                            modifier = Modifier.size(17.dp),
-                        )
+                if (item.type !in NativeCatalogSearch.categoryTypes) {
+                    Surface(
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .padding(7.dp),
+                        color = PiggieTvColors.Night.copy(alpha = 0.78f),
+                        shape = RoundedCornerShape(8.dp),
+                    ) {
+                        IconButton(onClick = onReport, modifier = Modifier.size(32.dp)) {
+                            Icon(
+                                Icons.Outlined.Flag,
+                                contentDescription = "Report media",
+                                tint = PiggieTvColors.Focus,
+                                modifier = Modifier.size(17.dp),
+                            )
+                        }
                     }
                 }
                 if (item.isPlayable) {
@@ -2279,7 +2390,7 @@ private fun MediaDetailsScreen(
                         Icon(
                             Icons.AutoMirrored.Outlined.ArrowBack,
                             contentDescription = null,
-                            tint = PiggieTvColors.TextPrimary
+                            tint = PiggieTvColors.TextPrimary,
                         )
                     }
                     Spacer(modifier = Modifier.weight(1f))
@@ -2343,7 +2454,7 @@ private fun MediaDetailsScreen(
                                 Icon(
                                     Icons.Outlined.PlayArrow,
                                     contentDescription = null,
-                                    modifier = Modifier.size(18.dp)
+                                    modifier = Modifier.size(18.dp),
                                 )
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Text(text = "Play", fontWeight = FontWeight.Bold)
@@ -2361,7 +2472,7 @@ private fun MediaDetailsScreen(
                                 Icon(
                                     Icons.Outlined.FolderOpen,
                                     contentDescription = null,
-                                    modifier = Modifier.size(18.dp)
+                                    modifier = Modifier.size(18.dp),
                                 )
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Text(text = "Browse", fontWeight = FontWeight.Bold)
@@ -2752,7 +2863,7 @@ private val LIBRARY_ALPHA_LABELS = listOf("#") + ('A'..'Z').map(Char::toString)
 private val LIBRARY_ALPHA_RAIL_WIDTH = 30.dp
 private val LIBRARY_ALPHA_RAIL_SPACE = 38.dp
 
-private data class NativeMediaDetailsSelection(val item: NativeMediaItem, val siblings: List<NativeMediaItem>,)
+private data class NativeMediaDetailsSelection(val item: NativeMediaItem, val siblings: List<NativeMediaItem>)
 
 private fun List<NativeMediaItem>.alphaIndexByLabel(): Map<String, Int> = buildMap {
     forEachIndexed { index, item ->
@@ -2812,8 +2923,8 @@ private fun NativeMediaItem.toPlayOptions(siblings: List<NativeMediaItem> = empt
     val queue = when {
         type in playableAudioKinds ->
             siblings
-            .filter { sibling -> sibling.isPlayable && sibling.type in playableAudioKinds }
-            .ifEmpty { listOf(this) }
+                .filter { sibling -> sibling.isPlayable && sibling.type in playableAudioKinds }
+                .ifEmpty { listOf(this) }
 
         else -> listOf(this)
     }

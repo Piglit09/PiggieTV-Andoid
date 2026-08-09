@@ -10,7 +10,7 @@ import org.jellyfin.mobile.R
 import org.jellyfin.mobile.app.AppPreferences
 import kotlin.coroutines.resume
 
-class BluetoothPermissionHelper(private val activity: MainActivity, private val appPreferences: AppPreferences,) {
+class BluetoothPermissionHelper(private val activity: MainActivity, private val appPreferences: AppPreferences) {
     /**
      * This is used to prevent the dialog from showing multiple times in a single session (activity creation).
      * Otherwise, the package manager and permission would need to be queried on every media event.

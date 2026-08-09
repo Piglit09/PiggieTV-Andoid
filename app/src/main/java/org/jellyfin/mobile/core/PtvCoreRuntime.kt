@@ -19,6 +19,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
+import java.util.concurrent.TimeUnit
 
 data class PtvCoreMobileRuntimeSnapshot(
     val capabilityReport: PtvClientCapabilityReport? = null,
@@ -58,7 +59,9 @@ object PtvCoreRuntime {
             val userId = preferences.currentUserId?.toString()
             when {
                 serverId != null && userId != null -> PtvCoreScope(PtvCoreScopeKind.USER, serverId, userId)
+
                 serverId != null -> PtvCoreScope(PtvCoreScopeKind.SERVER, serverId = serverId)
+
                 else -> PtvCoreScope(
                     PtvCoreScopeKind.DEVICE,
                     deviceId = Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
@@ -122,7 +125,7 @@ object PtvCoreRuntime {
                                 key = "core-runtime-capabilities",
                                 scope = scope(),
                                 createdAt = timestamp(now),
-                                expiresAt = timestamp(now + 24 * 60 * 60 * 1000L),
+                                expiresAt = timestamp(now + TimeUnit.DAYS.toMillis(1)),
                                 payload = mapOf("owner" to "existing-android-cache"),
                             ),
                         )
@@ -175,19 +178,17 @@ object PtvCoreRuntime {
 
     private fun success(): PtvCoreResult<Unit> = PtvCoreResult.Success(Unit)
 
-    private fun failure(
-        code: String,
-        kind: com.piggietv.core.PtvCoreErrorKind,
-    ): PtvCoreResult<Unit> = PtvCoreResult.Failure(
-        com.piggietv.core.PtvCoreError(
-            kind = kind,
-            code = code,
-            message = "PiggieTV core initialization was degraded.",
-            retryable = true,
-            timestamp = timestamp(),
-            operation = "core-runtime",
-        ),
-    )
+    private fun failure(code: String, kind: com.piggietv.core.PtvCoreErrorKind): PtvCoreResult<Unit> =
+        PtvCoreResult.Failure(
+            com.piggietv.core.PtvCoreError(
+                kind = kind,
+                code = code,
+                message = "PiggieTV core initialization was degraded.",
+                retryable = true,
+                timestamp = timestamp(),
+                operation = "core-runtime",
+            ),
+        )
 
     private fun timestamp(value: Long = System.currentTimeMillis()): String =
         SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {

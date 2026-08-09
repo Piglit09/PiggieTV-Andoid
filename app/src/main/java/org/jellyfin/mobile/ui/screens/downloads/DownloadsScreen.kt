@@ -20,7 +20,7 @@ import org.jellyfin.mobile.downloads.DownloadsViewModel
 import org.jellyfin.mobile.ui.utils.PiggieTvBackground
 
 @Composable
-fun DownloadsScreen(viewModel: DownloadsViewModel = viewModel(), onBackPressed: () -> Unit = {},) {
+fun DownloadsScreen(viewModel: DownloadsViewModel = viewModel(), onBackPressed: () -> Unit = {}) {
     PiggieTvBackground(modifier = Modifier.fillMaxSize()) {
         Scaffold(
             modifier = Modifier

@@ -45,7 +45,7 @@ import org.jellyfin.sdk.model.api.ImageType
 import org.koin.compose.koinInject
 
 @Composable
-fun DownloadsList(viewModel: DownloadsViewModel = viewModel(), contentPadding: PaddingValues = PaddingValues.Zero,) {
+fun DownloadsList(viewModel: DownloadsViewModel = viewModel(), contentPadding: PaddingValues = PaddingValues.Zero) {
     val downloads by viewModel.downloads.collectAsState()
     if (downloads.isEmpty()) {
         EmptyDownloads(contentPadding = contentPadding)
@@ -74,7 +74,7 @@ fun DownloadsList(viewModel: DownloadsViewModel = viewModel(), contentPadding: P
 }
 
 @Composable
-fun DownloadItem(download: DownloadEntity, modifier: Modifier = Modifier,) {
+fun DownloadItem(download: DownloadEntity, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val apiClient: ApiClient = koinInject()
 

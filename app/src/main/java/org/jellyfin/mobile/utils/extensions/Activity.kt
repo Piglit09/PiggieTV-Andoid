@@ -15,33 +15,33 @@ fun Activity.lockOrientation() {
         Surface.ROTATION_90 -> if (width >
             height
         ) {
-                ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
-            } else {
-                ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT
-            }
+            ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        } else {
+            ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT
+        }
 
         Surface.ROTATION_180 -> if (height >
             width
         ) {
-                ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT
-            } else {
-                ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE
-            }
+            ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT
+        } else {
+            ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE
+        }
 
         Surface.ROTATION_270 -> if (width >
             height
         ) {
-                ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE
-            } else {
-                ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-            }
+            ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE
+        } else {
+            ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        }
 
         else -> if (height >
             width
         ) {
-                ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-            } else {
-                ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
-            }
+            ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        } else {
+            ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        }
     }
 }

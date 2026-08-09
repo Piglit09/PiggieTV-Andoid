@@ -25,8 +25,8 @@ object PtvCorePlatformAdapter {
             PtvClientCapability.HARDWARE_DECODING.wireName to true,
             PtvClientCapability.TELEMETRY.wireName to false,
             PtvClientCapability.OFFLINE_CACHE.wireName to true,
-            PtvClientCapability.QUICK_CONNECT.wireName to true,
-            PtvClientCapability.DEEP_LINKS.wireName to true,
+            PtvClientCapability.QUICK_CONNECT.wireName to false,
+            PtvClientCapability.DEEP_LINKS.wireName to false,
         ),
     )
 }

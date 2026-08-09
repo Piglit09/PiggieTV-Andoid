@@ -1,12 +1,15 @@
 package org.jellyfin.mobile.feature.music.auto
 
+import android.app.Notification
+import androidx.media3.common.C
+import androidx.media3.common.Player
 import io.kotest.matchers.booleans.shouldBeFalse
 import io.kotest.matchers.booleans.shouldBeTrue
 import io.kotest.matchers.shouldBe
-import androidx.media3.common.C
-import androidx.media3.common.Player
 import org.jellyfin.mobile.feature.music.MusicItem
+import org.jellyfin.mobile.feature.music.MusicPlaybackState
 import org.jellyfin.mobile.feature.music.MusicSongAction
+import org.jellyfin.mobile.feature.music.isActiveMusicBuffering
 import org.jellyfin.sdk.model.api.BaseItemKind
 import org.junit.jupiter.api.Test
 import java.util.UUID
@@ -96,6 +99,83 @@ class PtvMusicAutoModelsTest {
         (Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM in nonSeekableCommands).shouldBeFalse()
         (Player.COMMAND_SEEK_FORWARD in nonSeekableCommands).shouldBeFalse()
         (Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM in nonSeekableCommands).shouldBeTrue()
+        (Player.COMMAND_CHANGE_MEDIA_ITEMS in seekableCommands).shouldBeFalse()
+        (Player.COMMAND_CHANGE_MEDIA_ITEMS in nonSeekableCommands).shouldBeFalse()
+        (Player.COMMAND_SET_MEDIA_ITEM in seekableCommands).shouldBeTrue()
+        (Player.COMMAND_SET_MEDIA_ITEM in nonSeekableCommands).shouldBeTrue()
+    }
+
+    @Test
+    fun `auto controller access requires platform trust or the app uid`() {
+        isPtvMusicControllerAllowed(
+            controllerIsTrusted = true,
+            controllerUid = 20,
+            applicationUid = 10,
+        ).shouldBeTrue()
+        isPtvMusicControllerAllowed(
+            controllerIsTrusted = false,
+            controllerUid = 10,
+            applicationUid = 10,
+        ).shouldBeTrue()
+        isPtvMusicControllerAllowed(
+            controllerIsTrusted = false,
+            controllerUid = 20,
+            applicationUid = 10,
+        ).shouldBeFalse()
+        isPtvMusicControllerAllowed(
+            controllerIsTrusted = false,
+            controllerUid = -1,
+            applicationUid = -1,
+        ).shouldBeFalse()
+    }
+
+    @Test
+    fun `foreground policy covers startup playback pause and Media3 grace`() {
+        requiresPtvMusicForeground(
+            media3Required = false,
+            playbackState = MusicPlaybackState(isBuffering = true),
+        ).shouldBeTrue()
+        requiresPtvMusicForeground(
+            media3Required = false,
+            playbackState = MusicPlaybackState(isPlaying = true),
+        ).shouldBeTrue()
+        requiresPtvMusicForeground(
+            media3Required = true,
+            playbackState = MusicPlaybackState(),
+        ).shouldBeTrue()
+        requiresPtvMusicForeground(
+            media3Required = false,
+            playbackState = MusicPlaybackState(),
+        ).shouldBeFalse()
+    }
+
+    @Test
+    fun `buffering only keeps playback foreground while play is requested`() {
+        isActiveMusicBuffering(
+            playbackState = Player.STATE_BUFFERING,
+            playWhenReady = true,
+            isPlaying = false,
+        ).shouldBeTrue()
+        isActiveMusicBuffering(
+            playbackState = Player.STATE_BUFFERING,
+            playWhenReady = false,
+            isPlaying = false,
+        ).shouldBeFalse()
+        isActiveMusicBuffering(
+            playbackState = Player.STATE_READY,
+            playWhenReady = true,
+            isPlaying = false,
+        ).shouldBeFalse()
+    }
+
+    @Test
+    fun `paused notification clears foreground-only flags`() {
+        val flags = Notification.FLAG_ONLY_ALERT_ONCE or
+            Notification.FLAG_ONGOING_EVENT or
+            Notification.FLAG_NO_CLEAR or
+            Notification.FLAG_FOREGROUND_SERVICE
+
+        clearPtvMusicForegroundNotificationFlags(flags) shouldBe Notification.FLAG_ONLY_ALERT_ONCE
     }
 
     @Test
@@ -145,27 +225,25 @@ class PtvMusicAutoModelsTest {
     )
 
     @Suppress("FunctionExpressionBody")
-    private fun musicItem(id: UUID, isPlayable: Boolean, isFolder: Boolean, type: BaseItemKind): MusicItem {
-        return MusicItem(
-            id = id,
-            title = "Track",
-            subtitle = "Artist",
-            album = "Album",
-            albumId = null,
-            artist = "Artist",
-            artistIds = emptyList(),
-            genres = emptyList(),
-            type = type,
-            collectionType = null,
-            posterUrl = "https://example.invalid/image.jpg",
-            backdropUrl = null,
-            container = "mp3",
-            codec = "mp3",
-            playCount = 0,
-            progress = null,
-            isFavorite = false,
-            isFolder = isFolder,
-            isPlayable = isPlayable,
-        )
-    }
+    private fun musicItem(id: UUID, isPlayable: Boolean, isFolder: Boolean, type: BaseItemKind): MusicItem = MusicItem(
+        id = id,
+        title = "Track",
+        subtitle = "Artist",
+        album = "Album",
+        albumId = null,
+        artist = "Artist",
+        artistIds = emptyList(),
+        genres = emptyList(),
+        type = type,
+        collectionType = null,
+        posterUrl = "https://example.invalid/image.jpg",
+        backdropUrl = null,
+        container = "mp3",
+        codec = "mp3",
+        playCount = 0,
+        progress = null,
+        isFavorite = false,
+        isFolder = isFolder,
+        isPlayable = isPlayable,
+    )
 }

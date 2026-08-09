@@ -24,6 +24,8 @@ class PtvMusicAutoResumeStateSerializerTest {
             shuffleEnabled = true,
             repeatMode = MusicRepeatMode.ALL.name,
             lastPlayedTimestampMs = 123_456,
+            ownerServerId = 12,
+            ownerUserId = 34,
         )
 
         val decoded = PtvMusicAutoResumeStateSerializer.decode(
@@ -34,11 +36,28 @@ class PtvMusicAutoResumeStateSerializerTest {
         decoded.shouldNotBeNull()
         decoded.parsedRepeatMode shouldBe MusicRepeatMode.ALL
         decoded.queueUuids shouldHaveSize 2
+        decoded.belongsTo(serverId = 12, userId = 34) shouldBe true
+        decoded.belongsTo(serverId = 12, userId = 35) shouldBe false
     }
 
     @Test
     fun `invalid resume state is ignored`() {
         PtvMusicAutoResumeStateSerializer.decode("not-json").shouldBeNull()
+    }
+
+    @Test
+    fun `legacy ownerless state never matches an authenticated account`() {
+        val state = PtvMusicAutoResumeState(
+            queueItemIds = listOf("11111111-1111-1111-1111-111111111111"),
+            currentIndex = 0,
+            positionMs = 0,
+            shuffleEnabled = false,
+            repeatMode = MusicRepeatMode.NONE.name,
+            lastPlayedTimestampMs = 1,
+        )
+
+        state.belongsTo(serverId = 1, userId = 1) shouldBe false
+        state.withOwner(serverId = 1, userId = 2).belongsTo(serverId = 1, userId = 2) shouldBe true
     }
 
     @Test

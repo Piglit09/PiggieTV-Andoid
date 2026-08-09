@@ -5,6 +5,7 @@ import kotlinx.coroutines.withContext
 import org.jellyfin.mobile.data.dao.ServerDao
 import org.jellyfin.mobile.data.dao.UserDao
 import org.jellyfin.mobile.data.entity.ServerEntity
+import org.jellyfin.mobile.feature.music.auto.PtvMusicSessionInvalidator
 import org.jellyfin.sdk.Jellyfin
 import org.jellyfin.sdk.api.client.ApiClient
 import org.jellyfin.sdk.model.DeviceInfo
@@ -16,7 +17,12 @@ class ApiClientController(
     private val apiClient: ApiClient,
     private val serverDao: ServerDao,
     private val userDao: UserDao,
+    private val musicSessionInvalidator: PtvMusicSessionInvalidator,
 ) {
+    @Volatile
+    var authenticatedUserId: UUID? = null
+        private set
+
     private val baseDeviceInfo: DeviceInfo
         get() = jellyfin.options.deviceInfo!!
 
@@ -24,20 +30,33 @@ class ApiClientController(
      * Store server with [hostname] in the database.
      */
     suspend fun setupServer(hostname: String) {
-        appPreferences.currentServerId = withContext(Dispatchers.IO) {
+        val previousServerId = appPreferences.currentServerId
+        val serverId = withContext(Dispatchers.IO) {
             serverDao.getServerByHostname(hostname)?.id ?: serverDao.insert(hostname)
         }
+        if (serverId != previousServerId) {
+            musicSessionInvalidator.invalidate("serverChanged")
+            appPreferences.currentUserId = null
+            resetApiClientUser()
+        }
+        appPreferences.currentServerId = serverId
         apiClient.update(baseUrl = hostname)
     }
 
     suspend fun setupUser(serverId: Long, userId: UUID, accessToken: String) {
-        appPreferences.currentUserId = withContext(Dispatchers.IO) {
+        val previousUserId = appPreferences.currentUserId
+        val localUserId = withContext(Dispatchers.IO) {
             userDao.upsert(serverId, userId, accessToken)
         }
+        if (serverId != appPreferences.currentServerId || localUserId != previousUserId) {
+            musicSessionInvalidator.invalidate("userChanged")
+        }
+        appPreferences.currentUserId = localUserId
         configureApiClientUser(userId, accessToken)
     }
 
     suspend fun logoutCurrentUser() {
+        musicSessionInvalidator.invalidate("logout")
         val localUserId = appPreferences.currentUserId
         if (localUserId != null) {
             withContext(Dispatchers.IO) {
@@ -58,7 +77,7 @@ class ApiClientController(
         return server
     }
 
-    suspend fun loadSavedServerUser() {
+    suspend fun loadSavedServerUser(): UUID? {
         val (server, serverUser) = withContext(Dispatchers.IO) {
             val serverId = appPreferences.currentServerId ?: return@withContext null to null
             val userId = appPreferences.currentUserId
@@ -68,11 +87,16 @@ class ApiClientController(
 
         configureApiClientServer(serverUser?.server ?: server)
 
-        if (serverUser?.user?.accessToken != null) {
-            configureApiClientUser(serverUser.user.userId, serverUser.user.accessToken)
-        } else {
+        val savedUser = serverUser?.user
+        val accessToken = savedUser?.accessToken
+        if (savedUser == null || accessToken == null) {
+            musicSessionInvalidator.invalidate("missingSavedUser")
             resetApiClientUser()
+            return null
         }
+
+        configureApiClientUser(savedUser.userId, accessToken)
+        return savedUser.userId
     }
 
     suspend fun loadPreviouslyUsedServers(): List<ServerEntity> = withContext(Dispatchers.IO) {
@@ -91,6 +115,7 @@ class ApiClientController(
             // Append user id to device id to ensure uniqueness across sessions
             deviceInfo = baseDeviceInfo.copy(id = baseDeviceInfo.id + userId),
         )
+        authenticatedUserId = userId
     }
 
     private fun resetApiClientUser() {
@@ -98,5 +123,6 @@ class ApiClientController(
             accessToken = null,
             deviceInfo = baseDeviceInfo,
         )
+        authenticatedUserId = null
     }
 }

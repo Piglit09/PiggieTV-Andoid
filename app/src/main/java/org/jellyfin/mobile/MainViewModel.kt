@@ -8,9 +8,14 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import org.jellyfin.mobile.app.ApiClientController
 import org.jellyfin.mobile.data.entity.ServerEntity
+import org.jellyfin.mobile.feature.music.auto.PtvMusicSessionInvalidator
 import org.jellyfin.mobile.utils.Constants
 
-class MainViewModel(app: Application, private val apiClientController: ApiClientController,) : AndroidViewModel(app) {
+class MainViewModel(
+    app: Application,
+    private val apiClientController: ApiClientController,
+    private val musicSessionInvalidator: PtvMusicSessionInvalidator,
+) : AndroidViewModel(app) {
     private val _serverState: MutableStateFlow<ServerState> = MutableStateFlow(ServerState.Pending)
     val serverState: StateFlow<ServerState> get() = _serverState
 
@@ -40,6 +45,7 @@ class MainViewModel(app: Application, private val apiClientController: ApiClient
      * Temporarily unset the selected server to be able to connect to a different one
      */
     fun resetServer() {
+        musicSessionInvalidator.invalidate("serverSelection")
         _serverState.value = ServerState.Unset
     }
 }

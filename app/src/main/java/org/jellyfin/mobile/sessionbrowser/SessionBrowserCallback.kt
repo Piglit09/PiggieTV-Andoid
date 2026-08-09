@@ -47,7 +47,7 @@ import org.jellyfin.sdk.model.serializer.toUUIDOrNull
 import timber.log.Timber
 
 @Suppress("InjectDispatcher")
-class SessionBrowserCallback(private val context: Context, private val api: ApiClient,) : MediaLibrarySession.Callback {
+class SessionBrowserCallback(private val context: Context, private val api: ApiClient) : MediaLibrarySession.Callback {
     companion object {
         const val MAX_PAGE_SIZE = 250
     }
@@ -75,45 +75,47 @@ class SessionBrowserCallback(private val context: Context, private val api: ApiC
 
     private val LibraryRoute.page get() = pages.firstOrNull { page -> page.route == this::class }
 
-    private fun LibraryPageElement.Item.toMediaItem(groupTitle: String? = null,): MediaItem =
-        MediaItem.Builder().apply {
-            val extras = bundleOf()
-            groupTitle?.let {
-                extras.putString(androidx.media.utils.MediaConstants.DESCRIPTION_EXTRAS_KEY_CONTENT_STYLE_GROUP_TITLE, it)
-            }
-
-            if (action is LibraryItemAction.Navigate) {
-                val page = action.route.page
-
-                val contentStyle = when (page?.grid == true) {
-                    true -> MediaConstants.EXTRAS_VALUE_CONTENT_STYLE_GRID_ITEM
-                    false -> MediaConstants.EXTRAS_VALUE_CONTENT_STYLE_LIST_ITEM
-                }
-                extras.putInt(MediaConstants.EXTRAS_KEY_CONTENT_STYLE_BROWSABLE, contentStyle)
-                extras.putInt(MediaConstants.EXTRAS_KEY_CONTENT_STYLE_PLAYABLE, contentStyle)
-                setMediaId(Json.encodeToString(action.route))
-            } else if (action is LibraryItemAction.Play) {
-                setMediaId(action.item.id.toString())
-            }
-
-            setMediaMetadata(
-                MediaMetadata.Builder().apply {
-                    setTitle(title)
-                    setArtist(artist)
-                    setAlbumTitle(album)
-                    setIsBrowsable(action is LibraryItemAction.Navigate)
-                    setIsPlayable(action is LibraryItemAction.Play)
-
-                    if (image != null) {
-                        setArtworkUri(image)
-                    } else if (iconRes != null) {
-                        setArtworkUri(iconRes.asResourceUri())
-                    }
-
-                    setExtras(extras)
-                }.build(),
+    private fun LibraryPageElement.Item.toMediaItem(groupTitle: String? = null): MediaItem = MediaItem.Builder().apply {
+        val extras = bundleOf()
+        groupTitle?.let {
+            extras.putString(
+                androidx.media.utils.MediaConstants.DESCRIPTION_EXTRAS_KEY_CONTENT_STYLE_GROUP_TITLE,
+                it,
             )
-        }.build()
+        }
+
+        if (action is LibraryItemAction.Navigate) {
+            val page = action.route.page
+
+            val contentStyle = when (page?.grid == true) {
+                true -> MediaConstants.EXTRAS_VALUE_CONTENT_STYLE_GRID_ITEM
+                false -> MediaConstants.EXTRAS_VALUE_CONTENT_STYLE_LIST_ITEM
+            }
+            extras.putInt(MediaConstants.EXTRAS_KEY_CONTENT_STYLE_BROWSABLE, contentStyle)
+            extras.putInt(MediaConstants.EXTRAS_KEY_CONTENT_STYLE_PLAYABLE, contentStyle)
+            setMediaId(Json.encodeToString(action.route))
+        } else if (action is LibraryItemAction.Play) {
+            setMediaId(action.item.id.toString())
+        }
+
+        setMediaMetadata(
+            MediaMetadata.Builder().apply {
+                setTitle(title)
+                setArtist(artist)
+                setAlbumTitle(album)
+                setIsBrowsable(action is LibraryItemAction.Navigate)
+                setIsPlayable(action is LibraryItemAction.Play)
+
+                if (image != null) {
+                    setArtworkUri(image)
+                } else if (iconRes != null) {
+                    setArtworkUri(iconRes.asResourceUri())
+                }
+
+                setExtras(extras)
+            }.build(),
+        )
+    }.build()
 
     private fun Int.asResourceUri() = Uri.Builder()
         .scheme(ContentResolver.SCHEME_ANDROID_RESOURCE)
@@ -129,7 +131,7 @@ class SessionBrowserCallback(private val context: Context, private val api: ApiC
         }
     }
 
-    private fun createPageResult(route: LibraryRoute, params: LibraryParams? = null,): LibraryResult<MediaItem> {
+    private fun createPageResult(route: LibraryRoute, params: LibraryParams? = null): LibraryResult<MediaItem> {
         val page = route.page
 
         return if (page == null) {
@@ -169,7 +171,7 @@ class SessionBrowserCallback(private val context: Context, private val api: ApiC
         pageSize: Int,
     ): LibraryResult<ImmutableList<MediaItem>> {
         val page = route.page ?: return LibraryResult.ofError(
-            SessionError(SessionError.ERROR_BAD_VALUE, context.getString(R.string.media_service_unknown_page))
+            SessionError(SessionError.ERROR_BAD_VALUE, context.getString(R.string.media_service_unknown_page)),
         )
 
         if (api.baseUrl == null || api.accessToken == null) {

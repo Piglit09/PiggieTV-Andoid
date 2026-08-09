@@ -164,7 +164,16 @@ internal object PtvHomeRows {
             tier = 2,
             queryLimit = 14,
             candidateLimit = 220,
-            searchTerms = listOf("Anime", "Manga", "Crunchyroll", "Funimation", "Toonami", "Toei Animation", "Studio Pierrot", "MAPPA"),
+            searchTerms = listOf(
+                "Anime",
+                "Manga",
+                "Crunchyroll",
+                "Funimation",
+                "Toonami",
+                "Toei Animation",
+                "Studio Pierrot",
+                "MAPPA",
+            ),
             studioKeywords = listOf("toei animation", "mappa", "bones", "madhouse", "studio pierrot", "trigger", "a 1 pictures", "kyoto animation", "sunrise", "production i g", "ufotable", "shaft", "wit studio", "cloverworks"),
             studioNames = listOf("Toei Animation", "MAPPA", "Bones", "Madhouse", "Studio Pierrot", "Trigger", "A-1 Pictures", "Kyoto Animation", "Sunrise", "Production I.G", "Ufotable", "Shaft", "Wit Studio", "CloverWorks"),
             matcher = PtvItemMatcher.ANIME,
@@ -266,36 +275,25 @@ internal object PtvHomeRows {
 
     val homeRows: List<PtvHomeRowSpec> = rows.withGroupHeaders()
 
-    private fun genre(
-        id: String,
-        title: String,
-        vararg genres: String,
-    ) = genre(id = id, title = title, genres = genres.toList())
+    private fun genre(id: String, title: String, vararg genres: String) =
+        genre(id = id, title = title, genres = genres.toList())
 
-    private fun genre(
-        id: String,
-        title: String,
-        genres: List<String>,
-        matcher: PtvItemMatcher = PtvItemMatcher.NONE,
-    ) = PtvHomeRowSpec(
-        id = id,
-        title = title,
-        type = PtvRowType.GENRE,
-        groupKey = "explore-genres",
-        groupKicker = "Mood shelves",
-        groupTitle = "Explore Genres",
-        rowKicker = "Compact discovery",
-        presentation = PtvRowPresentation.COMPACT,
-        tier = 3,
-        genres = genres,
-        matcher = matcher,
-    )
+    private fun genre(id: String, title: String, genres: List<String>, matcher: PtvItemMatcher = PtvItemMatcher.NONE) =
+        PtvHomeRowSpec(
+            id = id,
+            title = title,
+            type = PtvRowType.GENRE,
+            groupKey = "explore-genres",
+            groupKicker = "Mood shelves",
+            groupTitle = "Explore Genres",
+            rowKicker = "Compact discovery",
+            presentation = PtvRowPresentation.COMPACT,
+            tier = 3,
+            genres = genres,
+            matcher = matcher,
+        )
 
-    private fun search(
-        id: String,
-        title: String,
-        searchTerms: List<String>,
-    ) = PtvHomeRowSpec(
+    private fun search(id: String, title: String, searchTerms: List<String>) = PtvHomeRowSpec(
         id = id,
         title = title,
         type = PtvRowType.SEARCH,
@@ -323,30 +321,77 @@ internal val movieSeriesTypes = listOf(BaseItemKind.MOVIE, BaseItemKind.SERIES)
 
 internal fun BaseItemDto.matchesPtvRow(row: PtvHomeRowSpec): Boolean = when (row.matcher) {
     PtvItemMatcher.NONE -> true
+
     PtvItemMatcher.ANIME -> scorePtvBrand(
         strongKeywords = listOf("anime", "manga", "crunchyroll", "funimation", "toonami"),
         supportingKeywords = listOf("anime", "manga", "animation", "animated", "japan", "japanese"),
         titleMatches = emptyList(),
         minScore = 2,
     )
+
     PtvItemMatcher.DISNEY -> scorePtvBrand(
-        strongKeywords = listOf("walt disney", "disney animation", "disney feature animation", "disney television animation", "disneytoon", "disney channel", "disney junior", "buena vista"),
-        supportingKeywords = listOf("animation", "animated", "cartoon", "family", "children", "kids", "pixar", "blue sky"),
+        strongKeywords = listOf(
+            "walt disney",
+            "disney animation",
+            "disney feature animation",
+            "disney television animation",
+            "disneytoon",
+            "disney channel",
+            "disney junior",
+            "buena vista",
+        ),
+        supportingKeywords = listOf(
+            "animation",
+            "animated",
+            "cartoon",
+            "family",
+            "children",
+            "kids",
+            "pixar",
+            "blue sky",
+        ),
         titleMatches = disneyTitleMatches,
         minScore = 6,
     )
+
     PtvItemMatcher.STAR_WARS -> scorePtvBrand(
         strongKeywords = listOf("star wars", "lucasfilm", "jedi", "sith", "skywalker", "mandalorian", "clone wars", "galactic empire", "rebel alliance"),
-        supportingKeywords = listOf("jedi", "sith", "skywalker", "mandalorian", "clone wars", "galactic empire", "rebel alliance"),
+        supportingKeywords = listOf(
+            "jedi",
+            "sith",
+            "skywalker",
+            "mandalorian",
+            "clone wars",
+            "galactic empire",
+            "rebel alliance",
+        ),
         titleMatches = starWarsTitleMatches,
         minScore = 4,
     )
+
     PtvItemMatcher.STAR_TREK -> scorePtvBrand(
-        strongKeywords = listOf("star trek", "starfleet", "federation", "klingon", "vulcan", "romulan", "deep space nine"),
-        supportingKeywords = listOf("starfleet", "federation", "klingon", "vulcan", "romulan", "uss enterprise", "deep space nine"),
+        strongKeywords = listOf(
+            "star trek",
+            "starfleet",
+            "federation",
+            "klingon",
+            "vulcan",
+            "romulan",
+            "deep space nine",
+        ),
+        supportingKeywords = listOf(
+            "starfleet",
+            "federation",
+            "klingon",
+            "vulcan",
+            "romulan",
+            "uss enterprise",
+            "deep space nine",
+        ),
         titleMatches = starTrekTitleMatches,
         minScore = 4,
     )
+
     PtvItemMatcher.FAMILY_ANIMATION -> isPtvFamilyAnimation()
 }
 
@@ -472,7 +517,12 @@ private data class PtvMetadataBuckets(
 
 private fun BaseItemDto.ptvMetadataBuckets(): PtvMetadataBuckets {
     val studioText = studios.orEmpty().mapNotNull { it.name }.joinToString(" ").normalizePtvText()
-    val providerText = providerIds.orEmpty().flatMap { (key, value) -> listOfNotNull(key, value) }.joinToString(" ").normalizePtvText()
+    val providerText = providerIds.orEmpty().flatMap { (key, value) ->
+        listOfNotNull(
+            key,
+            value,
+        )
+    }.joinToString(" ").normalizePtvText()
     val productionText = productionLocations.orEmpty().joinToString(" ").normalizePtvText()
     val genreTagText = (genres.orEmpty() + tags.orEmpty()).joinToString(" ").normalizePtvText()
     val titleFields = listOfNotNull(name, originalTitle, seriesName)

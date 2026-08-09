@@ -22,10 +22,9 @@ class PtvMusicAutoResumeCoordinator(
         if (restoreAttempted) {
             return@withLock PtvMusicAutoRestoreResult.AlreadyAttempted
         }
-        restoreAttempted = true
-
         val savedState = resumeStore.loadPlaybackState()
         if (savedState == null) {
+            restoreAttempted = true
             return@withLock PtvMusicAutoRestoreResult.NoSavedState.also {
                 resumeStore.markRestoreStatus(it.message)
             }
@@ -33,6 +32,7 @@ class PtvMusicAutoResumeCoordinator(
 
         val savedIds = savedState.queueUuids
         if (savedIds.isEmpty()) {
+            restoreAttempted = true
             resumeStore.clearPlaybackState()
             return@withLock PtvMusicAutoRestoreResult.NoPlayableItems.also {
                 resumeStore.markRestoreStatus(it.message)
@@ -52,24 +52,30 @@ class PtvMusicAutoResumeCoordinator(
                 }.takeIf { index -> index >= 0 }
                     ?: savedState.currentIndex.coerceIn(0, restoredItems.lastIndex)
 
-                playbackController.restoreQueue(
+                val restored = playbackController.restoreQueue(
                     queue = restoredItems,
                     currentIndex = restoredCurrentIndex,
                     positionMs = savedState.positionMs,
                     shuffleEnabled = savedState.shuffleEnabled,
                     repeatMode = savedState.parsedRepeatMode,
                 )
-                PtvMusicAutoRestoreResult.Restored(
-                    restoredCount = restoredItems.size,
-                    missingCount = missingCount.coerceAtLeast(0),
-                )
+                if (restored) {
+                    PtvMusicAutoRestoreResult.Restored(
+                        restoredCount = restoredItems.size,
+                        missingCount = missingCount.coerceAtLeast(0),
+                    )
+                } else {
+                    PtvMusicAutoRestoreResult.Failed
+                }
             }
         }.fold(
             onSuccess = { result ->
+                restoreAttempted = result != PtvMusicAutoRestoreResult.Failed
                 resumeStore.markRestoreStatus(result.message)
                 result
             },
             onFailure = { error ->
+                restoreAttempted = false
                 Timber.e(error, "PTV Music Auto queue restore failed")
                 PtvMusicAutoRestoreResult.Failed.also {
                     resumeStore.markRestoreStatus(it.message)

@@ -19,7 +19,7 @@ class PermissionRequestHelper {
         permissionRequests.put(requestCode, callback)
     }
 
-    fun handleRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray,) {
+    fun handleRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         // Change to a map
         val permissionsMap = permissions
             .mapIndexed { index, permission ->

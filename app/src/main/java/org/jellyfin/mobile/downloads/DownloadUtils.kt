@@ -137,7 +137,7 @@ class DownloadUtils(
     private fun isNetworkRoaming(): Boolean {
         val network: Network = connectivityManager?.activeNetwork ?: throw AndroidException()
         val capabilities: NetworkCapabilities = connectivityManager?.getNetworkCapabilities(
-            network
+            network,
         ) ?: throw AndroidException()
         return !capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_ROAMING)
     }
