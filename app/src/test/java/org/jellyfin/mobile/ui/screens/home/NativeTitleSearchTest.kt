@@ -56,12 +56,7 @@ class NativeTitleSearchTest {
         ) shouldBe listOf(indexedSeries)
     }
 
-    private fun item(
-        key: String,
-        title: String,
-        type: BaseItemKind,
-        childCount: Int? = null,
-    ) = NativeMediaItem(
+    private fun item(key: String, title: String, type: BaseItemKind, childCount: Int? = null) = NativeMediaItem(
         id = UUID.nameUUIDFromBytes(key.toByteArray()),
         title = title,
         subtitle = null,

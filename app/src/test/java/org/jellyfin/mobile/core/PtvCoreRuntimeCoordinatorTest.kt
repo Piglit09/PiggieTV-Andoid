@@ -64,8 +64,8 @@ class PtvCoreRuntimeCoordinatorTest {
         assertEquals(
             PtvCoreInitializationStatus.SKIPPED,
             result.steps.first {
-            it.step == PtvCoreInitializationStep.SETTINGS
-        }.status
+                it.step == PtvCoreInitializationStep.SETTINGS
+            }.status,
         )
     }
 
@@ -84,8 +84,8 @@ class PtvCoreRuntimeCoordinatorTest {
         assertEquals(
             PtvCoreInitializationStatus.FAILED,
             result.steps.first {
-            it.step == PtvCoreInitializationStep.API
-        }.status
+                it.step == PtvCoreInitializationStep.API
+            }.status,
         )
     }
 
@@ -170,17 +170,17 @@ class PtvCoreRuntimeCoordinatorTest {
 
         assertTrue(
             coordinator.registerListener("settings") {
-            installs.incrementAndGet()
-            val disposer: () -> Unit = { disposals.incrementAndGet() }
-            disposer
-        }
+                installs.incrementAndGet()
+                val disposer: () -> Unit = { disposals.incrementAndGet() }
+                disposer
+            },
         )
         assertFalse(
             coordinator.registerListener("settings") {
-            installs.incrementAndGet()
-            val disposer: () -> Unit = { disposals.incrementAndGet() }
-            disposer
-        }
+                installs.incrementAndGet()
+                val disposer: () -> Unit = { disposals.incrementAndGet() }
+                disposer
+            },
         )
         coordinator.initialize()
         coordinator.initialize()
@@ -267,7 +267,7 @@ class PtvCoreRuntimeCoordinatorTest {
         assertEquals(Thread.State.BLOCKED, thread.state)
     }
 
-    private fun coordinator(handler: (PtvCoreInitializationStep) -> PtvCoreResult<Unit>,): PtvCoreRuntimeCoordinator =
+    private fun coordinator(handler: (PtvCoreInitializationStep) -> PtvCoreResult<Unit>): PtvCoreRuntimeCoordinator =
         PtvCoreRuntimeCoordinator(
             PtvCoreInitializationStep.entries
                 .filter { it != PtvCoreInitializationStep.READY }

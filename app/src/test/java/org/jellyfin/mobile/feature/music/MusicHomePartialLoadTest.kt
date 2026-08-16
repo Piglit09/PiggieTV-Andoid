@@ -13,11 +13,11 @@ class MusicHomePartialLoadTest {
     fun `songs source failure does not hide loaded albums and artists`() {
         val album = musicItem(
             id = UUID.fromString("11111111-1111-1111-1111-111111111111"),
-            type = BaseItemKind.MUSIC_ALBUM
+            type = BaseItemKind.MUSIC_ALBUM,
         )
         val artist = musicItem(
             id = UUID.fromString("22222222-2222-2222-2222-222222222222"),
-            type = BaseItemKind.MUSIC_ARTIST
+            type = BaseItemKind.MUSIC_ARTIST,
         )
         val home = musicHome(
             albums = listOf(album),
@@ -94,7 +94,7 @@ class MusicHomePartialLoadTest {
         sourceCacheHits = sourceCacheHits,
     )
 
-    private fun musicItem(id: UUID, type: BaseItemKind = BaseItemKind.MUSIC_ALBUM,) = MusicItem(
+    private fun musicItem(id: UUID, type: BaseItemKind = BaseItemKind.MUSIC_ALBUM) = MusicItem(
         id = id,
         title = "Item",
         subtitle = null,

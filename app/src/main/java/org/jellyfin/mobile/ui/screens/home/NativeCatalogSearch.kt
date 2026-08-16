@@ -27,11 +27,7 @@ internal data class NativeSearchCategoryTarget(
     val subtitle: String,
 )
 
-internal data class NativeSearchRequestBudgets(
-    val overallMs: Long,
-    val mediaMs: Long,
-    val categoriesMs: Long,
-)
+internal data class NativeSearchRequestBudgets(val overallMs: Long, val mediaMs: Long, val categoriesMs: Long)
 
 /**
  * Shared policy for the native catalog search surface.
@@ -43,8 +39,11 @@ internal data class NativeSearchRequestBudgets(
 internal object NativeCatalogSearch {
     fun mediaTypes(filter: NativeSearchFilter): List<BaseItemKind> = when (filter) {
         NativeSearchFilter.ALL -> listOf(BaseItemKind.MOVIE, BaseItemKind.SERIES)
+
         NativeSearchFilter.MOVIES -> listOf(BaseItemKind.MOVIE)
+
         NativeSearchFilter.SHOWS -> listOf(BaseItemKind.SERIES)
+
         NativeSearchFilter.GENRES,
         NativeSearchFilter.STUDIOS,
         -> emptyList()
@@ -59,26 +58,21 @@ internal object NativeCatalogSearch {
     fun includesStudios(filter: NativeSearchFilter) =
         filter == NativeSearchFilter.ALL || filter == NativeSearchFilter.STUDIOS
 
-    fun requestBudgets(filter: NativeSearchFilter): NativeSearchRequestBudgets =
-        if (mediaTypes(filter).isEmpty()) {
-            NativeSearchRequestBudgets(
-                overallMs = CATEGORY_ONLY_OVERALL_TIMEOUT_MS,
-                mediaMs = 0L,
-                categoriesMs = CATEGORY_ONLY_BRANCH_TIMEOUT_MS,
-            )
-        } else {
-            NativeSearchRequestBudgets(
-                overallMs = STANDARD_OVERALL_TIMEOUT_MS,
-                mediaMs = STANDARD_MEDIA_BRANCH_TIMEOUT_MS,
-                categoriesMs = STANDARD_CATEGORY_BRANCH_TIMEOUT_MS,
-            )
-        }
+    fun requestBudgets(filter: NativeSearchFilter): NativeSearchRequestBudgets = if (mediaTypes(filter).isEmpty()) {
+        NativeSearchRequestBudgets(
+            overallMs = CATEGORY_ONLY_OVERALL_TIMEOUT_MS,
+            mediaMs = 0L,
+            categoriesMs = CATEGORY_ONLY_BRANCH_TIMEOUT_MS,
+        )
+    } else {
+        NativeSearchRequestBudgets(
+            overallMs = STANDARD_OVERALL_TIMEOUT_MS,
+            mediaMs = STANDARD_MEDIA_BRANCH_TIMEOUT_MS,
+            categoriesMs = STANDARD_CATEGORY_BRANCH_TIMEOUT_MS,
+        )
+    }
 
-    fun categoryHintQueryParameters(
-        userId: UUID,
-        query: String,
-        limit: Int,
-    ): Map<String, Any> = linkedMapOf(
+    fun categoryHintQueryParameters(userId: UUID, query: String, limit: Int): Map<String, Any> = linkedMapOf(
         "userId" to userId,
         "searchTerm" to query,
         // Jellyfin documents this value as one comma-delimited parameter. The generated SDK
@@ -184,16 +178,9 @@ internal class NativeSearchCategoryCache(
     private val maxEntries: Int = DEFAULT_MAX_ENTRIES,
     private val clockNanos: () -> Long = System::nanoTime,
 ) {
-    private data class Key(
-        val serverKey: String,
-        val userId: UUID,
-        val query: String,
-    )
+    private data class Key(val serverKey: String, val userId: UUID, val query: String)
 
-    private data class Entry(
-        val storedAtNanos: Long,
-        val items: List<NativeMediaItem>,
-    )
+    private data class Entry(val storedAtNanos: Long, val items: List<NativeMediaItem>)
 
     private val entries = LinkedHashMap<Key, Entry>(16, 0.75f, true)
 

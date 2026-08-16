@@ -51,6 +51,7 @@ class QueueManager(private val viewModel: PlayerViewModel) : KoinComponent {
 
     private var currentQueue: List<UUID> = emptyList()
     private var currentQueueIndex: Int = 0
+    private var forceQueueAdvance: Boolean = false
     private val queueLogTag = "PlaybackQueue"
     private val queueTransitionLock = Mutex()
 
@@ -76,6 +77,7 @@ class QueueManager(private val viewModel: PlayerViewModel) : KoinComponent {
         )
         currentQueue = playOptions.ids
         currentQueueIndex = playOptions.startIndex
+        forceQueueAdvance = playOptions.forceQueueAdvance
 
         if (currentQueue.isNotEmpty() && currentQueueIndex !in currentQueue.indices) {
             Timber.e("Invalid start index $currentQueueIndex for queue size ${currentQueue.size}")
@@ -344,6 +346,32 @@ class QueueManager(private val viewModel: PlayerViewModel) : KoinComponent {
     }
 
     /**
+     * Resolve a fresh server playback source for the current item after a transient network failure.
+     * This preserves the selected streams and playback position without forcing a transcode fallback.
+     */
+    suspend fun retryCurrentRemotePlayback(startTime: Duration, playWhenReady: Boolean): Boolean =
+        queueTransitionLock.withLock {
+            val currentMediaSource = getCurrentMediaSourceOrNull() as? RemoteJellyfinMediaSource
+                ?: return@withLock false
+            val itemId = currentMediaSource.itemId
+            val retryError = startRemotePlayback(
+                itemId = itemId,
+                mediaSourceId = currentMediaSource.id,
+                maxStreamingBitrate = currentMediaSource.maxStreamingBitrate,
+                startTime = startTime,
+                audioStreamIndex = currentMediaSource.selectedAudioStreamIndex,
+                subtitleStreamIndex = currentMediaSource.selectedSubtitleStreamIndex,
+                playWhenReady = playWhenReady,
+            )
+            if (retryError != null) {
+                Timber.tag(queueLogTag).w(retryError, "Network recovery failed for item=%s", itemId)
+                return@withLock false
+            }
+            Timber.tag(queueLogTag).i("Network recovery succeeded for item=%s", itemId)
+            true
+        }
+
+    /**
      * Change the maximum bitrate to the specified value.
      */
     suspend fun changeBitrate(bitrate: Int?): Boolean {
@@ -368,6 +396,8 @@ class QueueManager(private val viewModel: PlayerViewModel) : KoinComponent {
     fun hasPrevious(): Boolean = currentQueue.isNotEmpty() && currentQueueIndex > 0
 
     fun hasNext(): Boolean = currentQueue.isNotEmpty() && currentQueueIndex < currentQueue.lastIndex
+
+    fun shouldForceQueueAdvance(): Boolean = forceQueueAdvance && hasNext()
 
     suspend fun previous(): Boolean {
         return queueTransitionLock.withLock {

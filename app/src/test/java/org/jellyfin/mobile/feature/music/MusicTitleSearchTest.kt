@@ -48,12 +48,7 @@ class MusicTitleSearchTest {
         recommendations = emptyList(),
     )
 
-    private fun item(
-        key: String,
-        title: String,
-        artist: String? = null,
-        album: String? = null,
-    ) = MusicItem(
+    private fun item(key: String, title: String, artist: String? = null, album: String? = null) = MusicItem(
         id = UUID.nameUUIDFromBytes(key.toByteArray()),
         title = title,
         subtitle = artist,

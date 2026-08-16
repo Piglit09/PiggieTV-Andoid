@@ -17,6 +17,7 @@ import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.Clock
+import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
@@ -156,6 +157,10 @@ class PlayerViewModel(application: Application) :
     private var progressUpdateJob: Job? = null
     private var chapterMarkingUpdateJob: Job? = null
     private var skipMediaSegmentUpdateJob: Job? = null
+    private var networkRecoveryJob: Job? = null
+    private var stablePlaybackResetJob: Job? = null
+    private var networkRecoveryItemId: org.jellyfin.sdk.model.UUID? = null
+    private var networkRecoveryAttempt = 0
 
     /**
      * Returns the current ExoPlayer instance or null
@@ -308,6 +313,13 @@ class PlayerViewModel(application: Application) :
      * Release the current ExoPlayer and stop/release the current MediaSession
      */
     private fun releasePlayer() {
+        stopProgressUpdates()
+        stopChapterMarkingUpdates()
+        stopSkipMediaSegmentUpdates()
+        networkRecoveryJob?.cancel()
+        stablePlaybackResetJob?.cancel()
+        networkRecoveryItemId = null
+        networkRecoveryAttempt = 0
         notificationHelper.dismissNotification()
         mediaSession.isActive = false
         mediaSession.release()
@@ -329,6 +341,7 @@ class PlayerViewModel(application: Application) :
 
     fun load(jellyfinMediaSource: JellyfinMediaSource, exoMediaSource: MediaSource, playWhenReady: Boolean) {
         val player = playerOrNull ?: return
+        prepareNetworkRecoveryForItem(jellyfinMediaSource.itemId)
         val media3ContentType = when {
             jellyfinMediaSource.isAudioOnly -> C.AUDIO_CONTENT_TYPE_MUSIC
             else -> C.AUDIO_CONTENT_TYPE_MOVIE
@@ -421,6 +434,70 @@ class PlayerViewModel(application: Application) :
             Timber.tag(playbackLogTag).w("Failed to restart playback after decoder type change")
             _error.postValue(getApplication<Application>().getString(R.string.player_error_unsupported_content))
         }
+    }
+
+    private fun prepareNetworkRecoveryForItem(itemId: org.jellyfin.sdk.model.UUID) {
+        if (networkRecoveryItemId == itemId) return
+        networkRecoveryJob?.cancel()
+        stablePlaybackResetJob?.cancel()
+        networkRecoveryItemId = itemId
+        networkRecoveryAttempt = 0
+    }
+
+    private fun scheduleStablePlaybackRecoveryReset(playWhenReady: Boolean) {
+        stablePlaybackResetJob?.cancel()
+        if (!playWhenReady) return
+
+        val itemId = mediaSourceOrNull?.itemId ?: return
+        stablePlaybackResetJob = viewModelScope.launch {
+            delay(PlaybackRecoveryPolicy.STABLE_PLAYBACK_RESET_DELAY_MS)
+            if (
+                mediaSourceOrNull?.itemId == itemId &&
+                playerOrNull?.playbackState == Player.STATE_READY &&
+                playerOrNull?.isPlaying == true
+            ) {
+                networkRecoveryAttempt = 0
+            }
+        }
+    }
+
+    private fun recoverTransientNetworkFailure(error: PlaybackException): Boolean {
+        val mediaSource = mediaSourceOrNull as? RemoteJellyfinMediaSource ?: return false
+        val httpStatusCode = error.findHttpStatusCode()
+        if (!PlaybackRecoveryPolicy.isRetryableNetworkError(error.errorCode, httpStatusCode)) return false
+        if (networkRecoveryAttempt >= PlaybackRecoveryPolicy.MAX_NETWORK_RETRY_ATTEMPTS) return false
+        if (networkRecoveryJob?.isActive == true) return true
+
+        prepareNetworkRecoveryForItem(mediaSource.itemId)
+        val resumePosition = (playerOrNull?.currentPosition ?: 0L).coerceAtLeast(0L).milliseconds
+        val resumeWhenReady = playerOrNull?.playWhenReady == true
+        val itemId = mediaSource.itemId
+        networkRecoveryJob = viewModelScope.launch {
+            while (
+                networkRecoveryAttempt < PlaybackRecoveryPolicy.MAX_NETWORK_RETRY_ATTEMPTS &&
+                mediaSourceOrNull?.itemId == itemId
+            ) {
+                networkRecoveryAttempt += 1
+                val attempt = networkRecoveryAttempt
+                Timber.tag(playbackLogTag).w(
+                    "Transient network playback failure; retrying item=%s attempt=%d/%d status=%s",
+                    itemId,
+                    attempt,
+                    PlaybackRecoveryPolicy.MAX_NETWORK_RETRY_ATTEMPTS,
+                    httpStatusCode,
+                )
+                delay(PlaybackRecoveryPolicy.retryDelayMs(attempt))
+                if (mediaSourceOrNull?.itemId != itemId) return@launch
+
+                if (queueManager.retryCurrentRemotePlayback(resumePosition, resumeWhenReady)) {
+                    return@launch
+                }
+            }
+
+            Timber.tag(playbackLogTag).w("Network playback recovery exhausted for item=%s", itemId)
+            _error.postValue(getApplication<Application>().getString(R.string.player_error_network_failure))
+        }
+        return true
     }
 
     fun submitMediaReport(reason: MediaReportReason, details: String?) {
@@ -790,6 +867,9 @@ class PlayerViewModel(application: Application) :
             }
             mediaSession.isActive = true
             notificationHelper.postNotification()
+            scheduleStablePlaybackRecoveryReset(playWhenReady)
+        } else if (playbackState != Player.STATE_BUFFERING) {
+            stablePlaybackResetJob?.cancel()
         }
 
         // Setup or stop regular progress updates
@@ -829,7 +909,7 @@ class PlayerViewModel(application: Application) :
 
                 Player.STATE_ENDED -> {
                     reportPlaybackStop()
-                    if (!autoPlayNextEpisodeEnabled) {
+                    if (!autoPlayNextEpisodeEnabled && !queueManager.shouldForceQueueAdvance()) {
                         Timber.tag(playbackLogTag).d("Auto-play next disabled; releasing player at queue end")
                         scheduleReleaseOnPlaybackEnd()
                         return@launch
@@ -857,6 +937,7 @@ class PlayerViewModel(application: Application) :
     }
 
     override fun onPlayerError(error: PlaybackException) {
+        stablePlaybackResetJob?.cancel()
         Timber.tag(playbackLogTag).e(
             error,
             "Playback error state=%d cause=%s fallbackEnabled=%s",
@@ -864,7 +945,9 @@ class PlayerViewModel(application: Application) :
             error.cause?.javaClass?.name,
             fallbackPreferExtensionRenderers,
         )
-        if (error.cause is MediaCodecDecoderException && !fallbackPreferExtensionRenderers) {
+        if (recoverTransientNetworkFailure(error)) {
+            return
+        } else if (error.cause is MediaCodecDecoderException && !fallbackPreferExtensionRenderers) {
             Timber.e(error.cause, "Decoder failed, attempting to restart playback with decoder extensions preferred")
             playerOrNull?.run {
                 removeListener(this@PlayerViewModel)
@@ -885,11 +968,23 @@ class PlayerViewModel(application: Application) :
         reportPlaybackStop()
         ProcessLifecycleOwner.get().lifecycle.removeObserver(lifecycleObserver)
         releasePlayer()
+        analyticsCollector.release()
     }
 
     fun setPlayerMenuHelper(menuHelper: PlayerMenuHelper) {
         playerMenuHelper = menuHelper
     }
+}
+
+private fun Throwable.findHttpStatusCode(): Int? {
+    var current: Throwable? = this
+    repeat(8) {
+        if (current is HttpDataSource.InvalidResponseCodeException) {
+            return current.responseCode
+        }
+        current = current?.cause
+    }
+    return null
 }
 
 private fun MediaReportDeliveryResult.messageResource(): Int = when (this) {

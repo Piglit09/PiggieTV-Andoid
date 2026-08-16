@@ -70,6 +70,7 @@ import androidx.compose.material.icons.outlined.PersonAdd
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Shuffle
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -77,6 +78,7 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -120,6 +122,7 @@ import org.jellyfin.mobile.ui.utils.PiggieTvColors
 import org.jellyfin.mobile.utils.Constants
 import org.jellyfin.mobile.utils.toast
 import org.jellyfin.sdk.model.api.BaseItemKind
+import org.jellyfin.sdk.model.UUID
 import org.koin.compose.koinInject
 import kotlin.time.Duration.Companion.ZERO
 
@@ -251,9 +254,16 @@ fun NativeHomeScreen(
                             selection = details,
                             onBack = ::goBackFromDetails,
                             onPlay = { item, siblings -> onPlay(item.toPlayOptions(siblings)) },
+                            onPlayQueue = { itemIds, shuffled ->
+                                val queue = when {
+                                    shuffled -> SeriesPlaybackQueuePolicy.shuffled(itemIds)
+                                    else -> SeriesPlaybackQueuePolicy.ordered(itemIds)
+                                }
+                                onPlay(queue.toPlayOptions())
+                            },
                             onOpenFolder = ::openFolderFromDetails,
                             onOpenChild = ::openChildDetails,
-                            loadChildren = viewModel::loadFolderItems,
+                            loadDetails = viewModel::loadMediaDetails,
                             onReport = { item -> reportItem = item },
                         )
                     } else if (state.selectedLibrary == null) {
@@ -1519,6 +1529,25 @@ private fun HomeTabButton(text: String, selected: Boolean, onClick: () -> Unit, 
 
 @Composable
 private fun RequestsPortal(layout: PtvAdaptiveLayout, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val webView = remember(context) {
+        WebView(context).apply {
+            settings.javaScriptEnabled = true
+            settings.domStorageEnabled = true
+            settings.cacheMode = WebSettings.LOAD_DEFAULT
+            settings.mediaPlaybackRequiresUserGesture = false
+            webViewClient = WebViewClient()
+            loadUrl(Constants.PIGGIETV_REQUESTS_URL)
+        }
+    }
+    DisposableEffect(webView) {
+        onDispose {
+            webView.stopLoading()
+            webView.removeAllViews()
+            webView.destroy()
+        }
+    }
+
     Surface(
         modifier = modifier
             .padding(horizontal = layout.edgePadding, vertical = 12.dp)
@@ -1529,16 +1558,7 @@ private fun RequestsPortal(layout: PtvAdaptiveLayout, modifier: Modifier = Modif
     ) {
         AndroidView(
             modifier = Modifier.fillMaxSize(),
-            factory = { context ->
-                WebView(context).apply {
-                    settings.javaScriptEnabled = true
-                    settings.domStorageEnabled = true
-                    settings.cacheMode = WebSettings.LOAD_DEFAULT
-                    settings.mediaPlaybackRequiresUserGesture = false
-                    webViewClient = WebViewClient()
-                    loadUrl(Constants.PIGGIETV_REQUESTS_URL)
-                }
-            },
+            factory = { webView },
         )
     }
 }
@@ -2331,17 +2351,23 @@ private fun MediaDetailsScreen(
     selection: NativeMediaDetailsSelection,
     onBack: () -> Unit,
     onPlay: (NativeMediaItem, List<NativeMediaItem>) -> Unit,
+    onPlayQueue: (List<UUID>, Boolean) -> Unit,
     onOpenFolder: (NativeMediaItem) -> Unit,
     onOpenChild: (NativeMediaItem, List<NativeMediaItem>) -> Unit,
-    loadChildren: suspend (NativeMediaItem) -> List<NativeMediaItem>,
+    loadDetails: suspend (NativeMediaItem) -> NativeMediaDetailsData,
     onReport: (NativeMediaItem) -> Unit,
 ) {
     val mediaItem = selection.item
-    val childItems by produceState<List<NativeMediaItem>?>(initialValue = null, mediaItem.id) {
+    var detailsReloadVersion by remember(mediaItem.id) { mutableIntStateOf(0) }
+    val detailsState by produceState<MediaDetailsLoadState>(
+        initialValue = MediaDetailsLoadState.Loading,
+        mediaItem.id,
+        detailsReloadVersion,
+    ) {
         value = if (mediaItem.showsChildrenOnDetails) {
-            runCatching { loadChildren(mediaItem) }.getOrDefault(emptyList())
+            MediaDetailsLoadState.Loaded(loadDetails(mediaItem))
         } else {
-            emptyList()
+            MediaDetailsLoadState.Loaded(NativeMediaDetailsData.EMPTY)
         }
     }
 
@@ -2441,7 +2467,7 @@ private fun MediaDetailsScreen(
                     mediaItem.subtitle?.let {
                         Text(text = it, color = PiggieTvColors.TextSecondary, style = MaterialTheme.typography.body2)
                     }
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         if (mediaItem.isPlayable) {
                             Button(
                                 onClick = { onPlay(mediaItem, selection.siblings) },
@@ -2458,6 +2484,81 @@ private fun MediaDetailsScreen(
                                 )
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Text(text = "Play", fontWeight = FontWeight.Bold)
+                            }
+                        }
+                        if (mediaItem.showsChildrenOnDetails) {
+                            when (val details = detailsState) {
+                                MediaDetailsLoadState.Loading -> Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(18.dp),
+                                        color = PiggieTvColors.Focus,
+                                        strokeWidth = 2.dp,
+                                    )
+                                    Text(
+                                        text = "Loading episodes...",
+                                        color = PiggieTvColors.TextSecondary,
+                                        style = MaterialTheme.typography.body2,
+                                    )
+                                }
+
+                                is MediaDetailsLoadState.Loaded -> when {
+                                    details.data.playbackUnavailable -> Column {
+                                        Text(
+                                            text = "Episode playback list couldn't be loaded.",
+                                            color = PiggieTvColors.TextSecondary,
+                                            style = MaterialTheme.typography.body2,
+                                        )
+                                        TextButton(onClick = { detailsReloadVersion += 1 }) {
+                                            Text(text = "Retry")
+                                        }
+                                    }
+
+                                    details.data.playbackItemIds.isNotEmpty() -> Column(
+                                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                                    ) {
+                                        Button(
+                                            onClick = { onPlayQueue(details.data.playbackItemIds, false) },
+                                            colors = ButtonDefaults.buttonColors(
+                                                backgroundColor = PiggieTvColors.Accent,
+                                                contentColor = PiggieTvColors.Night,
+                                            ),
+                                            shape = MaterialTheme.shapes.medium,
+                                        ) {
+                                            Icon(
+                                                Icons.Outlined.PlayArrow,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(18.dp),
+                                            )
+                                            Spacer(modifier = Modifier.width(5.dp))
+                                            Text(text = "Play All", fontWeight = FontWeight.Bold)
+                                        }
+                                        Button(
+                                            onClick = { onPlayQueue(details.data.playbackItemIds, true) },
+                                            colors = ButtonDefaults.buttonColors(
+                                                backgroundColor = PiggieTvColors.Focus,
+                                                contentColor = PiggieTvColors.Night,
+                                            ),
+                                            shape = MaterialTheme.shapes.medium,
+                                        ) {
+                                            Icon(
+                                                Icons.Outlined.Shuffle,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(18.dp),
+                                            )
+                                            Spacer(modifier = Modifier.width(5.dp))
+                                            Text(text = "Shuffle All", fontWeight = FontWeight.Bold)
+                                        }
+                                    }
+
+                                    else -> Text(
+                                        text = "No playable episodes are available.",
+                                        color = PiggieTvColors.TextSecondary,
+                                        style = MaterialTheme.typography.body2,
+                                    )
+                                }
                             }
                         }
                         if (mediaItem.isFolder && !mediaItem.showsChildrenOnDetails) {
@@ -2502,8 +2603,8 @@ private fun MediaDetailsScreen(
                     modifier = Modifier.padding(horizontal = layout.edgePadding),
                 )
             }
-            when (val children = childItems) {
-                null -> item {
+            when (val details = detailsState) {
+                MediaDetailsLoadState.Loading -> item {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -2518,8 +2619,24 @@ private fun MediaDetailsScreen(
                     }
                 }
 
-                else -> {
-                    if (children.isEmpty()) {
+                is MediaDetailsLoadState.Loaded -> {
+                    val children = details.data.children
+                    if (details.data.childrenUnavailable) {
+                        item {
+                            Column(
+                                modifier = Modifier.padding(horizontal = layout.edgePadding),
+                                verticalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                Text(
+                                    text = "This episode list couldn't be loaded.",
+                                    color = PiggieTvColors.TextSecondary,
+                                )
+                                TextButton(onClick = { detailsReloadVersion += 1 }) {
+                                    Text(text = "Retry")
+                                }
+                            }
+                        }
+                    } else if (children.isEmpty()) {
                         item {
                             Text(
                                 text = "Nothing here yet",
@@ -2919,6 +3036,11 @@ private val playableAudioKinds = setOf(BaseItemKind.AUDIO, BaseItemKind.AUDIO_BO
 private val NativeMediaItem.showsChildrenOnDetails: Boolean
     get() = type == BaseItemKind.SERIES || type == BaseItemKind.SEASON
 
+private sealed interface MediaDetailsLoadState {
+    data object Loading : MediaDetailsLoadState
+    data class Loaded(val data: NativeMediaDetailsData) : MediaDetailsLoadState
+}
+
 private fun NativeMediaItem.toPlayOptions(siblings: List<NativeMediaItem> = emptyList()): PlayOptions {
     val queue = when {
         type in playableAudioKinds ->
@@ -2940,3 +3062,14 @@ private fun NativeMediaItem.toPlayOptions(siblings: List<NativeMediaItem> = empt
         playFromDownloads = false,
     )
 }
+
+private fun List<UUID>.toPlayOptions(): PlayOptions = PlayOptions(
+    ids = this,
+    mediaSourceId = null,
+    startIndex = 0,
+    startPosition = ZERO,
+    audioStreamIndex = null,
+    subtitleStreamIndex = null,
+    playFromDownloads = false,
+    forceQueueAdvance = true,
+)

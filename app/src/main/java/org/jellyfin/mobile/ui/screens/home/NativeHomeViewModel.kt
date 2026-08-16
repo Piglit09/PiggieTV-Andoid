@@ -33,11 +33,12 @@ import org.jellyfin.mobile.reporting.MediaReportTarget
 import org.jellyfin.sdk.api.client.ApiClient
 import org.jellyfin.sdk.api.client.exception.ApiClientException
 import org.jellyfin.sdk.api.client.extensions.authenticateUserByName
-import org.jellyfin.sdk.api.client.extensions.get
 import org.jellyfin.sdk.api.client.extensions.genresApi
+import org.jellyfin.sdk.api.client.extensions.get
 import org.jellyfin.sdk.api.client.extensions.imageApi
 import org.jellyfin.sdk.api.client.extensions.itemsApi
 import org.jellyfin.sdk.api.client.extensions.studiosApi
+import org.jellyfin.sdk.api.client.extensions.tvShowsApi
 import org.jellyfin.sdk.api.client.extensions.userApi
 import org.jellyfin.sdk.api.client.extensions.userViewsApi
 import org.jellyfin.sdk.model.UUID
@@ -248,7 +249,7 @@ class NativeHomeViewModel(
         }
     }
 
-    suspend fun loadFolderItems(item: NativeMediaItem): List<NativeMediaItem> {
+    private suspend fun loadFolderItems(item: NativeMediaItem): List<NativeMediaItem> {
         val includeItemTypes = item.childContentTypes()
         if (includeItemTypes.isEmpty()) return emptyList()
 
@@ -262,6 +263,61 @@ class NativeHomeViewModel(
             startIndex = 0,
             limit = FOLDER_DETAIL_ITEM_LIMIT,
         ).items
+    }
+
+    suspend fun loadMediaDetails(item: NativeMediaItem): NativeMediaDetailsData = coroutineScope {
+        val childrenRequest = async {
+            captureMediaDetailsRequest("children", item.id) { loadFolderItems(item) }
+        }
+        val seriesPlaybackRequest = when (item.type) {
+            BaseItemKind.SERIES -> async {
+                captureMediaDetailsRequest("seriesPlayback", item.id) { loadSeriesPlaybackItemIds(item.id) }
+            }
+
+            else -> null
+        }
+
+        val childrenResult = childrenRequest.await()
+        val playbackResult = when (item.type) {
+            BaseItemKind.SERIES -> seriesPlaybackRequest?.await() ?: Result.success(emptyList())
+            BaseItemKind.SEASON -> childrenResult.map { children ->
+                children.filter(NativeMediaItem::isPlayable).map(NativeMediaItem::id)
+            }
+
+            else -> Result.success(emptyList())
+        }
+
+        NativeMediaDetailsData(
+            children = childrenResult.getOrDefault(emptyList()),
+            playbackItemIds = SeriesPlaybackQueuePolicy.ordered(playbackResult.getOrDefault(emptyList())),
+            childrenUnavailable = childrenResult.isFailure,
+            playbackUnavailable = playbackResult.isFailure,
+        )
+    }
+
+    private suspend fun loadSeriesPlaybackItemIds(seriesId: UUID): List<UUID> = withContext(Dispatchers.IO) {
+        val userId = currentUserId ?: apiClient.userApi.getCurrentUser().content.id.also { currentUserId = it }
+        apiClient.tvShowsApi.getEpisodes(
+            seriesId = seriesId,
+            userId = userId,
+            fields = emptyList(),
+            isMissing = false,
+            enableImages = false,
+            enableUserData = false,
+        ).content.items.map(BaseItemDto::id)
+    }
+
+    private suspend fun <T> captureMediaDetailsRequest(
+        source: String,
+        itemId: UUID,
+        block: suspend () -> T,
+    ): Result<T> = try {
+        Result.success(block())
+    } catch (error: CancellationException) {
+        throw error
+    } catch (error: Exception) {
+        Timber.w(error, "PTV media details request failed source=$source itemId=$itemId")
+        Result.failure(error)
     }
 
     private suspend fun loadLibraryPage(
@@ -488,12 +544,16 @@ class NativeHomeViewModel(
                             isSearchingMovies = false,
                             movieSearchError = when {
                                 remoteResults.failedBranchCount == 0 -> null
+
                                 remoteResults.failedBranchCount < remoteResults.requestedBranchCount ->
                                     "Some result groups could not load. Showing everything we found."
+
                                 remoteResults.firstError is TimeoutException ->
                                     "Search took too long. Showing loaded matches; try again."
-                                else -> remoteResults.firstError
-                                    ?.friendlyMessage("Could not search PiggieTV right now.")
+
+                                else ->
+                                    remoteResults.firstError
+                                        ?.friendlyMessage("Could not search PiggieTV right now.")
                             },
                         )
 
@@ -856,17 +916,15 @@ class NativeHomeViewModel(
         }.awaitAll().flatten()
     }
 
-    private suspend fun searchBranch(
-        label: String,
-        block: suspend () -> List<NativeMediaItem>,
-    ): SearchBranchResult = try {
-        SearchBranchResult(items = block())
-    } catch (error: CancellationException) {
-        throw error
-    } catch (error: Exception) {
-        Timber.w(error, "PTV catalog search branch failed branch=$label")
-        SearchBranchResult(error = error)
-    }
+    private suspend fun searchBranch(label: String, block: suspend () -> List<NativeMediaItem>): SearchBranchResult =
+        try {
+            SearchBranchResult(items = block())
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            Timber.w(error, "PTV catalog search branch failed branch=$label")
+            SearchBranchResult(error = error)
+        }
 
     private suspend fun searchBranchBeforeDeadline(
         label: String,
@@ -930,11 +988,7 @@ class NativeHomeViewModel(
         )
     }
 
-    private fun publishCatalogSearch(
-        version: Int,
-        response: NativeCatalogSearchResponse,
-        complete: Boolean,
-    ) {
+    private fun publishCatalogSearch(version: Int, response: NativeCatalogSearchResponse, complete: Boolean) {
         if (version != movieSearchVersion) return
         _uiState.update { state ->
             when (state) {
@@ -1319,10 +1373,7 @@ class NativeHomeViewModel(
     }
 }
 
-private data class SearchBranchResult(
-    val items: List<NativeMediaItem> = emptyList(),
-    val error: Exception? = null,
-)
+private data class SearchBranchResult(val items: List<NativeMediaItem> = emptyList(), val error: Exception? = null)
 
 private data class NativeCatalogSearchResponse(
     val groups: NativeSearchResultGroups,
@@ -1422,3 +1473,19 @@ data class NativeMediaItem(
     val isPlayable: Boolean,
     val childCount: Int? = null,
 )
+
+data class NativeMediaDetailsData(
+    val children: List<NativeMediaItem>,
+    val playbackItemIds: List<UUID>,
+    val childrenUnavailable: Boolean,
+    val playbackUnavailable: Boolean,
+) {
+    companion object {
+        val EMPTY = NativeMediaDetailsData(
+            children = emptyList(),
+            playbackItemIds = emptyList(),
+            childrenUnavailable = false,
+            playbackUnavailable = false,
+        )
+    }
+}

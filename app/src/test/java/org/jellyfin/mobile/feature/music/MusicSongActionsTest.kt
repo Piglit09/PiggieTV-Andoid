@@ -230,7 +230,7 @@ class MusicSongActionsTest {
         MusicArtistNavigation.hasArtistTarget(track(SELECTED_ID, artist = null, artistIds = emptyList())) shouldBe false
         MusicArtistNavigation.hasArtistTarget(track(OTHER_ID, artist = "Artist", artistIds = emptyList())) shouldBe true
         MusicArtistNavigation.hasArtistTarget(
-            track(BLOCKED_ID, artist = null, artistIds = listOf(FOURTH_ID))
+            track(BLOCKED_ID, artist = null, artistIds = listOf(FOURTH_ID)),
         ) shouldBe true
     }
 

@@ -18,14 +18,14 @@ internal object MusicTitleSearch {
         includeUnmatched = false,
     )
 
-    fun merge(query: String, loaded: List<MusicItem>, remote: List<MusicItem>, limit: Int,): List<MusicItem> = rank(
+    fun merge(query: String, loaded: List<MusicItem>, remote: List<MusicItem>, limit: Int): List<MusicItem> = rank(
         items = remote + loaded,
         query = query,
         limit = limit,
         includeUnmatched = true,
     )
 
-    private fun rank(items: List<MusicItem>, query: String, limit: Int, includeUnmatched: Boolean,): List<MusicItem> {
+    private fun rank(items: List<MusicItem>, query: String, limit: Int, includeUnmatched: Boolean): List<MusicItem> {
         val normalizedQuery = query.normalizeSearchText()
         if (normalizedQuery.isBlank() || limit <= 0) return emptyList()
 

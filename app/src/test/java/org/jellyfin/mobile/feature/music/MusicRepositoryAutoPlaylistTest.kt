@@ -111,7 +111,7 @@ class MusicRepositoryAutoPlaylistTest {
             override fun <T : OutboundWebSocketMessage> subscribe(messageType: KClass<T>): Flow<T> = emptyFlow()
         }
 
-        override fun update(baseUrl: String?, accessToken: String?, clientInfo: ClientInfo, deviceInfo: DeviceInfo,) =
+        override fun update(baseUrl: String?, accessToken: String?, clientInfo: ClientInfo, deviceInfo: DeviceInfo) =
             Unit
 
         override suspend fun request(
