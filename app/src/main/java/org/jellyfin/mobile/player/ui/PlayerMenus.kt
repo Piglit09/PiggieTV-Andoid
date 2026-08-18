@@ -172,7 +172,8 @@ class PlayerMenus(
 
         val height = videoStream?.height
         val width = videoStream?.width
-        qualityButton.isVisible = !audioOnly && mediaSource is RemoteJellyfinMediaSource && height != null && width != null
+        qualityButton.isVisible =
+            !audioOnly && mediaSource is RemoteJellyfinMediaSource && height != null && width != null
         when (mediaSource) {
             is LocalJellyfinMediaSource -> Unit
 

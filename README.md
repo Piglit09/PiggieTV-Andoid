@@ -116,7 +116,7 @@ The app version comes from `piggietv.version` in `gradle.properties` and is show
 .\scripts\bump-version.ps1
 ```
 
-Patch values run from `1` to `99`; after `0.0.99`, the script rolls to `0.1.1`.
+Patch and minor values run from `0` to `99`; after `0.0.99`, the script rolls to `0.1.0`. The script refuses to roll `x.99.99` into a new major release because major releases require explicit approval.
 
 ## Install To Device
 
@@ -141,7 +141,9 @@ assembleProprietaryDebug
 
 ## Security Notes
 
-Media reports currently post to the configured Discord reporting integration from the app. Treat any webhook or integration URL as sensitive; rotate it if it is exposed outside trusted development channels.
+Media reports are sent only to the authenticated `/Ptv/v1/reports/media` route on the connected PiggieTV server. The Android app does not contain a reporting webhook or another reporting credential. Servers that do not provide the route fail closed and the app tells the user that reporting is unavailable.
+
+Any reporting webhook previously embedded in an app build must be treated as compromised and revoked. A replacement belongs only in the server environment; never add it to source code, Gradle properties, resources, or an APK.
 
 ## Upstream Attribution
 

@@ -11,6 +11,8 @@ import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.MergingMediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.exoplayer.source.SingleSampleMediaSource
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.jellyfin.mobile.data.dao.DownloadDao
 import org.jellyfin.mobile.player.PlayerException
 import org.jellyfin.mobile.player.PlayerViewModel
@@ -22,8 +24,8 @@ import org.jellyfin.mobile.player.source.LocalJellyfinMediaSource
 import org.jellyfin.mobile.player.source.MediaSourceResolver
 import org.jellyfin.mobile.player.source.RemoteJellyfinMediaSource
 import org.jellyfin.sdk.api.client.ApiClient
-import org.jellyfin.sdk.api.client.extensions.videosApi
 import org.jellyfin.sdk.api.client.extensions.universalAudioApi
+import org.jellyfin.sdk.api.client.extensions.videosApi
 import org.jellyfin.sdk.api.operations.VideosApi
 import org.jellyfin.sdk.model.api.MediaProtocol
 import org.jellyfin.sdk.model.api.MediaStream
@@ -34,11 +36,12 @@ import org.jellyfin.sdk.model.serializer.toUUIDOrNull
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.get
 import org.koin.core.component.inject
+import timber.log.Timber
 import java.io.File
 import java.util.UUID
 import kotlin.time.Duration
 
-class QueueManager(private val viewModel: PlayerViewModel,) : KoinComponent {
+class QueueManager(private val viewModel: PlayerViewModel) : KoinComponent {
     private val apiClient: ApiClient = get()
     private val videosApi: VideosApi = apiClient.videosApi
     private val universalAudioApi = apiClient.universalAudioApi
@@ -48,6 +51,9 @@ class QueueManager(private val viewModel: PlayerViewModel,) : KoinComponent {
 
     private var currentQueue: List<UUID> = emptyList()
     private var currentQueueIndex: Int = 0
+    private var forceQueueAdvance: Boolean = false
+    private val queueLogTag = "PlaybackQueue"
+    private val queueTransitionLock = Mutex()
 
     private val _currentMediaSource: MutableLiveData<JellyfinMediaSource> = MutableLiveData()
     val currentMediaSource: LiveData<JellyfinMediaSource>
@@ -62,8 +68,21 @@ class QueueManager(private val viewModel: PlayerViewModel,) : KoinComponent {
      * @return an error of type [PlayerException] or null on success.
      */
     suspend fun initializePlaybackQueue(playOptions: PlayOptions): PlayerException? {
+        Timber.tag(queueLogTag).d(
+            "initializePlaybackQueue ids=%s startIndex=%d sourceId=%s downloads=%s",
+            playOptions.ids,
+            playOptions.startIndex,
+            playOptions.mediaSourceId,
+            playOptions.playFromDownloads,
+        )
         currentQueue = playOptions.ids
         currentQueueIndex = playOptions.startIndex
+        forceQueueAdvance = playOptions.forceQueueAdvance
+
+        if (currentQueue.isNotEmpty() && currentQueueIndex !in currentQueue.indices) {
+            Timber.e("Invalid start index $currentQueueIndex for queue size ${currentQueue.size}")
+            return PlayerException.InvalidPlayOptions()
+        }
 
         val itemId = when {
             currentQueue.isNotEmpty() -> currentQueue[currentQueueIndex]
@@ -71,14 +90,14 @@ class QueueManager(private val viewModel: PlayerViewModel,) : KoinComponent {
         } ?: return PlayerException.InvalidPlayOptions()
 
         when (playOptions.playFromDownloads) {
-            true -> playOptions.mediaSourceId?.let {
+            true -> return playOptions.mediaSourceId?.let {
                 startDownloadPlayback(
                     mediaSourceId = it,
                     playWhenReady = true,
                 )
-            }
+            } ?: PlayerException.InvalidPlayOptions()
 
-            else -> startRemotePlayback(
+            else -> return startRemotePlayback(
                 itemId = itemId,
                 mediaSourceId = playOptions.mediaSourceId,
                 maxStreamingBitrate = null,
@@ -88,8 +107,6 @@ class QueueManager(private val viewModel: PlayerViewModel,) : KoinComponent {
                 playWhenReady = true,
             )
         }
-
-        return null
     }
 
     private suspend fun startDownloadPlayback(
@@ -99,16 +116,30 @@ class QueueManager(private val viewModel: PlayerViewModel,) : KoinComponent {
         subtitleStreamIndex: Int? = null,
         playWhenReady: Boolean = true,
     ): PlayerException? {
-        get<DownloadDao>()
-            .get(mediaSourceId)
-            ?.asMediaSource(startTime, audioStreamIndex, subtitleStreamIndex)
-            ?.also { jellyfinMediaSource ->
-                _currentMediaSource.value = jellyfinMediaSource
+        Timber.tag(queueLogTag).d(
+            "Starting local playback sourceId=%s startTime=%s audioStreamIndex=%s subtitleStreamIndex=%s",
+            mediaSourceId,
+            startTime,
+            audioStreamIndex,
+            subtitleStreamIndex,
+        )
+        val jellyfinMediaSource = try {
+            get<DownloadDao>()
+                .get(mediaSourceId)
+                ?.asMediaSource(startTime, audioStreamIndex, subtitleStreamIndex)
+        } catch (e: Exception) {
+            Timber.e(e, "Failed to load downloaded media source $mediaSourceId")
+            return PlayerException.UnsupportedContent(e)
+        } ?: run {
+            Timber.tag(queueLogTag).w("Downloaded media source missing mediaSourceId=%s", mediaSourceId)
+            return PlayerException.UnsupportedContent()
+        }
+        Timber.tag(
+            queueLogTag,
+        ).d("Resolved local source itemId=%s mediaSourceId=%s", jellyfinMediaSource.itemId, jellyfinMediaSource.id)
 
-                // Load new media source
-                viewModel.load(jellyfinMediaSource, prepareStreams(jellyfinMediaSource), playWhenReady)
-            }
-        return null
+        _currentMediaSource.value = jellyfinMediaSource
+        return startMediaSource(jellyfinMediaSource, playWhenReady)
     }
 
     /**
@@ -125,7 +156,16 @@ class QueueManager(private val viewModel: PlayerViewModel,) : KoinComponent {
         subtitleStreamIndex: Int? = null,
         playWhenReady: Boolean = true,
     ): PlayerException? {
-        mediaSourceResolver.resolveMediaSource(
+        Timber.tag(queueLogTag).d(
+            "Resolving remote playback itemId=%s mediaSourceId=%s bitrate=%s startTime=%s audio=%s subtitle=%s",
+            itemId,
+            mediaSourceId,
+            maxStreamingBitrate,
+            startTime,
+            audioStreamIndex,
+            subtitleStreamIndex,
+        )
+        val resolvedSource = mediaSourceResolver.resolveMediaSource(
             itemId = itemId,
             mediaSourceId = mediaSourceId,
             deviceProfile = deviceProfile,
@@ -133,37 +173,203 @@ class QueueManager(private val viewModel: PlayerViewModel,) : KoinComponent {
             startTime = startTime,
             audioStreamIndex = audioStreamIndex,
             subtitleStreamIndex = subtitleStreamIndex,
-        ).onSuccess { jellyfinMediaSource ->
-            // Ensure transcoding of the current element is stopped
-            getCurrentMediaSourceOrNull()?.let { oldMediaSource ->
-                viewModel.stopTranscoding(oldMediaSource as RemoteJellyfinMediaSource)
+        )
+        val source = resolvedSource.getOrNull() ?: run {
+            val error = resolvedSource.exceptionOrNull()
+            Timber.tag(queueLogTag).w(
+                error,
+                "Failed to resolve remote source itemId=%s mediaSourceId=%s",
+                itemId,
+                mediaSourceId,
+            )
+            return when (error) {
+                is PlayerException -> error
+                is Exception -> PlayerException.UnsupportedContent(error)
+                else -> PlayerException.UnsupportedContent()
+            }
+        }
+        validateRemoteSourceMetadata(source)?.let { return it }
+        Timber.tag(queueLogTag).d(
+            "Resolved remote source itemId=%s mediaSourceId=%s playMethod=%s",
+            source.itemId,
+            source.id,
+            source.playMethod,
+        )
+
+        // Ensure transcoding of the current element is stopped
+        getCurrentMediaSourceOrNull()?.let { oldMediaSource ->
+            if (oldMediaSource is RemoteJellyfinMediaSource) {
+                viewModel.stopTranscoding(oldMediaSource)
+            }
+        }
+
+        _currentMediaSource.value = source
+        return startMediaSource(source, playWhenReady)
+    }
+
+    private fun startMediaSource(mediaSource: JellyfinMediaSource, playWhenReady: Boolean): PlayerException? =
+        runCatching {
+            Timber.tag(queueLogTag).d(
+                "Preparing media source type=%s itemId=%s playWhenReady=%s sourceId=%s",
+                mediaSource::class.simpleName,
+                mediaSource.itemId,
+                playWhenReady,
+                mediaSource.id,
+            )
+            val preparedSource = when (mediaSource) {
+                is LocalJellyfinMediaSource -> prepareStreams(mediaSource)
+                is RemoteJellyfinMediaSource -> prepareStreams(mediaSource)
+                else -> throw IllegalArgumentException("Unsupported media source type ${mediaSource::class}")
+            }
+            viewModel.load(mediaSource, preparedSource, playWhenReady)
+            null
+        }.getOrElse { e ->
+            Timber.tag(queueLogTag).e(e, "Failed to prepare or load media source ${mediaSource.itemId}")
+            PlayerException.UnsupportedContent(e)
+        }
+
+    private fun validateRemoteSourceMetadata(source: RemoteJellyfinMediaSource): PlayerException? =
+        when (source.playMethod) {
+            PlayMethod.DIRECT_PLAY -> when (source.sourceInfo.protocol) {
+                MediaProtocol.FILE -> null
+
+                MediaProtocol.HTTP -> {
+                    if (source.sourceInfo.path.isNullOrBlank()) {
+                        PlayerException.UnsupportedContent(IllegalArgumentException("Missing direct play stream path"))
+                    } else {
+                        null
+                    }
+                }
+
+                else -> PlayerException.UnsupportedContent(
+                    IllegalArgumentException("Unsupported direct play protocol ${source.sourceInfo.protocol}"),
+                )
             }
 
-            _currentMediaSource.value = jellyfinMediaSource
+            PlayMethod.DIRECT_STREAM -> {
+                if (source.sourceInfo.container.isNullOrBlank()) {
+                    PlayerException.UnsupportedContent(IllegalArgumentException("Missing direct stream container"))
+                } else {
+                    null
+                }
+            }
 
-            // Load new media source
-            viewModel.load(jellyfinMediaSource, prepareStreams(jellyfinMediaSource), playWhenReady)
-        }.onFailure { error ->
-            // Should always be of this type, other errors are silently dropped
-            return error as? PlayerException
+            PlayMethod.TRANSCODE -> {
+                if (source.sourceInfo.transcodingUrl.isNullOrBlank()) {
+                    PlayerException.UnsupportedContent(IllegalArgumentException("Missing transcode URL"))
+                } else if (source.sourceInfo.transcodingSubProtocol != MediaStreamProtocol.HLS) {
+                    PlayerException.UnsupportedContent(
+                        IllegalArgumentException(
+                            "Unsupported transcode protocol ${source.sourceInfo.transcodingSubProtocol}",
+                        ),
+                    )
+                } else {
+                    null
+                }
+            }
+
+            else -> PlayerException.UnsupportedContent(
+                IllegalArgumentException("Unsupported play method ${source.playMethod}"),
+            )
         }
-        return null
+
+    private fun nextOrPreviousQueueIndex(offset: Int): Int? {
+        val targetIndex = currentQueueIndex + offset
+        if (targetIndex !in currentQueue.indices) return null
+        return targetIndex
+    }
+
+    private suspend fun startNextOrPrevious(targetIndex: Int, transitionName: String): Boolean {
+        val currentMediaSource = getCurrentMediaSourceOrNull() ?: return false
+
+        val currentQueueItemId = currentQueue.getOrNull(currentQueueIndex)?.toString()
+        val targetQueueItemId = currentQueue.getOrNull(targetIndex)?.toString()
+        Timber.tag(queueLogTag).d(
+            "Attempting queue transition=%s fromIndex=%s (item=%s) toIndex=%s (item=%s)",
+            transitionName,
+            currentQueueIndex,
+            currentQueueItemId,
+            targetIndex,
+            targetQueueItemId,
+        )
+        val loadError = when (currentMediaSource) {
+            is LocalJellyfinMediaSource -> startDownloadPlayback(
+                mediaSourceId = currentQueue[targetIndex].toString(),
+                playWhenReady = true,
+            )
+
+            is RemoteJellyfinMediaSource -> startRemotePlayback(
+                itemId = currentQueue[targetIndex],
+                mediaSourceId = null,
+                maxStreamingBitrate = currentMediaSource.maxStreamingBitrate,
+            )
+
+            else -> PlayerException.UnsupportedContent()
+        }
+
+        if (loadError != null) {
+            Timber.tag(queueLogTag).w(
+                loadError,
+                "Queue transition failed transition=%s fromIndex=%s toIndex=%s",
+                transitionName,
+                currentQueueIndex,
+                targetIndex,
+            )
+            return false
+        }
+        currentQueueIndex = targetIndex
+        Timber.tag(
+            queueLogTag,
+        ).d("Queue transition success transition=%s newIndex=%s", transitionName, currentQueueIndex)
+        return true
     }
 
     /**
      * Reinitialize current media source without changing settings
      */
-    fun tryRestartPlayback() {
-        with(getCurrentMediaSourceOrNull()) {
-            when (this) {
-                is LocalJellyfinMediaSource -> prepareStreams(this)
-                is RemoteJellyfinMediaSource -> prepareStreams(this)
-                null -> return
-            }.let {
-                viewModel.load(this, it, playWhenReady = true)
-            }
+    fun tryRestartPlayback(): Boolean {
+        val mediaSource = getCurrentMediaSourceOrNull() ?: run {
+            Timber.tag(queueLogTag).w("tryRestartPlayback skipped because current media source is null")
+            return false
         }
+        if (mediaSource !is LocalJellyfinMediaSource && mediaSource !is RemoteJellyfinMediaSource) {
+            Timber.tag(queueLogTag).w("tryRestartPlayback skipped unsupported source=%s", mediaSource::class)
+            return false
+        }
+
+        val loadError = startMediaSource(mediaSource, true)
+        if (loadError != null) {
+            Timber.tag(queueLogTag).w(loadError, "tryRestartPlayback failed for item=%s", mediaSource.itemId)
+            return false
+        }
+        return true
     }
+
+    /**
+     * Resolve a fresh server playback source for the current item after a transient network failure.
+     * This preserves the selected streams and playback position without forcing a transcode fallback.
+     */
+    suspend fun retryCurrentRemotePlayback(startTime: Duration, playWhenReady: Boolean): Boolean =
+        queueTransitionLock.withLock {
+            val currentMediaSource = getCurrentMediaSourceOrNull() as? RemoteJellyfinMediaSource
+                ?: return@withLock false
+            val itemId = currentMediaSource.itemId
+            val retryError = startRemotePlayback(
+                itemId = itemId,
+                mediaSourceId = currentMediaSource.id,
+                maxStreamingBitrate = currentMediaSource.maxStreamingBitrate,
+                startTime = startTime,
+                audioStreamIndex = currentMediaSource.selectedAudioStreamIndex,
+                subtitleStreamIndex = currentMediaSource.selectedSubtitleStreamIndex,
+                playWhenReady = playWhenReady,
+            )
+            if (retryError != null) {
+                Timber.tag(queueLogTag).w(retryError, "Network recovery failed for item=%s", itemId)
+                return@withLock false
+            }
+            Timber.tag(queueLogTag).i("Network recovery succeeded for item=%s", itemId)
+            true
+        }
 
     /**
      * Change the maximum bitrate to the specified value.
@@ -191,37 +397,23 @@ class QueueManager(private val viewModel: PlayerViewModel,) : KoinComponent {
 
     fun hasNext(): Boolean = currentQueue.isNotEmpty() && currentQueueIndex < currentQueue.lastIndex
 
+    fun shouldForceQueueAdvance(): Boolean = forceQueueAdvance && hasNext()
+
     suspend fun previous(): Boolean {
-        if (!hasPrevious()) return false
+        return queueTransitionLock.withLock {
+            if (!hasPrevious()) return@withLock false
 
-        val currentMediaSource = getCurrentMediaSourceOrNull() as? RemoteJellyfinMediaSource ?: return false
-
-        startRemotePlayback(
-            itemId = currentQueue[--currentQueueIndex],
-            mediaSourceId = null,
-            maxStreamingBitrate = currentMediaSource.maxStreamingBitrate,
-        )
-        return true
+            val targetIndex = nextOrPreviousQueueIndex(-1) ?: return@withLock false
+            startNextOrPrevious(targetIndex, "previous")
+        }
     }
 
     suspend fun next(): Boolean {
-        if (!hasNext()) return false
-
-        when (val currentMediaSource = getCurrentMediaSourceOrNull()) {
-            is LocalJellyfinMediaSource -> startDownloadPlayback(
-                mediaSourceId = currentMediaSource.id,
-                playWhenReady = true,
-            )
-
-            is RemoteJellyfinMediaSource -> startRemotePlayback(
-                itemId = currentQueue[++currentQueueIndex],
-                mediaSourceId = null,
-                maxStreamingBitrate = currentMediaSource.maxStreamingBitrate,
-            )
-
-            null -> return false
+        return queueTransitionLock.withLock {
+            if (!hasNext()) return@withLock false
+            val targetIndex = nextOrPreviousQueueIndex(1) ?: return@withLock false
+            startNextOrPrevious(targetIndex, "next")
         }
-        return true
     }
 
     /**
@@ -351,7 +543,7 @@ class QueueManager(private val viewModel: PlayerViewModel,) : KoinComponent {
      * @return The parsed MediaSources for the subtitles.
      */
     @CheckResult
-    private fun createExternalSubtitleMediaSources(source: JellyfinMediaSource,): Array<MediaSource> {
+    private fun createExternalSubtitleMediaSources(source: JellyfinMediaSource): Array<MediaSource> {
         val factory = get<SingleSampleMediaSource.Factory>()
         return source.externalSubtitleStreams.map { stream ->
             val uri = apiClient.createUrl(stream.deliveryUrl).toUri()
@@ -404,8 +596,10 @@ class QueueManager(private val viewModel: PlayerViewModel,) : KoinComponent {
     suspend fun selectAudioStreamAndRestartPlayback(stream: MediaStream): Boolean {
         require(stream.type == MediaStreamType.AUDIO)
         val currentPlayState = viewModel.getStateAndPause() ?: return false
+        val currentMediaSource = getCurrentMediaSourceOrNull() as? JellyfinMediaSource ?: return false
+        val sourceItemId = currentMediaSource.itemId
 
-        when (val currentMediaSource = getCurrentMediaSourceOrNull()) {
+        val loadError = when (currentMediaSource) {
             is LocalJellyfinMediaSource -> startDownloadPlayback(
                 mediaSourceId = currentMediaSource.id,
                 startTime = currentPlayState.position,
@@ -424,9 +618,18 @@ class QueueManager(private val viewModel: PlayerViewModel,) : KoinComponent {
                 playWhenReady = currentPlayState.playWhenReady,
             )
 
-            null -> return false
+            else -> PlayerException.UnsupportedContent()
         }
-        return true
+        if (loadError == null) {
+            Timber.tag(
+                queueLogTag,
+            ).d("Audio stream restart succeeded itemId=%s streamIndex=%s", sourceItemId, stream.index)
+            return true
+        }
+        Timber.tag(
+            queueLogTag,
+        ).w(loadError, "Audio stream restart failed itemId=%s streamIndex=%s", sourceItemId, stream.index)
+        return false
     }
 
     /**
@@ -439,8 +642,10 @@ class QueueManager(private val viewModel: PlayerViewModel,) : KoinComponent {
     suspend fun selectSubtitleStreamAndRestartPlayback(stream: MediaStream?): Boolean {
         require(stream == null || stream.type == MediaStreamType.SUBTITLE)
         val currentPlayState = viewModel.getStateAndPause() ?: return false
+        val mediaSource = getCurrentMediaSourceOrNull() as? JellyfinMediaSource ?: return false
+        val sourceItemId = mediaSource.itemId
 
-        when (val mediaSource = getCurrentMediaSourceOrNull()) {
+        val loadError = when (mediaSource) {
             is LocalJellyfinMediaSource -> startDownloadPlayback(
                 mediaSourceId = mediaSource.id,
                 startTime = currentPlayState.position,
@@ -459,9 +664,20 @@ class QueueManager(private val viewModel: PlayerViewModel,) : KoinComponent {
                 playWhenReady = currentPlayState.playWhenReady,
             )
 
-            null -> return false
+            else -> PlayerException.UnsupportedContent()
         }
-        return true
+        if (loadError == null) {
+            Timber.tag(queueLogTag).d(
+                "Subtitle stream restart succeeded itemId=%s streamIndex=%s",
+                sourceItemId,
+                stream?.index,
+            )
+            return true
+        }
+        Timber.tag(
+            queueLogTag,
+        ).w(loadError, "Subtitle stream restart failed itemId=%s streamIndex=%s", sourceItemId, stream?.index)
+        return false
     }
 
     private companion object {

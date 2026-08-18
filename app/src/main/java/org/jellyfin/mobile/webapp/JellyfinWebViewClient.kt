@@ -80,14 +80,14 @@ abstract class JellyfinWebViewClient(
         }
     }
 
-    override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, errorResponse: WebResourceResponse,) {
+    override fun onReceivedHttpError(view: WebView, request: WebResourceRequest, errorResponse: WebResourceResponse) {
         val errorMessage = errorResponse.data?.run { bufferedReader().use(Reader::readText) }
         Timber.e("Received WebView HTTP %d error: %s", errorResponse.statusCode, errorMessage)
 
         if (request.isForMainFrame) onErrorReceived()
     }
 
-    override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceErrorCompat,) {
+    override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceErrorCompat) {
         val description = when {
             WebViewFeature.isFeatureSupported(WebViewFeature.WEB_RESOURCE_ERROR_GET_DESCRIPTION) -> error.description
             else -> null

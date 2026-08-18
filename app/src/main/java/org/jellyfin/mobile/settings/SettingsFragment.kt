@@ -143,7 +143,7 @@ class SettingsFragment :
             }
         }
         startLandscapeVideoInLandscapePreference = checkBox(
-            Constants.PREF_EXOPLAYER_START_LANDSCAPE_VIDEO_IN_LANDSCAPE
+            Constants.PREF_EXOPLAYER_START_LANDSCAPE_VIDEO_IN_LANDSCAPE,
         ) {
             titleRes = R.string.pref_exoplayer_start_landscape_video_in_landscape
             enabled = appPreferences.videoPlayerType == VideoPlayerType.EXO_PLAYER
@@ -409,12 +409,11 @@ class SettingsFragment :
     private fun libraryUsernameSummary(): String =
         appPreferences.libraryUsername ?: getString(R.string.pref_library_not_set)
 
-    private fun libraryPasswordSummary(): String =
-        if (appPreferences.libraryPassword.isNullOrBlank()) {
-            getString(R.string.pref_library_not_set)
-        } else {
-            getString(R.string.pref_library_password_saved)
-        }
+    private fun libraryPasswordSummary(): String = if (appPreferences.libraryPassword.isNullOrBlank()) {
+        getString(R.string.pref_library_not_set)
+    } else {
+        getString(R.string.pref_library_password_saved)
+    }
 
     private fun showLibraryInputDialog(title: String, input: EditText, onSave: (String?) -> Unit) {
         val container = LinearLayout(requireContext()).apply {

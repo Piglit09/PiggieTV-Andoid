@@ -5,7 +5,7 @@ import androidx.annotation.StringRes
 import org.jellyfin.mobile.R
 import org.jellyfin.mobile.utils.Constants
 
-enum class PlayerNotificationAction(val action: String, @DrawableRes val icon: Int, @StringRes val label: Int,) {
+enum class PlayerNotificationAction(val action: String, @DrawableRes val icon: Int, @StringRes val label: Int) {
     PLAY(
         Constants.ACTION_PLAY,
         R.drawable.ic_play_black_42dp,

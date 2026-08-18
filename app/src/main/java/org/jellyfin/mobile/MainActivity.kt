@@ -19,8 +19,8 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.withStarted
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
-import org.jellyfin.mobile.events.ActivityEventHandler
 import org.jellyfin.mobile.core.PtvCoreRuntime
+import org.jellyfin.mobile.events.ActivityEventHandler
 import org.jellyfin.mobile.home.NativeHomeFragment
 import org.jellyfin.mobile.player.cast.Chromecast
 import org.jellyfin.mobile.player.cast.IChromecast
@@ -154,7 +154,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray,) {
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
 
         permissionRequestHelper.handleRequestPermissionsResult(requestCode, permissions, grantResults)

@@ -1,7 +1,7 @@
 package org.jellyfin.mobile.feature.music.auto
 
-import android.annotation.SuppressLint
 import android.Manifest
+import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -37,8 +37,8 @@ import org.jellyfin.mobile.R
 import org.jellyfin.mobile.app.ApiClientController
 import org.jellyfin.mobile.feature.music.MusicPlaybackController
 import org.jellyfin.mobile.feature.music.MusicPlaybackState
-import org.jellyfin.mobile.feature.music.MusicRepository
 import org.jellyfin.mobile.feature.music.MusicRepeatMode
+import org.jellyfin.mobile.feature.music.MusicRepository
 import org.jellyfin.mobile.feature.music.MusicSongActionHandler
 import org.jellyfin.mobile.utils.AndroidVersion
 import org.jellyfin.mobile.utils.Constants
@@ -61,6 +61,8 @@ class PtvMusicService : MediaLibraryService() {
     private var mediaLibrarySession: MediaLibrarySession? = null
     private var sessionPlayer: PtvMusicSessionPlayer? = null
     private var foregroundStartRequested = false
+    private var media3ForegroundRequired = false
+    private var foregroundPromotionFailed = false
     private var mediaSessionPlaybackActive = false
     private var lastNotificationRefreshSnapshot: PtvMusicNotificationRefreshSnapshot? = null
     private var notificationArtworkTrackId: String? = null
@@ -69,6 +71,8 @@ class PtvMusicService : MediaLibraryService() {
 
     override fun onCreate() {
         super.onCreate()
+        setForegroundServiceTimeoutMs(PTV_FOREGROUND_SERVICE_TIMEOUT_MS)
+        isRunning = true
         Timber.i(
             "PTV Music MediaLibraryService created serviceId=${runtimeInstanceId(this)} " +
                 "controllerId=${playbackController.instanceId} repositoryId=${musicRepository.instanceId} " +
@@ -149,7 +153,7 @@ class PtvMusicService : MediaLibraryService() {
         Timber.i(
             "PTV Music MediaLibraryService startCommand action=${intent?.action ?: "<none>"} " +
                 "source=$startSource startId=$startId flags=$flags " +
-                "superResult=$superResult sticky=true notificationPermissionGranted=${notificationPermissionGranted()} " +
+                "superResult=$superResult notificationPermissionGranted=${notificationPermissionGranted()} " +
                 "currentTrack=${playbackState.currentItem?.id ?: "<none>"} queue=${playbackState.queue.size} " +
                 "playing=${playbackState.isPlaying} buffering=${playbackState.isBuffering}",
         )
@@ -159,12 +163,17 @@ class PtvMusicService : MediaLibraryService() {
         if (handleNotificationAction(intent?.action)) {
             return START_NOT_STICKY
         }
+        if (intent?.action == ACTION_KEEP_ALIVE && !playbackState.hasCurrent && playbackState.queue.isEmpty()) {
+            Timber.w("PTV Music ignored empty foreground-service start source=$startSource")
+            stopSelfResult(startId)
+            return START_NOT_STICKY
+        }
         publishSessionPlaybackState(
             playbackController.state.value,
             reason = "startCommand:$startSource",
             force = true,
         )
-        return START_STICKY
+        return superResult
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession? {
@@ -182,20 +191,21 @@ class PtvMusicService : MediaLibraryService() {
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         val playbackState = playbackController.state.value
-        if (playbackState.hasCurrent || playbackState.queue.isNotEmpty()) {
+        if (foregroundStartRequested) {
             Timber.i(
-                "PTV Music service task removed while queue is active; keeping service alive " +
+                "PTV Music task removed during foreground playback; keeping service alive " +
                     "playing=${playbackState.isPlaying} buffering=${playbackState.isBuffering} " +
                     "queue=${playbackState.queue.size} currentTrack=${playbackState.currentItem?.id}",
             )
             return
         }
 
-        Timber.i("PTV Music service task removed while idle; allowing Media3 cleanup")
+        Timber.i("PTV Music task removed without foreground playback; allowing Media3 cleanup")
         super.onTaskRemoved(rootIntent)
     }
 
     override fun onUpdateNotification(session: MediaSession, startInForegroundRequired: Boolean) {
+        media3ForegroundRequired = startInForegroundRequired
         val playbackState = playbackController.state.value
         when {
             startInForegroundRequired && !foregroundStartRequested -> {
@@ -221,7 +231,12 @@ class PtvMusicService : MediaLibraryService() {
                 "currentTrack=${playbackState.currentItem?.id ?: "<none>"} queue=${playbackState.queue.size} " +
                 "playing=${playbackState.isPlaying} buffering=${playbackState.isBuffering}",
         )
-        postMediaNotification(playbackState, reason = "media3Update", force = true)
+        postMediaNotification(
+            playbackState = playbackState,
+            reason = "media3Update",
+            force = true,
+            foregroundRequired = requiresPtvMusicForeground(startInForegroundRequired, playbackState),
+        )
     }
 
     override fun onDestroy() {
@@ -232,6 +247,8 @@ class PtvMusicService : MediaLibraryService() {
                 "queue=${playbackController.state.value.queue.size} playing=${playbackController.state.value.isPlaying}",
         )
         resumeStore.markServiceLifecycle("destroyed serviceId=${runtimeInstanceId(this)}")
+        stopMediaNotification(reason = "destroy", remove = true)
+        isRunning = false
         serviceScope.cancel()
         if (mediaSessionPlaybackActive) {
             Timber.i("PTV Music media session inactive reason=destroy")
@@ -292,11 +309,7 @@ class PtvMusicService : MediaLibraryService() {
         refreshMediaNotification(playbackState, reason = reason, force = force)
     }
 
-    private fun refreshMediaNotification(
-        playbackState: MusicPlaybackState,
-        reason: String,
-        force: Boolean,
-    ) {
+    private fun refreshMediaNotification(playbackState: MusicPlaybackState, reason: String, force: Boolean) {
         if (mediaLibrarySession == null) {
             if (force) {
                 Timber.w("PTV Music Media3 notification refresh skipped; media session is not ready reason=$reason")
@@ -305,10 +318,7 @@ class PtvMusicService : MediaLibraryService() {
         }
         val shouldShowNotification = playbackState.hasCurrent || playbackState.queue.isNotEmpty()
         if (!shouldShowNotification) {
-            if (lastNotificationRefreshSnapshot != null) {
-                Timber.i("PTV Music Media3 notification refresh idle reason=$reason; waiting for Media3 cleanup")
-            }
-            lastNotificationRefreshSnapshot = null
+            stopMediaNotification(reason = reason, remove = true)
             return
         }
 
@@ -330,7 +340,12 @@ class PtvMusicService : MediaLibraryService() {
                 "currentTrack=${snapshot.currentTrackId ?: "<none>"} queue=${snapshot.queueSize} " +
                 "playing=${snapshot.isPlaying} buffering=${snapshot.isBuffering}",
         )
-        postMediaNotification(playbackState, reason = reason, force = force)
+        postMediaNotification(
+            playbackState = playbackState,
+            reason = reason,
+            force = force,
+            foregroundRequired = requiresPtvMusicForeground(media3ForegroundRequired, playbackState),
+        )
     }
 
     private fun handleNotificationAction(action: String?): Boolean {
@@ -371,7 +386,9 @@ class PtvMusicService : MediaLibraryService() {
         playbackState: MusicPlaybackState,
         reason: String,
         force: Boolean,
+        foregroundRequired: Boolean,
     ) {
+        if (foregroundPromotionFailed) return
         val session = mediaLibrarySession ?: run {
             Timber.w("PTV Music foreground notification skipped; media session is not ready reason=$reason")
             return
@@ -383,22 +400,35 @@ class PtvMusicService : MediaLibraryService() {
         }
 
         createMediaNotificationChannel(notificationManager)
-        val notification = buildMediaNotification(session, playbackState)
+        val notification = buildMediaNotification(session, playbackState, foregroundRequired)
+        val wasForeground = foregroundStartRequested
         runCatching {
-            if (AndroidVersion.isAtLeastQ) {
-                startForeground(
-                    Constants.MEDIA_PLAYER_NOTIFICATION_ID,
-                    notification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
-                )
+            if (foregroundRequired) {
+                if (AndroidVersion.isAtLeastQ) {
+                    startForeground(
+                        Constants.MEDIA_PLAYER_NOTIFICATION_ID,
+                        notification,
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
+                    )
+                } else {
+                    @Suppress("DEPRECATION")
+                    startForeground(Constants.MEDIA_PLAYER_NOTIFICATION_ID, notification)
+                }
             } else {
-                @Suppress("DEPRECATION")
-                startForeground(Constants.MEDIA_PLAYER_NOTIFICATION_ID, notification)
+                notificationManager.notify(Constants.MEDIA_PLAYER_NOTIFICATION_ID, notification)
+                if (wasForeground) {
+                    stopForegroundCompat(remove = false)
+                    // Android adds foreground-only flags to the first post. Refresh after detaching
+                    // so a paused notification is genuinely dismissible.
+                    notification.flags = clearPtvMusicForegroundNotificationFlags(notification.flags)
+                    notificationManager.notify(Constants.MEDIA_PLAYER_NOTIFICATION_ID, notification)
+                }
             }
         }.onSuccess {
-            foregroundStartRequested = true
+            foregroundStartRequested = foregroundRequired
             Timber.i(
-                "PTV Music foreground notification posted/updated reason=$reason force=$force " +
+                "PTV Music notification posted/updated reason=$reason force=$force " +
+                    "foreground=$foregroundRequired " +
                     "currentTrack=${playbackState.currentItem?.id ?: "<none>"} queue=${playbackState.queue.size} " +
                     "playing=${playbackState.isPlaying} buffering=${playbackState.isBuffering} " +
                     "notificationPermissionGranted=${notificationPermissionGranted()}",
@@ -412,12 +442,19 @@ class PtvMusicService : MediaLibraryService() {
                     "playing=${playbackState.isPlaying} buffering=${playbackState.isBuffering} " +
                     "notificationPermissionGranted=${notificationPermissionGranted()}",
             )
+            if (foregroundRequired) {
+                foregroundPromotionFailed = true
+                playbackController.suspendForPlaybackServiceFailure()
+                stopMediaNotification(reason = "foregroundPromotionFailed", remove = true)
+                stopSelf()
+            }
         }
     }
 
     private fun buildMediaNotification(
         session: MediaLibrarySession,
         playbackState: MusicPlaybackState,
+        foregroundRequired: Boolean,
     ): Notification {
         val item = playbackState.currentItem
         val trackId = item?.id?.toString()
@@ -447,11 +484,17 @@ class PtvMusicService : MediaLibraryService() {
                 setPriority(Notification.PRIORITY_LOW)
             }
             setCategory(Notification.CATEGORY_TRANSPORT)
-            setStyle(
-                Notification.MediaStyle()
-                    .setMediaSession(session.platformToken)
-                    .setShowActionsInCompactView(0, 1, 2),
-            )
+            if (foregroundRequired) {
+                setStyle(
+                    Notification.MediaStyle()
+                        .setMediaSession(session.platformToken)
+                        .setShowActionsInCompactView(0, 1, 2),
+                )
+            } else {
+                // Android 15+ forces valid MediaStyle notifications to be non-clearable. A paused
+                // transport notification keeps the resume actions without trapping the card.
+                setCategory(Notification.CATEGORY_TRANSPORT)
+            }
             setSmallIcon(R.drawable.ic_notification)
             setContentTitle(item?.title ?: getString(R.string.music_notification_channel))
             setContentText(item?.artist ?: item?.subtitle ?: item?.album)
@@ -459,7 +502,7 @@ class PtvMusicService : MediaLibraryService() {
             setVisibility(Notification.VISIBILITY_PUBLIC)
             setOnlyAlertOnce(true)
             setShowWhen(false)
-            setOngoing(playbackState.hasCurrent || playbackState.queue.isNotEmpty())
+            setOngoing(foregroundRequired)
             setContentIntent(buildSessionActivityPendingIntent())
             setDeleteIntent(
                 servicePendingIntent(
@@ -488,16 +531,12 @@ class PtvMusicService : MediaLibraryService() {
         }.build()
     }
 
-    private fun notificationAction(
-        icon: Int,
-        title: Int,
-        action: String,
-        requestCode: Int,
-    ): Notification.Action = Notification.Action.Builder(
-        icon,
-        getString(title),
-        servicePendingIntent(action = action, requestCode = requestCode),
-    ).build()
+    private fun notificationAction(icon: Int, title: Int, action: String, requestCode: Int): Notification.Action =
+        Notification.Action.Builder(
+            icon,
+            getString(title),
+            servicePendingIntent(action = action, requestCode = requestCode),
+        ).build()
 
     private fun servicePendingIntent(action: String, requestCode: Int): PendingIntent {
         val intent = Intent(action)
@@ -544,6 +583,10 @@ class PtvMusicService : MediaLibraryService() {
                             playbackController.state.value,
                             reason = "artworkLoaded:$reason",
                             force = true,
+                            foregroundRequired = requiresPtvMusicForeground(
+                                media3ForegroundRequired,
+                                playbackController.state.value,
+                            ),
                         )
                     }
                 }
@@ -557,18 +600,7 @@ class PtvMusicService : MediaLibraryService() {
         notificationArtwork = null
         notificationArtworkTrackId = null
         if (foregroundStartRequested) {
-            if (AndroidVersion.isAtLeastN) {
-                stopForeground(
-                    if (remove) {
-                        Service.STOP_FOREGROUND_REMOVE
-                    } else {
-                        Service.STOP_FOREGROUND_DETACH
-                    },
-                )
-            } else {
-                @Suppress("DEPRECATION")
-                stopForeground(remove)
-            }
+            stopForegroundCompat(remove)
         }
         if (remove) {
             notificationManager.cancel(Constants.MEDIA_PLAYER_NOTIFICATION_ID)
@@ -578,14 +610,32 @@ class PtvMusicService : MediaLibraryService() {
         Timber.i("PTV Music foreground notification stopped reason=$reason remove=$remove")
     }
 
-    private fun notificationPermissionGranted(): Boolean =
-        Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
-            ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.POST_NOTIFICATIONS,
-            ) == PackageManager.PERMISSION_GRANTED
+    private fun stopForegroundCompat(remove: Boolean) {
+        if (AndroidVersion.isAtLeastN) {
+            stopForeground(
+                if (remove) {
+                    Service.STOP_FOREGROUND_REMOVE
+                } else {
+                    Service.STOP_FOREGROUND_DETACH
+                },
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            stopForeground(remove)
+        }
+    }
+
+    private fun notificationPermissionGranted(): Boolean = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+        ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.POST_NOTIFICATIONS,
+        ) == PackageManager.PERMISSION_GRANTED
 
     companion object {
+        @Volatile
+        internal var isRunning = false
+            private set
+
         const val SESSION_ID = "ptv_music"
         const val ACTION_KEEP_ALIVE = "org.piggietv.music.action.KEEP_ALIVE"
         const val EXTRA_START_SOURCE = "org.piggietv.music.extra.START_SOURCE"
@@ -600,6 +650,7 @@ class PtvMusicService : MediaLibraryService() {
         private const val NOTIFICATION_ACTION_PREVIOUS_REQUEST_CODE = 4203
         private const val NOTIFICATION_ACTION_NEXT_REQUEST_CODE = 4204
         private const val NOTIFICATION_ACTION_STOP_REQUEST_CODE = 4205
+        private const val PTV_FOREGROUND_SERVICE_TIMEOUT_MS = 0L
     }
 
     private fun publishRuntimeStatus() {
@@ -617,12 +668,13 @@ class PtvMusicService : MediaLibraryService() {
 }
 
 @UnstableApi
-private class PtvMusicNotificationProvider(private val appContext: Context) : DefaultMediaNotificationProvider(
-    appContext,
-    DefaultMediaNotificationProvider.NotificationIdProvider { Constants.MEDIA_PLAYER_NOTIFICATION_ID },
-    Constants.MEDIA_NOTIFICATION_CHANNEL_ID,
-    R.string.music_notification_channel,
-) {
+private class PtvMusicNotificationProvider(private val appContext: Context) :
+    DefaultMediaNotificationProvider(
+        appContext,
+        DefaultMediaNotificationProvider.NotificationIdProvider { Constants.MEDIA_PLAYER_NOTIFICATION_ID },
+        Constants.MEDIA_NOTIFICATION_CHANNEL_ID,
+        R.string.music_notification_channel,
+    ) {
     init {
         setSmallIcon(R.drawable.ic_notification)
     }
@@ -661,16 +713,24 @@ private data class PtvMusicNotificationRefreshSnapshot(
     val notificationPermissionGranted: Boolean,
 )
 
-private fun MusicPlaybackState.toAutoRuntimeSnapshot(): PtvMusicAutoRuntimeSnapshot =
-    PtvMusicAutoRuntimeSnapshot(
-        currentTrackId = currentItem?.id?.toString(),
-        currentIndex = currentIndex,
-        queueSize = queue.size,
-        isPlaying = isPlaying,
-        isBuffering = isBuffering,
-        repeatMode = repeatMode,
-        shuffleEnabled = shuffleEnabled,
-        currentTrackFavorite = currentItem?.isFavorite == true,
-    )
+private fun MusicPlaybackState.toAutoRuntimeSnapshot(): PtvMusicAutoRuntimeSnapshot = PtvMusicAutoRuntimeSnapshot(
+    currentTrackId = currentItem?.id?.toString(),
+    currentIndex = currentIndex,
+    queueSize = queue.size,
+    isPlaying = isPlaying,
+    isBuffering = isBuffering,
+    repeatMode = repeatMode,
+    shuffleEnabled = shuffleEnabled,
+    currentTrackFavorite = currentItem?.isFavorite == true,
+)
 
 private fun runtimeInstanceId(value: Any): String = System.identityHashCode(value).toString(16)
+
+internal fun requiresPtvMusicForeground(media3Required: Boolean, playbackState: MusicPlaybackState): Boolean =
+    media3Required || playbackState.isPlaying || playbackState.isBuffering
+
+internal fun clearPtvMusicForegroundNotificationFlags(flags: Int): Int = flags and (
+    Notification.FLAG_ONGOING_EVENT or
+        Notification.FLAG_NO_CLEAR or
+        Notification.FLAG_FOREGROUND_SERVICE
+    ).inv()

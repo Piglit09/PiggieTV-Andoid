@@ -111,14 +111,9 @@ internal enum class PtvMusicAutoMoreItem(
         isPlayable = false,
         isBrowsable = true,
     ),
-    ;
 }
 
-internal enum class PtvMusicAutoMix(
-    val mediaId: String,
-    val title: String,
-    val subtitle: String,
-) {
+internal enum class PtvMusicAutoMix(val mediaId: String, val title: String, val subtitle: String) {
     FOR_YOU(
         mediaId = "ptv:auto:mix:for-you",
         title = "For You",

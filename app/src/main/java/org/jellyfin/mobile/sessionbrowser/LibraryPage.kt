@@ -6,7 +6,7 @@ interface LibraryPage<R : LibraryRoute> {
     val route: KClass<R>
     val grid: Boolean
 
-    suspend fun getContent(route: R, offset: Int, limit: Int,): List<LibraryPageElement>
+    suspend fun getContent(route: R, offset: Int, limit: Int): List<LibraryPageElement>
 }
 
 inline fun <reified T : LibraryRoute> libraryPage(

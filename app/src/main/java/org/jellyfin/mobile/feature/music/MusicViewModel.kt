@@ -4,15 +4,18 @@ package org.jellyfin.mobile.feature.music
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import org.jellyfin.mobile.app.ApiClientController
-import org.jellyfin.sdk.model.api.BaseItemKind
 import org.jellyfin.sdk.model.UUID
+import org.jellyfin.sdk.model.api.BaseItemKind
 import timber.log.Timber
 
 class MusicViewModel(
@@ -26,21 +29,24 @@ class MusicViewModel(
     val playbackState: StateFlow<MusicPlaybackState> get() = playbackController.state
 
     private var searchJob: Job? = null
+    private var loadJob: Job? = null
     private var searchVersion = 0
 
     fun load(force: Boolean = false) {
         if (!force && _uiState.value is MusicUiState.Content) return
 
-        viewModelScope.launch {
-            _uiState.value = MusicUiState.Loading
+        loadJob?.cancel()
+        loadJob = viewModelScope.launch {
+            _uiState.update { state ->
+                when (state) {
+                    is MusicUiState.Content -> state.copy(isRefreshing = true, refreshError = null)
+                    else -> MusicUiState.Loading
+                }
+            }
             runCatching {
                 apiClientController.loadSavedServerUser()
                 repository.loadHome { home ->
-                    _uiState.value = MusicUiState.Content(
-                        home = home,
-                        songsError = home.songsError,
-                        notInterestedItemIds = repository.notInterestedItemIds(),
-                    )
+                    publishHome(home = home, isRefreshing = home.sections.isEmpty())
                 }
             }.onSuccess { home ->
                 Timber.i(
@@ -48,15 +54,42 @@ class MusicViewModel(
                         "songs=${home.songsTotalCount} partial=${home.sourceErrors.isNotEmpty()} " +
                         "cached=${home.sourceCacheHits} errors=${home.sourceErrors.keys}",
                 )
-                _uiState.value = MusicUiState.Content(
-                    home = home,
-                    songsError = home.songsError,
-                    notInterestedItemIds = repository.notInterestedItemIds(),
-                )
+                publishHome(home = home, isRefreshing = false)
             }.onFailure { error ->
-                if (_uiState.value !is MusicUiState.Content) {
-                    _uiState.value = MusicUiState.Error(error.message ?: "Could not load PiggieTV Music.")
+                if (error is CancellationException) throw error
+                Timber.e(error, "PTV Music home refresh failed")
+                _uiState.update { state ->
+                    when (state) {
+                        is MusicUiState.Content -> state.copy(
+                            isRefreshing = false,
+                            refreshError = "Could not finish loading PiggieTV Music.",
+                        )
+
+                        else -> MusicUiState.Error("Could not load PiggieTV Music.")
+                    }
                 }
+            }
+        }
+    }
+
+    private fun publishHome(home: MusicHome, isRefreshing: Boolean) {
+        val notInterestedItemIds = repository.notInterestedItemIds()
+        _uiState.update { state ->
+            when (state) {
+                is MusicUiState.Content -> state.copy(
+                    home = home,
+                    isRefreshing = isRefreshing,
+                    refreshError = null,
+                    songsError = home.songsError,
+                    notInterestedItemIds = notInterestedItemIds,
+                )
+
+                else -> MusicUiState.Content(
+                    home = home,
+                    isRefreshing = isRefreshing,
+                    songsError = home.songsError,
+                    notInterestedItemIds = notInterestedItemIds,
+                )
             }
         }
     }
@@ -65,37 +98,87 @@ class MusicViewModel(
         val content = _uiState.value as? MusicUiState.Content ?: return
         val trimmedQuery = query.trim()
         val version = ++searchVersion
+        val loadedMatches = if (trimmedQuery.isBlank()) {
+            emptyList()
+        } else {
+            MusicTitleSearch.loadedMatches(content.home, trimmedQuery, SEARCH_LIMIT)
+        }
 
         searchJob?.cancel()
         _uiState.value = content.copy(
             searchQuery = query,
-            searchResults = if (trimmedQuery.isBlank()) emptyList() else content.searchResults,
+            searchResults = loadedMatches,
             isSearching = trimmedQuery.isNotBlank(),
+            searchError = null,
         )
 
         if (trimmedQuery.isBlank()) return
 
         searchJob = viewModelScope.launch {
             delay(SEARCH_DEBOUNCE_MS)
-            runCatching {
-                apiClientController.loadSavedServerUser()
-                repository.searchMusic(trimmedQuery)
-            }.onSuccess { results ->
-                if (version != searchVersion) return@onSuccess
-                _uiState.update { state ->
-                    when (state) {
-                        is MusicUiState.Content -> state.copy(searchResults = results, isSearching = false)
-                        else -> state
-                    }
+            val startedAt = System.currentTimeMillis()
+
+            try {
+                val remoteResults = withTimeout(SEARCH_TIMEOUT_MS) {
+                    apiClientController.loadSavedServerUser()
+                        ?: error("Your PiggieTV session needs to be refreshed.")
+                    repository.searchMusic(trimmedQuery)
                 }
-            }.onFailure { error ->
-                if (version != searchVersion) return@onFailure
+                if (version != searchVersion) return@launch
+                val results = MusicTitleSearch.merge(
+                    query = trimmedQuery,
+                    loaded = loadedMatches,
+                    remote = remoteResults,
+                    limit = SEARCH_LIMIT,
+                )
+                Timber.i(
+                    "PTV music search returned remote=${remoteResults.size} merged=${results.size} " +
+                        "queryLength=${trimmedQuery.length} in ${System.currentTimeMillis() - startedAt}ms",
+                )
                 _uiState.update { state ->
                     when (state) {
                         is MusicUiState.Content -> state.copy(
-                            searchResults = emptyList(),
+                            searchResults = results,
                             isSearching = false,
-                            searchError = error.message ?: "Music search failed.",
+                            searchError = null,
+                        )
+
+                        else -> state
+                    }
+                }
+            } catch (error: TimeoutCancellationException) {
+                if (version != searchVersion) return@launch
+                Timber.w(
+                    "PTV music search timed out queryLength=${trimmedQuery.length} " +
+                        "after ${System.currentTimeMillis() - startedAt}ms",
+                )
+                _uiState.update { state ->
+                    when (state) {
+                        is MusicUiState.Content -> state.copy(
+                            searchResults = loadedMatches,
+                            isSearching = false,
+                            searchError = "Search took too long. Showing loaded matches; try again.",
+                        )
+
+                        else -> state
+                    }
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                if (version != searchVersion) return@launch
+                Timber.w(
+                    error,
+                    "PTV music search failed queryLength=${trimmedQuery.length} " +
+                        "after ${System.currentTimeMillis() - startedAt}ms",
+                )
+                _uiState.update { state ->
+                    when (state) {
+                        is MusicUiState.Content -> state.copy(
+                            searchResults = loadedMatches,
+                            isSearching = false,
+                            searchError = error.message?.takeIf(String::isNotBlank)
+                                ?: "Could not search PiggieTV Music right now.",
                         )
 
                         else -> state
@@ -244,6 +327,9 @@ class MusicViewModel(
     }
 
     fun performSongAction(action: MusicSongAction, item: MusicItem, queue: List<MusicItem>) {
+        if (action == MusicSongAction.START_MIX) {
+            setActionMessage("Building your mix…")
+        }
         viewModelScope.launch {
             val request = MusicSongActionRequest.forItem(action = action, item = item, source = "phone")
             Timber.i("PTV music command songAction source=phone action=$action selectedItemId=${request.itemId}")
@@ -673,6 +759,8 @@ class MusicViewModel(
 
     private companion object {
         const val SEARCH_DEBOUNCE_MS = 300L
+        const val SEARCH_TIMEOUT_MS = 8_000L
+        const val SEARCH_LIMIT = 60
         const val SMART_QUEUE_LIMIT = 50
     }
 }
@@ -681,6 +769,8 @@ sealed interface MusicUiState {
     data object Loading : MusicUiState
     data class Content(
         val home: MusicHome,
+        val isRefreshing: Boolean = false,
+        val refreshError: String? = null,
         val searchQuery: String = "",
         val searchResults: List<MusicItem> = emptyList(),
         val isSearching: Boolean = false,

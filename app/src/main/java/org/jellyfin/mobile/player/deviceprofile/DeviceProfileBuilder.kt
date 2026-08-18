@@ -17,7 +17,7 @@ import org.jellyfin.sdk.model.api.SubtitleDeliveryMethod
 import org.jellyfin.sdk.model.api.SubtitleProfile
 import org.jellyfin.sdk.model.api.TranscodingProfile
 
-class DeviceProfileBuilder(private val appPreferences: AppPreferences,) {
+class DeviceProfileBuilder(private val appPreferences: AppPreferences) {
     private val supportedVideoCodecs: Array<Array<String>>
     private val supportedAudioCodecs: Array<Array<String>>
     private val videoCodecsProfiles: Map<String, Set<String>>
@@ -159,7 +159,7 @@ class DeviceProfileBuilder(private val appPreferences: AppPreferences,) {
         )
     }
 
-    private fun generateCodecProfile(container: String, videoCodec: String,): CodecProfile? {
+    private fun generateCodecProfile(container: String, videoCodec: String): CodecProfile? {
         val profilesSet = videoCodecsProfiles[videoCodec]
         if (profilesSet?.isNotEmpty() != true) {
             return null

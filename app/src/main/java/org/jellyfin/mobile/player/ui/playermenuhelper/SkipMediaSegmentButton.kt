@@ -6,7 +6,7 @@ import org.jellyfin.sdk.model.api.MediaSegmentDto
 
 class SkipMediaSegmentButton(
     private val skipMediaSegmentButton: Button,
-    callback: (mediaSegment: MediaSegmentDto?) -> Unit
+    callback: (mediaSegment: MediaSegmentDto?) -> Unit,
 ) {
     private var mediaSegment: MediaSegmentDto? = null
 

@@ -11,8 +11,8 @@ import android.os.Build
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
@@ -195,6 +195,7 @@ fun MusicScreen(
                                 requestMusicNotificationPermission()
                                 viewModel.shufflePlay(queue)
                             },
+                            onRetryHome = { viewModel.load(force = true) },
                             onLoadMoreSongs = viewModel::loadMoreSongs,
                             onScrollHeaderCollapsedChange = onScrollHeaderCollapsedChange,
                         )
@@ -361,10 +362,9 @@ private tailrec fun Context.findActivity(): Activity? = when (this) {
     else -> null
 }
 
-private fun MusicSongAction.needsMusicNotificationPermission(): Boolean =
-    this == MusicSongAction.PLAY ||
-        this == MusicSongAction.START_MIX ||
-        this == MusicSongAction.START_ARTIST_RADIO
+private fun MusicSongAction.needsMusicNotificationPermission(): Boolean = this == MusicSongAction.PLAY ||
+    this == MusicSongAction.START_MIX ||
+    this == MusicSongAction.START_ARTIST_RADIO
 
 @Composable
 private fun MusicHomeContent(
@@ -377,6 +377,7 @@ private fun MusicHomeContent(
     onPlay: (MusicItem, List<MusicItem>) -> Unit,
     onOpenSongMenu: (MusicItem, List<MusicItem>) -> Unit,
     onShuffle: (List<MusicItem>) -> Unit,
+    onRetryHome: () -> Unit,
     onLoadMoreSongs: () -> Unit,
     onScrollHeaderCollapsedChange: (Boolean) -> Unit,
 ) {
@@ -412,6 +413,25 @@ private fun MusicHomeContent(
                 },
             )
         }
+        when {
+            state.isRefreshing -> item { MusicInlineLoading() }
+
+            state.refreshError != null -> item {
+                MusicRetryRow(
+                    message = state.refreshError,
+                    onRetry = onRetryHome,
+                )
+            }
+
+            home.sourceErrors.isNotEmpty() -> item {
+                val failedCount = home.sourceErrors.size
+                val sectionLabel = if (failedCount == 1) "section" else "sections"
+                MusicRetryRow(
+                    message = "$failedCount music $sectionLabel could not refresh. Showing available results.",
+                    onRetry = onRetryHome,
+                )
+            }
+        }
         item {
             MusicSearchField(
                 query = state.searchQuery,
@@ -428,9 +448,10 @@ private fun MusicHomeContent(
             }
             if (state.isSearching) {
                 item { MusicInlineLoading() }
-            } else if (state.searchResults.isEmpty()) {
+            }
+            if (state.searchResults.isEmpty() && !state.isSearching) {
                 item { MusicEmpty("No music matched your search.") }
-            } else {
+            } else if (state.searchResults.isNotEmpty()) {
                 items(state.searchResults, key = { item -> "search-${item.id}" }) { item ->
                     MusicListItem(
                         item = item,
@@ -477,7 +498,13 @@ private fun MusicHomeContent(
 
                 MusicBrowseTab.GENRES -> musicListItems("genres", home.genres, onItemClick, onPlay, onOpenSongMenu)
 
-                MusicBrowseTab.PLAYLISTS -> musicListItems("playlists", home.playlists, onItemClick, onPlay, onOpenSongMenu)
+                MusicBrowseTab.PLAYLISTS -> musicListItems(
+                    "playlists",
+                    home.playlists,
+                    onItemClick,
+                    onPlay,
+                    onOpenSongMenu,
+                )
 
                 MusicBrowseTab.LIKED -> musicListItems("liked", home.favorites, onItemClick, onPlay, onOpenSongMenu)
             }
@@ -510,17 +537,19 @@ private fun androidx.compose.foundation.lazy.LazyListScope.musicSongsListItems(
                 item = item,
                 queue = items,
                 onClick = {
-                        if (item.isPlayable) onPlay(item, items) else onItemClick(item)
-                    },
-                    onPlay = { onPlay(item, items) },
-                    onOpenMenu = { onOpenSongMenu(item, items) },
-                )
-            }
+                    if (item.isPlayable) onPlay(item, items) else onItemClick(item)
+                },
+                onPlay = { onPlay(item, items) },
+                onOpenMenu = { onOpenSongMenu(item, items) },
+            )
         }
+    }
 
-    if (items.isNotEmpty()) error?.let { message ->
-        item {
-            MusicRetryRow(message = "Songs temporarily unavailable. $message", onRetry = onLoadMore)
+    if (items.isNotEmpty()) {
+        error?.let { message ->
+            item {
+                MusicRetryRow(message = "Songs temporarily unavailable. $message", onRetry = onLoadMore)
+            }
         }
     }
 
@@ -937,13 +966,7 @@ private fun MusicSectionHeader(title: String, subtitle: String?) {
 
 @Composable
 @OptIn(ExperimentalFoundationApi::class)
-private fun MusicCard(
-    item: MusicItem,
-    width: Dp,
-    onClick: () -> Unit,
-    onPlay: () -> Unit,
-    onOpenMenu: () -> Unit,
-) {
+private fun MusicCard(item: MusicItem, width: Dp, onClick: () -> Unit, onPlay: () -> Unit, onOpenMenu: () -> Unit) {
     Column(modifier = Modifier.width(width), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Card(
             modifier = Modifier
@@ -1783,12 +1806,7 @@ private fun MusicSongActionDialog(
 }
 
 @Composable
-private fun MusicSongActionRow(
-    label: String,
-    icon: @Composable () -> Unit,
-    enabled: Boolean,
-    onClick: () -> Unit,
-) {
+private fun MusicSongActionRow(label: String, icon: @Composable () -> Unit, enabled: Boolean, onClick: () -> Unit) {
     Surface(
         modifier = Modifier
             .fillMaxWidth()
@@ -2029,9 +2047,8 @@ private fun MusicSkeletonRows(modifier: Modifier = Modifier) {
     }
 }
 
-private fun MusicPlaybackState.progressFraction(): Float {
-    return MusicPlaybackFormatting.progressFraction(positionMs = positionMs, durationMs = durationMs)
-}
+private fun MusicPlaybackState.progressFraction(): Float =
+    MusicPlaybackFormatting.progressFraction(positionMs = positionMs, durationMs = durationMs)
 
 private fun MusicItem.supportsSourcePlaylist(): Boolean = type in setOf(
     BaseItemKind.AUDIO,
@@ -2041,10 +2058,7 @@ private fun MusicItem.supportsSourcePlaylist(): Boolean = type in setOf(
     BaseItemKind.MUSIC_GENRE,
 )
 
-private data class MusicSongActionUiTarget(
-    val item: MusicItem,
-    val queue: List<MusicItem>,
-)
+private data class MusicSongActionUiTarget(val item: MusicItem, val queue: List<MusicItem>)
 
 private const val ACTION_MESSAGE_DURATION_MS = 2_600L
 private const val SKELETON_ROW_COUNT = 4

@@ -6,7 +6,7 @@ import org.jellyfin.mobile.sessionbrowser.LibraryRoute
 
 const val ALPHA_BROWSER_OTHER = "#"
 const val ALPHA_BROWSER_LETTERS = "abcdefghijklmnopqrstuvwxyz"
-fun createAlphaBrowser(offset: Int, limit: Int, createRoute: (letter: String) -> LibraryRoute,) =
+fun createAlphaBrowser(offset: Int, limit: Int, createRoute: (letter: String) -> LibraryRoute) =
     "$ALPHA_BROWSER_OTHER$ALPHA_BROWSER_LETTERS".map { letter ->
         val route = createRoute(letter.toString())
 

@@ -116,9 +116,7 @@ class WebViewFragment :
     }
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View =
-        FragmentWebviewBinding.inflate(inflater, container, false).also {
-                binding
-            ->
+        FragmentWebviewBinding.inflate(inflater, container, false).also { binding ->
             webViewBinding = binding
         }.root
 

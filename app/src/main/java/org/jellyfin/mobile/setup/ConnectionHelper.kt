@@ -14,7 +14,7 @@ import org.jellyfin.sdk.discovery.RecommendedServerInfoScore
 import org.jellyfin.sdk.model.api.ServerDiscoveryInfo
 import timber.log.Timber
 
-class ConnectionHelper(private val context: Context, private val jellyfin: Jellyfin,) {
+class ConnectionHelper(private val context: Context, private val jellyfin: Jellyfin) {
     @Suppress("LongMethod")
     suspend fun checkServerUrl(enteredUrl: String): CheckUrlState {
         Timber.i("checkServerUrlAndConnection $enteredUrl")

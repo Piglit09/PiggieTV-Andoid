@@ -1,5 +1,6 @@
 package org.jellyfin.mobile.feature.music.auto
 
+import androidx.core.net.toUri
 import androidx.media3.common.C
 import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.MediaItem
@@ -8,7 +9,6 @@ import androidx.media3.common.Player
 import androidx.media3.common.Timeline
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.common.util.Util
-import androidx.core.net.toUri
 import org.jellyfin.mobile.feature.music.MusicItem
 import org.jellyfin.mobile.feature.music.MusicPlaybackController
 import org.jellyfin.mobile.feature.music.MusicPlaybackState
@@ -220,7 +220,7 @@ internal class PtvMusicSessionPlayer(private val playbackController: MusicPlayba
     override fun setMediaItems(mediaItems: List<MediaItem>, startIndex: Int, startPositionMs: Long) = Unit
 
     override fun stop() {
-        playbackController.pause()
+        playbackController.stop(source = "mediaSession")
     }
 
     fun notifyControllerStateChanged(state: MusicPlaybackState, force: Boolean = false) {
@@ -257,15 +257,16 @@ internal class PtvMusicSessionPlayer(private val playbackController: MusicPlayba
         }
     }
 
-    private fun canSeekInCurrentMediaItem(): Boolean =
-        liveDurationMs() > 0 &&
-            playbackController.mediaSessionPlayer.isCommandAvailable(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM)
+    private fun canSeekInCurrentMediaItem(): Boolean = liveDurationMs() > 0 &&
+        playbackController.mediaSessionPlayer.isCommandAvailable(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM)
 
     private fun liveDurationMs(): Long = playbackController.mediaSessionPlayer.duration.sanitizeDurationMs()
 
-    private fun liveCurrentPositionMs(): Long? = playbackController.mediaSessionPlayer.currentPosition.sanitizePositionMs()
+    private fun liveCurrentPositionMs(): Long? =
+        playbackController.mediaSessionPlayer.currentPosition.sanitizePositionMs()
 
-    private fun liveBufferedPositionMs(): Long? = playbackController.mediaSessionPlayer.bufferedPosition.sanitizePositionMs()
+    private fun liveBufferedPositionMs(): Long? =
+        playbackController.mediaSessionPlayer.bufferedPosition.sanitizePositionMs()
 
     private fun MusicPlaybackState.toAutoPlayerStateSnapshot(): PtvMusicAutoPlayerStateSnapshot =
         PtvMusicAutoPlayerStateSnapshot(
@@ -308,11 +309,9 @@ private data class PtvMusicAutoPlayerStateSnapshot(
 )
 
 @UnstableApi
-internal fun ptvMusicAutoPlayerCommands(canSeek: Boolean = true): Player.Commands {
-    return Player.Commands.Builder()
-        .addAll(*ptvMusicAutoPlayerCommandIds(canSeek))
-        .build()
-}
+internal fun ptvMusicAutoPlayerCommands(canSeek: Boolean = true): Player.Commands = Player.Commands.Builder()
+    .addAll(*ptvMusicAutoPlayerCommandIds(canSeek))
+    .build()
 
 internal fun ptvMusicAutoPlayerCommandIds(canSeek: Boolean = true): IntArray {
     val baseCommands = intArrayOf(
@@ -329,7 +328,6 @@ internal fun ptvMusicAutoPlayerCommandIds(canSeek: Boolean = true): IntArray {
         Player.COMMAND_GET_TIMELINE,
         Player.COMMAND_GET_METADATA,
         Player.COMMAND_SET_MEDIA_ITEM,
-        Player.COMMAND_CHANGE_MEDIA_ITEMS,
         Player.COMMAND_GET_AUDIO_ATTRIBUTES,
         Player.COMMAND_GET_VOLUME,
         Player.COMMAND_SET_VOLUME,
@@ -398,11 +396,7 @@ private class PtvMusicQueueTimeline(
 
     override fun getWindowCount(): Int = queue.size
 
-    override fun getWindow(
-        windowIndex: Int,
-        window: Window,
-        defaultPositionProjectionUs: Long,
-    ): Window {
+    override fun getWindow(windowIndex: Int, window: Window, defaultPositionProjectionUs: Long): Window {
         val durationUs = durationUsFor(windowIndex)
         return window.set(
             queue[windowIndex].id.toString(),

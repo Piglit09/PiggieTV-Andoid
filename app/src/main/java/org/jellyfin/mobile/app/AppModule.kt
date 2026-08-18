@@ -23,6 +23,7 @@ import androidx.media3.extractor.DefaultExtractorsFactory
 import androidx.media3.extractor.ts.TsExtractor
 import coil3.ImageLoader
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import okhttp3.Credentials
 import okhttp3.OkHttpClient
@@ -42,6 +43,7 @@ import org.jellyfin.mobile.feature.music.MusicSongActionHandler
 import org.jellyfin.mobile.feature.music.MusicViewModel
 import org.jellyfin.mobile.feature.music.auto.PtvMusicAutoResumeCoordinator
 import org.jellyfin.mobile.feature.music.auto.PtvMusicAutoResumeStore
+import org.jellyfin.mobile.feature.music.auto.PtvMusicSessionInvalidator
 import org.jellyfin.mobile.home.NativeHomeFragment
 import org.jellyfin.mobile.player.deviceprofile.DeviceProfileBuilder
 import org.jellyfin.mobile.player.interaction.PlayerEvent
@@ -114,21 +116,35 @@ val applicationModule = module {
             .build()
     }
     single { PermissionRequestHelper() }
-    single { MediaReportSender(get()) }
+    single {
+        MediaReportSender(
+            okHttpClient = get(),
+            apiClient = get(),
+            ioDispatcher = Dispatchers.IO,
+        )
+    }
     single { NativeSignupRepository(get()) }
     single { OpdsClient(get()) }
     single { LibraryReaderStore(androidApplication()) }
     single { LibraryRepository(get(), get(), get()) }
-    single { MusicRepository(get(), androidApplication()) }
-    single { PtvMusicAutoResumeStore(androidApplication()) }
-    single { MusicPlaybackController(get(), get(), get(), get(), get(), get()) }
+    single {
+        val apiClientController: ApiClientController = get()
+        MusicRepository(
+            apiClient = get(),
+            context = androidApplication(),
+            savedUserIdProvider = { apiClientController.authenticatedUserId },
+        )
+    }
+    single { PtvMusicAutoResumeStore(androidApplication(), get()) }
+    single { PtvMusicSessionInvalidator(get()) }
+    single { MusicPlaybackController(get(), get(), get(), get(), get(), get(), get()) }
     single { MusicSongActionHandler(get(), get()) }
     single { PtvMusicAutoResumeCoordinator(get(), get(), get()) }
     single { RemoteVolumeProvider(get()) }
     single(named(PLAYER_EVENT_CHANNEL)) { Channel<PlayerEvent>() }
 
     // Controllers
-    single { ApiClientController(get(), get(), get(), get(), get()) }
+    single { ApiClientController(get(), get(), get(), get(), get(), get()) }
 
     // Event handlers and channels
     single { ActivityEventHandler(get()) }
@@ -139,7 +155,7 @@ val applicationModule = module {
     single { MediaSegments(get()) }
 
     // ViewModels
-    viewModel { MainViewModel(get(), get()) }
+    viewModel { MainViewModel(get(), get(), get()) }
     viewModel { DownloadsViewModel() }
     viewModel { NativeHomeViewModel(get(), get(), get(), get()) }
     viewModel { LibraryViewModel(get(), get()) }

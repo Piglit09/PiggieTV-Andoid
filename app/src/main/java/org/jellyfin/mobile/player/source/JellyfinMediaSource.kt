@@ -186,7 +186,7 @@ sealed class JellyfinMediaSource(
 
                 in arrayOf(
                     BaseItemKind.EPISODE,
-                    BaseItemKind.RECORDING
+                    BaseItemKind.RECORDING,
                 ) if it.indexNumber != null && it.parentIndexNumber != null ->
                     "S${it.parentIndexNumber}:E${it.indexNumber}${it.indexNumberEnd?.let { n -> "-$n" } ?: ""}"
 
@@ -206,4 +206,4 @@ sealed class JellyfinMediaSource(
     } ?: sourceInfo.name.orEmpty()
 }
 
-data class PlaybackDetails(val startTime: Duration?, val audioStreamIndex: Int?, val subtitleStreamIndex: Int?,)
+data class PlaybackDetails(val startTime: Duration?, val audioStreamIndex: Int?, val subtitleStreamIndex: Int?)

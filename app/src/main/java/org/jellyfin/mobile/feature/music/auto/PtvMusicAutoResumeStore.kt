@@ -7,27 +7,42 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import org.jellyfin.mobile.app.AppPreferences
 import org.jellyfin.mobile.feature.music.MusicPlaybackState
 import org.jellyfin.mobile.feature.music.MusicRepeatMode
 import org.jellyfin.sdk.model.UUID
 import org.jellyfin.sdk.model.serializer.toUUIDOrNull
 import timber.log.Timber
 
-class PtvMusicAutoResumeStore(context: Context) {
+class PtvMusicAutoResumeStore(context: Context, private val appPreferences: AppPreferences) {
     private val sharedPreferences: SharedPreferences =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     @Suppress("FunctionExpressionBody")
     fun loadPlaybackState(): PtvMusicAutoResumeState? {
-        return sharedPreferences.getString(KEY_PLAYBACK_STATE, null)
+        val state = sharedPreferences.getString(KEY_PLAYBACK_STATE, null)
             ?.let(PtvMusicAutoResumeStateSerializer::decode)
+            ?: return null
+        val serverId = appPreferences.currentServerId
+        val userId = appPreferences.currentUserId
+        if (serverId == null || userId == null || !state.belongsTo(serverId, userId)) {
+            clearPlaybackState()
+            return null
+        }
+        return state
     }
 
     fun savePlaybackState(state: PtvMusicAutoResumeState) {
+        val serverId = appPreferences.currentServerId
+        val userId = appPreferences.currentUserId
+        if (serverId == null || userId == null) {
+            clearPlaybackState()
+            return
+        }
         sharedPreferences.edit {
             putString(
                 KEY_PLAYBACK_STATE,
-                PtvMusicAutoResumeStateSerializer.encode(state.trimmed()),
+                PtvMusicAutoResumeStateSerializer.encode(state.withOwner(serverId, userId).trimmed()),
             )
         }
     }
@@ -123,7 +138,10 @@ class PtvMusicAutoResumeStore(context: Context) {
             currentTrackId = sharedPreferences.getString(KEY_CURRENT_TRACK_ID, null),
             currentTrackTitle = sharedPreferences.getString(KEY_CURRENT_TRACK_TITLE, null),
             lastBrowseSource = sharedPreferences.getString(KEY_LAST_BROWSE_SOURCE, null),
-            lastBrowseItemCount = sharedPreferences.getInt(KEY_LAST_BROWSE_ITEM_COUNT, -1).takeIf { count -> count >= 0 },
+            lastBrowseItemCount = sharedPreferences.getInt(
+                KEY_LAST_BROWSE_ITEM_COUNT,
+                -1,
+            ).takeIf { count -> count >= 0 },
             lastSessionCommand = sharedPreferences.getString(KEY_LAST_SESSION_COMMAND, null),
             lastServiceEvent = sharedPreferences.getString(KEY_LAST_SERVICE_EVENT, null),
         )
@@ -157,6 +175,8 @@ data class PtvMusicAutoResumeState(
     val shuffleEnabled: Boolean,
     val repeatMode: String,
     val lastPlayedTimestampMs: Long,
+    val ownerServerId: Long? = null,
+    val ownerUserId: Long? = null,
 ) {
     val currentItemId: String?
         get() = queueItemIds.getOrNull(currentIndex)
@@ -175,6 +195,13 @@ data class PtvMusicAutoResumeState(
             .take(MAX_PERSISTED_QUEUE_ITEMS),
         currentIndex = currentIndex.coerceAtLeast(0),
         positionMs = positionMs.coerceAtLeast(0),
+    )
+
+    fun belongsTo(serverId: Long, userId: Long): Boolean = ownerServerId == serverId && ownerUserId == userId
+
+    fun withOwner(serverId: Long, userId: Long): PtvMusicAutoResumeState = copy(
+        ownerServerId = serverId,
+        ownerUserId = userId,
     )
 
     companion object {

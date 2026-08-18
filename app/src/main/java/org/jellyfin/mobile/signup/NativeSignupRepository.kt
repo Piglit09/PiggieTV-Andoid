@@ -12,7 +12,7 @@ import java.io.IOException
 
 class NativeSignupRepository(private val okHttpClient: OkHttpClient) {
     suspend fun createUser(serverUrl: String, signupRequest: NativeSignupRequest): NativeSignupResult = withContext(
-        Dispatchers.IO
+        Dispatchers.IO,
     ) {
         val payload = JSONObject()
             .put("email", signupRequest.email.trim())
@@ -25,7 +25,7 @@ class NativeSignupRepository(private val okHttpClient: OkHttpClient) {
     }
 
     suspend fun requestPasswordReset(serverUrl: String, email: String): NativeSignupResult = withContext(
-        Dispatchers.IO
+        Dispatchers.IO,
     ) {
         postSignupRequest(
             url = signupPasswordResetRequestUrl(serverUrl),
@@ -108,7 +108,7 @@ data class NativePasswordResetConfirmRequest(
     val confirmPassword: String,
 )
 
-data class NativeSignupResult(val ok: Boolean, val message: String, val userId: String?, val username: String?,)
+data class NativeSignupResult(val ok: Boolean, val message: String, val userId: String?, val username: String?)
 
 class NativeSignupException(message: String) : IOException(message)
 

@@ -36,6 +36,7 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -69,6 +70,7 @@ import androidx.compose.material.icons.outlined.PersonAdd
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Shuffle
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -76,6 +78,7 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -88,8 +91,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -115,7 +120,9 @@ import org.jellyfin.mobile.signup.NativeSignupRequest
 import org.jellyfin.mobile.ui.utils.PiggieTvBackground
 import org.jellyfin.mobile.ui.utils.PiggieTvColors
 import org.jellyfin.mobile.utils.Constants
+import org.jellyfin.mobile.utils.toast
 import org.jellyfin.sdk.model.api.BaseItemKind
+import org.jellyfin.sdk.model.UUID
 import org.koin.compose.koinInject
 import kotlin.time.Duration.Companion.ZERO
 
@@ -136,6 +143,7 @@ fun NativeHomeScreen(
     onBackHandlerChanged: ((() -> Boolean)?) -> Unit,
 ) {
     val uiState by viewModel.uiState.collectAsState()
+    val context = LocalContext.current
     var reportItem by remember { mutableStateOf<NativeMediaItem?>(null) }
     var detailsSelection by remember { mutableStateOf<NativeMediaDetailsSelection?>(null) }
     var detailsHistory by remember { mutableStateOf<List<NativeMediaDetailsSelection>>(emptyList()) }
@@ -191,6 +199,10 @@ fun NativeHomeScreen(
         detailsHistory = emptyList()
     }
 
+    LaunchedEffect(viewModel) {
+        viewModel.mediaReportMessages.collect(context::toast)
+    }
+
     SideEffect {
         onBackHandlerChanged {
             val state = uiState
@@ -242,9 +254,16 @@ fun NativeHomeScreen(
                             selection = details,
                             onBack = ::goBackFromDetails,
                             onPlay = { item, siblings -> onPlay(item.toPlayOptions(siblings)) },
+                            onPlayQueue = { itemIds, shuffled ->
+                                val queue = when {
+                                    shuffled -> SeriesPlaybackQueuePolicy.shuffled(itemIds)
+                                    else -> SeriesPlaybackQueuePolicy.ordered(itemIds)
+                                }
+                                onPlay(queue.toPlayOptions())
+                            },
                             onOpenFolder = ::openFolderFromDetails,
                             onOpenChild = ::openChildDetails,
-                            loadChildren = viewModel::loadFolderItems,
+                            loadDetails = viewModel::loadMediaDetails,
                             onReport = { item -> reportItem = item },
                         )
                     } else if (state.selectedLibrary == null) {
@@ -276,6 +295,8 @@ fun NativeHomeScreen(
                             onReportItem = { item -> reportItem = item },
                             onLibraryClick = viewModel::openLibrary,
                             onMovieSearch = viewModel::searchMovies,
+                            onSearchFilterChange = viewModel::selectSearchFilter,
+                            onSearchCategoryClick = viewModel::openSearchCategory,
                         )
                     } else {
                         LibraryContent(
@@ -416,8 +437,8 @@ private fun LoginScreen(
                             shape = MaterialTheme.shapes.medium,
                             color = if (username == user) {
                                 PiggieTvColors.Focus.copy(
-                                alpha = 0.24f
-                            )
+                                    alpha = 0.24f,
+                                )
                             } else {
                                 PiggieTvColors.Panel.copy(alpha = 0.82f)
                             },
@@ -637,7 +658,7 @@ private fun NativePasswordResetScreen(
                 Icon(
                     Icons.AutoMirrored.Outlined.ArrowBack,
                     contentDescription = null,
-                    tint = PiggieTvColors.TextPrimary
+                    tint = PiggieTvColors.TextPrimary,
                 )
             }
             Text(
@@ -658,7 +679,7 @@ private fun NativePasswordResetScreen(
                     painter = painterResource(R.drawable.app_logo),
                     contentDescription = null,
                     modifier = Modifier.fillMaxWidth(
-                        0.68f
+                        0.68f,
                     ).widthIn(max = layout.loginMaxWidth).height(layout.loadingLogoHeight),
                     contentScale = ContentScale.Fit,
                 )
@@ -668,10 +689,10 @@ private fun NativePasswordResetScreen(
                     text = if (mode ==
                         PasswordResetMode.REQUEST_CODE
                     ) {
-                            "Email me a reset code"
-                        } else {
-                            "Enter your reset code"
-                        },
+                        "Email me a reset code"
+                    } else {
+                        "Enter your reset code"
+                    },
                     color = PiggieTvColors.TextPrimary,
                     style = MaterialTheme.typography.h5,
                     fontWeight = FontWeight.Bold,
@@ -726,10 +747,10 @@ private fun NativePasswordResetScreen(
                     val messageColor = if (messageTone ==
                         SignupMessageTone.SUCCESS
                     ) {
-                            PiggieTvColors.Focus
-                        } else {
-                            PiggieTvColors.Accent
-                        }
+                        PiggieTvColors.Focus
+                    } else {
+                        PiggieTvColors.Accent
+                    }
                     Surface(
                         modifier = Modifier.fillMaxWidth().widthIn(max = layout.loginMaxWidth),
                         color = messageColor.copy(alpha = 0.14f),
@@ -741,10 +762,10 @@ private fun NativePasswordResetScreen(
                             color = if (messageTone ==
                                 SignupMessageTone.SUCCESS
                             ) {
-                                    PiggieTvColors.FocusSoft
-                                } else {
-                                    PiggieTvColors.Accent
-                                },
+                                PiggieTvColors.FocusSoft
+                            } else {
+                                PiggieTvColors.Accent
+                            },
                             modifier = Modifier.padding(14.dp),
                         )
                     }
@@ -863,7 +884,7 @@ private fun NativeSignupScreen(
                 Icon(
                     Icons.AutoMirrored.Outlined.ArrowBack,
                     contentDescription = null,
-                    tint = PiggieTvColors.TextPrimary
+                    tint = PiggieTvColors.TextPrimary,
                 )
             }
             Text(
@@ -986,8 +1007,8 @@ private fun NativeSignupScreen(
                             .widthIn(max = layout.loginMaxWidth),
                         color = if (isSuccess) {
                             PiggieTvColors.Focus.copy(
-                            alpha = 0.14f
-                        )
+                                alpha = 0.14f,
+                            )
                         } else {
                             PiggieTvColors.Accent.copy(alpha = 0.14f)
                         },
@@ -996,8 +1017,8 @@ private fun NativeSignupScreen(
                             1.dp,
                             if (isSuccess) {
                                 PiggieTvColors.Focus.copy(
-                                alpha = 0.54f
-                            )
+                                    alpha = 0.54f,
+                                )
                             } else {
                                 PiggieTvColors.Accent.copy(alpha = 0.54f)
                             },
@@ -1076,6 +1097,8 @@ private fun HomeContent(
     onReportItem: (NativeMediaItem) -> Unit,
     onLibraryClick: (NativeMediaItem) -> Unit,
     onMovieSearch: (String) -> Unit,
+    onSearchFilterChange: (NativeSearchFilter) -> Unit,
+    onSearchCategoryClick: (NativeMediaItem) -> Unit,
 ) {
     var activeTab by rememberSaveable { mutableStateOf(NativeHomeTab.HOME) }
     var childHeaderCollapsed by remember { mutableStateOf(false) }
@@ -1085,7 +1108,7 @@ private fun HomeContent(
             when (activeTab) {
                 NativeHomeTab.HOME ->
                     homeListState.firstVisibleItemIndex == 0 &&
-                    homeListState.firstVisibleItemScrollOffset < 24
+                        homeListState.firstVisibleItemScrollOffset < 24
 
                 NativeHomeTab.MUSIC,
                 NativeHomeTab.BOOKS,
@@ -1133,6 +1156,8 @@ private fun HomeContent(
                 onReportItem = onReportItem,
                 onLibraryClick = onLibraryClick,
                 onMovieSearch = onMovieSearch,
+                onSearchFilterChange = onSearchFilterChange,
+                onSearchCategoryClick = onSearchCategoryClick,
             )
 
             NativeHomeTab.DISCOVER -> NativeDiscoverScreen(
@@ -1182,7 +1207,13 @@ private fun HomeRows(
     onReportItem: (NativeMediaItem) -> Unit,
     onLibraryClick: (NativeMediaItem) -> Unit,
     onMovieSearch: (String) -> Unit,
+    onSearchFilterChange: (NativeSearchFilter) -> Unit,
+    onSearchCategoryClick: (NativeMediaItem) -> Unit,
 ) {
+    val searchResultCount = state.movieSearchResults.size +
+        state.searchGenreResults.size +
+        state.searchStudioResults.size
+
     LazyColumn(
         state = listState,
         modifier = Modifier
@@ -1198,44 +1229,38 @@ private fun HomeRows(
                 modifier = Modifier.padding(horizontal = layout.edgePadding),
             )
         }
+        item {
+            SearchFilterRow(
+                selected = state.searchFilter,
+                onSelect = onSearchFilterChange,
+                modifier = Modifier.padding(horizontal = layout.edgePadding),
+            )
+        }
 
         if (state.movieSearchQuery.isNotBlank()) {
-            when {
-                state.isSearchingMovies -> {
-                    item {
-                        MovieSearchResultsHeader(
-                            resultCount = state.movieSearchResults.size,
-                            error = state.movieSearchError,
-                            modifier = Modifier.padding(horizontal = layout.edgePadding),
-                        )
-                    }
-                    item {
-                        MovieInlineLoading(modifier = Modifier.padding(horizontal = layout.edgePadding))
-                    }
+            item {
+                MovieSearchResultsHeader(
+                    resultCount = searchResultCount,
+                    error = state.movieSearchError,
+                    modifier = Modifier.padding(horizontal = layout.edgePadding),
+                )
+            }
+            if (state.isSearchingMovies) {
+                item {
+                    MovieInlineLoading(modifier = Modifier.padding(horizontal = layout.edgePadding))
                 }
-
-                state.movieSearchResults.isEmpty() -> {
-                    item {
-                        MovieSearchResultsHeader(
-                            resultCount = state.movieSearchResults.size,
-                            error = state.movieSearchError,
-                            modifier = Modifier.padding(horizontal = layout.edgePadding),
-                        )
-                    }
-                    item {
-                        MovieEmptySearch(
-                            message = "No movies or shows matched your search.",
-                            modifier = Modifier.padding(horizontal = layout.edgePadding),
-                        )
-                    }
-                }
-
-                else -> item {
+            }
+            if (state.movieSearchResults.isNotEmpty()) {
+                item {
                     MediaSection(
                         layout = layout,
                         section = NativeMediaSection(
                             id = "movie-search-results",
-                            title = "Search Results",
+                            title = when (state.searchFilter) {
+                                NativeSearchFilter.MOVIES -> "Movies"
+                                NativeSearchFilter.SHOWS -> "Shows"
+                                else -> "Movies & Shows"
+                            },
                             rowKicker = "${state.movieSearchResults.size} matches",
                             groupKicker = null,
                             groupTitle = null,
@@ -1248,6 +1273,58 @@ private fun HomeRows(
                         onReportItem = onReportItem,
                         onItemPlay = { item -> onItemPlay(item, state.movieSearchResults) },
                         onItemClick = onItemClick,
+                    )
+                }
+            }
+            if (state.searchGenreResults.isNotEmpty()) {
+                item {
+                    MediaSection(
+                        layout = layout,
+                        section = NativeMediaSection(
+                            id = "genre-search-results",
+                            title = "Genres",
+                            rowKicker = "${state.searchGenreResults.size} video and music matches",
+                            groupKicker = null,
+                            groupTitle = null,
+                            showGroupHeader = false,
+                            presentation = PtvRowPresentation.STANDARD,
+                            shape = PtvRowShape.SQUARE,
+                            opensLibraries = false,
+                            items = state.searchGenreResults,
+                        ),
+                        onReportItem = onReportItem,
+                        onItemPlay = {},
+                        onItemClick = onSearchCategoryClick,
+                    )
+                }
+            }
+            if (state.searchStudioResults.isNotEmpty()) {
+                item {
+                    MediaSection(
+                        layout = layout,
+                        section = NativeMediaSection(
+                            id = "studio-search-results",
+                            title = "Studios",
+                            rowKicker = "${state.searchStudioResults.size} matches",
+                            groupKicker = null,
+                            groupTitle = null,
+                            showGroupHeader = false,
+                            presentation = PtvRowPresentation.STANDARD,
+                            shape = PtvRowShape.SQUARE,
+                            opensLibraries = false,
+                            items = state.searchStudioResults,
+                        ),
+                        onReportItem = onReportItem,
+                        onItemPlay = {},
+                        onItemClick = onSearchCategoryClick,
+                    )
+                }
+            }
+            if (searchResultCount == 0 && !state.isSearchingMovies) {
+                item {
+                    MovieEmptySearch(
+                        message = "No results matched this search.",
+                        modifier = Modifier.padding(horizontal = layout.edgePadding),
                     )
                 }
             }
@@ -1283,13 +1360,13 @@ private fun MovieSearchField(
     query: String,
     isSearching: Boolean,
     onQueryChange: (String) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
 ) {
     OutlinedTextField(
         value = query,
         onValueChange = onQueryChange,
         modifier = modifier.fillMaxWidth(),
-        label = { Text(text = "Search movies and shows") },
+        label = { Text(text = "Search PiggieTV") },
         singleLine = true,
         leadingIcon = {
             Icon(Icons.Outlined.Search, contentDescription = null, tint = PiggieTvColors.Focus)
@@ -1318,6 +1395,29 @@ private fun MovieSearchField(
             backgroundColor = PiggieTvColors.Night.copy(alpha = 0.48f),
         ),
     )
+}
+
+@Composable
+private fun SearchFilterRow(
+    selected: NativeSearchFilter,
+    onSelect: (NativeSearchFilter) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    LazyRow(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(48.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        items(NativeSearchFilter.entries, key = NativeSearchFilter::name) { filter ->
+            HomeTabButton(
+                text = filter.label,
+                selected = filter == selected,
+                onClick = { onSelect(filter) },
+                modifier = Modifier.widthIn(min = 88.dp),
+            )
+        }
+    }
 }
 
 @Composable
@@ -1410,7 +1510,7 @@ private fun HomeTabButton(text: String, selected: Boolean, onClick: () -> Unit, 
         modifier = modifier
             .fillMaxHeight()
             .clip(RoundedCornerShape(6.dp))
-            .clickable(onClick = onClick),
+            .selectable(selected = selected, role = Role.Tab, onClick = onClick),
         color = if (selected) PiggieTvColors.PanelHigh else PiggieTvColors.Night.copy(alpha = 0.04f),
         contentColor = if (selected) PiggieTvColors.TextPrimary else PiggieTvColors.TextSecondary,
         shape = RoundedCornerShape(6.dp),
@@ -1429,6 +1529,25 @@ private fun HomeTabButton(text: String, selected: Boolean, onClick: () -> Unit, 
 
 @Composable
 private fun RequestsPortal(layout: PtvAdaptiveLayout, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val webView = remember(context) {
+        WebView(context).apply {
+            settings.javaScriptEnabled = true
+            settings.domStorageEnabled = true
+            settings.cacheMode = WebSettings.LOAD_DEFAULT
+            settings.mediaPlaybackRequiresUserGesture = false
+            webViewClient = WebViewClient()
+            loadUrl(Constants.PIGGIETV_REQUESTS_URL)
+        }
+    }
+    DisposableEffect(webView) {
+        onDispose {
+            webView.stopLoading()
+            webView.removeAllViews()
+            webView.destroy()
+        }
+    }
+
     Surface(
         modifier = modifier
             .padding(horizontal = layout.edgePadding, vertical = 12.dp)
@@ -1439,16 +1558,7 @@ private fun RequestsPortal(layout: PtvAdaptiveLayout, modifier: Modifier = Modif
     ) {
         AndroidView(
             modifier = Modifier.fillMaxSize(),
-            factory = { context ->
-                WebView(context).apply {
-                    settings.javaScriptEnabled = true
-                    settings.domStorageEnabled = true
-                    settings.cacheMode = WebSettings.LOAD_DEFAULT
-                    settings.mediaPlaybackRequiresUserGesture = false
-                    webViewClient = WebViewClient()
-                    loadUrl(Constants.PIGGIETV_REQUESTS_URL)
-                }
-            },
+            factory = { webView },
         )
     }
 }
@@ -1470,7 +1580,12 @@ private fun NativeDiscoverScreen(
                 modifier = Modifier.padding(horizontal = layout.edgePadding, vertical = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                Text("Discover", color = PiggieTvColors.TextPrimary, style = MaterialTheme.typography.h5, fontWeight = FontWeight.Bold)
+                Text(
+                    "Discover",
+                    color = PiggieTvColors.TextPrimary,
+                    style = MaterialTheme.typography.h5,
+                    fontWeight = FontWeight.Bold,
+                )
                 Text(
                     "Browse your Jellyfin libraries with your current app session.",
                     color = PiggieTvColors.TextSecondary,
@@ -1525,10 +1640,24 @@ private fun GamesHub(layout: PtvAdaptiveLayout, modifier: Modifier = Modifier) {
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center,
         ) {
-            Icon(Icons.Outlined.Casino, contentDescription = null, tint = PiggieTvColors.Focus, modifier = Modifier.size(54.dp))
+            Icon(
+                Icons.Outlined.Casino,
+                contentDescription = null,
+                tint = PiggieTvColors.Focus,
+                modifier = Modifier.size(54.dp),
+            )
             Spacer(Modifier.height(12.dp))
-            Text("PiggieTV Games", color = PiggieTvColors.TextPrimary, style = MaterialTheme.typography.h6, fontWeight = FontWeight.Bold)
-            Text("Native games are coming soon.", color = PiggieTvColors.TextSecondary, style = MaterialTheme.typography.body2)
+            Text(
+                "PiggieTV Games",
+                color = PiggieTvColors.TextPrimary,
+                style = MaterialTheme.typography.h6,
+                fontWeight = FontWeight.Bold,
+            )
+            Text(
+                "Native games are coming soon.",
+                color = PiggieTvColors.TextSecondary,
+                style = MaterialTheme.typography.body2,
+            )
         }
     }
 }
@@ -2090,7 +2219,7 @@ private fun MediaSection(
             horizontalArrangement = Arrangement.spacedBy(layout.rowSpacing),
             contentPadding = PaddingValues(horizontal = layout.edgePadding),
         ) {
-            items(section.items, key = { item -> item.id.toString() }) { item ->
+            items(section.items, key = { item -> "${item.type.serialName}:${item.id}" }) { item ->
                 PosterCard(
                     layout = layout,
                     item = item,
@@ -2147,20 +2276,22 @@ private fun PosterCard(
                     placeholder = painterResource(R.drawable.ic_splash),
                     fallback = painterResource(R.drawable.ic_splash),
                 )
-                Surface(
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .padding(7.dp),
-                    color = PiggieTvColors.Night.copy(alpha = 0.78f),
-                    shape = RoundedCornerShape(8.dp),
-                ) {
-                    IconButton(onClick = onReport, modifier = Modifier.size(32.dp)) {
-                        Icon(
-                            Icons.Outlined.Flag,
-                            contentDescription = "Report media",
-                            tint = PiggieTvColors.Focus,
-                            modifier = Modifier.size(17.dp),
-                        )
+                if (item.type !in NativeCatalogSearch.categoryTypes) {
+                    Surface(
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .padding(7.dp),
+                        color = PiggieTvColors.Night.copy(alpha = 0.78f),
+                        shape = RoundedCornerShape(8.dp),
+                    ) {
+                        IconButton(onClick = onReport, modifier = Modifier.size(32.dp)) {
+                            Icon(
+                                Icons.Outlined.Flag,
+                                contentDescription = "Report media",
+                                tint = PiggieTvColors.Focus,
+                                modifier = Modifier.size(17.dp),
+                            )
+                        }
                     }
                 }
                 if (item.isPlayable) {
@@ -2220,17 +2351,23 @@ private fun MediaDetailsScreen(
     selection: NativeMediaDetailsSelection,
     onBack: () -> Unit,
     onPlay: (NativeMediaItem, List<NativeMediaItem>) -> Unit,
+    onPlayQueue: (List<UUID>, Boolean) -> Unit,
     onOpenFolder: (NativeMediaItem) -> Unit,
     onOpenChild: (NativeMediaItem, List<NativeMediaItem>) -> Unit,
-    loadChildren: suspend (NativeMediaItem) -> List<NativeMediaItem>,
+    loadDetails: suspend (NativeMediaItem) -> NativeMediaDetailsData,
     onReport: (NativeMediaItem) -> Unit,
 ) {
     val mediaItem = selection.item
-    val childItems by produceState<List<NativeMediaItem>?>(initialValue = null, mediaItem.id) {
+    var detailsReloadVersion by remember(mediaItem.id) { mutableIntStateOf(0) }
+    val detailsState by produceState<MediaDetailsLoadState>(
+        initialValue = MediaDetailsLoadState.Loading,
+        mediaItem.id,
+        detailsReloadVersion,
+    ) {
         value = if (mediaItem.showsChildrenOnDetails) {
-            runCatching { loadChildren(mediaItem) }.getOrDefault(emptyList())
+            MediaDetailsLoadState.Loaded(loadDetails(mediaItem))
         } else {
-            emptyList()
+            MediaDetailsLoadState.Loaded(NativeMediaDetailsData.EMPTY)
         }
     }
 
@@ -2279,7 +2416,7 @@ private fun MediaDetailsScreen(
                         Icon(
                             Icons.AutoMirrored.Outlined.ArrowBack,
                             contentDescription = null,
-                            tint = PiggieTvColors.TextPrimary
+                            tint = PiggieTvColors.TextPrimary,
                         )
                     }
                     Spacer(modifier = Modifier.weight(1f))
@@ -2330,7 +2467,7 @@ private fun MediaDetailsScreen(
                     mediaItem.subtitle?.let {
                         Text(text = it, color = PiggieTvColors.TextSecondary, style = MaterialTheme.typography.body2)
                     }
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         if (mediaItem.isPlayable) {
                             Button(
                                 onClick = { onPlay(mediaItem, selection.siblings) },
@@ -2343,10 +2480,85 @@ private fun MediaDetailsScreen(
                                 Icon(
                                     Icons.Outlined.PlayArrow,
                                     contentDescription = null,
-                                    modifier = Modifier.size(18.dp)
+                                    modifier = Modifier.size(18.dp),
                                 )
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Text(text = "Play", fontWeight = FontWeight.Bold)
+                            }
+                        }
+                        if (mediaItem.showsChildrenOnDetails) {
+                            when (val details = detailsState) {
+                                MediaDetailsLoadState.Loading -> Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(18.dp),
+                                        color = PiggieTvColors.Focus,
+                                        strokeWidth = 2.dp,
+                                    )
+                                    Text(
+                                        text = "Loading episodes...",
+                                        color = PiggieTvColors.TextSecondary,
+                                        style = MaterialTheme.typography.body2,
+                                    )
+                                }
+
+                                is MediaDetailsLoadState.Loaded -> when {
+                                    details.data.playbackUnavailable -> Column {
+                                        Text(
+                                            text = "Episode playback list couldn't be loaded.",
+                                            color = PiggieTvColors.TextSecondary,
+                                            style = MaterialTheme.typography.body2,
+                                        )
+                                        TextButton(onClick = { detailsReloadVersion += 1 }) {
+                                            Text(text = "Retry")
+                                        }
+                                    }
+
+                                    details.data.playbackItemIds.isNotEmpty() -> Column(
+                                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                                    ) {
+                                        Button(
+                                            onClick = { onPlayQueue(details.data.playbackItemIds, false) },
+                                            colors = ButtonDefaults.buttonColors(
+                                                backgroundColor = PiggieTvColors.Accent,
+                                                contentColor = PiggieTvColors.Night,
+                                            ),
+                                            shape = MaterialTheme.shapes.medium,
+                                        ) {
+                                            Icon(
+                                                Icons.Outlined.PlayArrow,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(18.dp),
+                                            )
+                                            Spacer(modifier = Modifier.width(5.dp))
+                                            Text(text = "Play All", fontWeight = FontWeight.Bold)
+                                        }
+                                        Button(
+                                            onClick = { onPlayQueue(details.data.playbackItemIds, true) },
+                                            colors = ButtonDefaults.buttonColors(
+                                                backgroundColor = PiggieTvColors.Focus,
+                                                contentColor = PiggieTvColors.Night,
+                                            ),
+                                            shape = MaterialTheme.shapes.medium,
+                                        ) {
+                                            Icon(
+                                                Icons.Outlined.Shuffle,
+                                                contentDescription = null,
+                                                modifier = Modifier.size(18.dp),
+                                            )
+                                            Spacer(modifier = Modifier.width(5.dp))
+                                            Text(text = "Shuffle All", fontWeight = FontWeight.Bold)
+                                        }
+                                    }
+
+                                    else -> Text(
+                                        text = "No playable episodes are available.",
+                                        color = PiggieTvColors.TextSecondary,
+                                        style = MaterialTheme.typography.body2,
+                                    )
+                                }
                             }
                         }
                         if (mediaItem.isFolder && !mediaItem.showsChildrenOnDetails) {
@@ -2361,7 +2573,7 @@ private fun MediaDetailsScreen(
                                 Icon(
                                     Icons.Outlined.FolderOpen,
                                     contentDescription = null,
-                                    modifier = Modifier.size(18.dp)
+                                    modifier = Modifier.size(18.dp),
                                 )
                                 Spacer(modifier = Modifier.width(6.dp))
                                 Text(text = "Browse", fontWeight = FontWeight.Bold)
@@ -2391,8 +2603,8 @@ private fun MediaDetailsScreen(
                     modifier = Modifier.padding(horizontal = layout.edgePadding),
                 )
             }
-            when (val children = childItems) {
-                null -> item {
+            when (val details = detailsState) {
+                MediaDetailsLoadState.Loading -> item {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -2407,8 +2619,24 @@ private fun MediaDetailsScreen(
                     }
                 }
 
-                else -> {
-                    if (children.isEmpty()) {
+                is MediaDetailsLoadState.Loaded -> {
+                    val children = details.data.children
+                    if (details.data.childrenUnavailable) {
+                        item {
+                            Column(
+                                modifier = Modifier.padding(horizontal = layout.edgePadding),
+                                verticalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                Text(
+                                    text = "This episode list couldn't be loaded.",
+                                    color = PiggieTvColors.TextSecondary,
+                                )
+                                TextButton(onClick = { detailsReloadVersion += 1 }) {
+                                    Text(text = "Retry")
+                                }
+                            }
+                        }
+                    } else if (children.isEmpty()) {
                         item {
                             Text(
                                 text = "Nothing here yet",
@@ -2752,7 +2980,7 @@ private val LIBRARY_ALPHA_LABELS = listOf("#") + ('A'..'Z').map(Char::toString)
 private val LIBRARY_ALPHA_RAIL_WIDTH = 30.dp
 private val LIBRARY_ALPHA_RAIL_SPACE = 38.dp
 
-private data class NativeMediaDetailsSelection(val item: NativeMediaItem, val siblings: List<NativeMediaItem>,)
+private data class NativeMediaDetailsSelection(val item: NativeMediaItem, val siblings: List<NativeMediaItem>)
 
 private fun List<NativeMediaItem>.alphaIndexByLabel(): Map<String, Int> = buildMap {
     forEachIndexed { index, item ->
@@ -2808,12 +3036,17 @@ private val playableAudioKinds = setOf(BaseItemKind.AUDIO, BaseItemKind.AUDIO_BO
 private val NativeMediaItem.showsChildrenOnDetails: Boolean
     get() = type == BaseItemKind.SERIES || type == BaseItemKind.SEASON
 
+private sealed interface MediaDetailsLoadState {
+    data object Loading : MediaDetailsLoadState
+    data class Loaded(val data: NativeMediaDetailsData) : MediaDetailsLoadState
+}
+
 private fun NativeMediaItem.toPlayOptions(siblings: List<NativeMediaItem> = emptyList()): PlayOptions {
     val queue = when {
         type in playableAudioKinds ->
             siblings
-            .filter { sibling -> sibling.isPlayable && sibling.type in playableAudioKinds }
-            .ifEmpty { listOf(this) }
+                .filter { sibling -> sibling.isPlayable && sibling.type in playableAudioKinds }
+                .ifEmpty { listOf(this) }
 
         else -> listOf(this)
     }
@@ -2829,3 +3062,14 @@ private fun NativeMediaItem.toPlayOptions(siblings: List<NativeMediaItem> = empt
         playFromDownloads = false,
     )
 }
+
+private fun List<UUID>.toPlayOptions(): PlayOptions = PlayOptions(
+    ids = this,
+    mediaSourceId = null,
+    startIndex = 0,
+    startPosition = ZERO,
+    audioStreamIndex = null,
+    subtitleStreamIndex = null,
+    playFromDownloads = false,
+    forceQueueAdvance = true,
+)

@@ -38,7 +38,7 @@ import org.koin.core.component.get
 import org.koin.core.component.inject
 import timber.log.Timber
 
-class ExternalPlayer(private val context: Context, lifecycleOwner: LifecycleOwner, registry: ActivityResultRegistry,) :
+class ExternalPlayer(private val context: Context, lifecycleOwner: LifecycleOwner, registry: ActivityResultRegistry) :
     KoinComponent {
     private val coroutinesScope = MainScope()
 

@@ -9,7 +9,7 @@ import android.webkit.WebChromeClient
 import android.webkit.WebView
 import timber.log.Timber
 
-class JellyfinWebChromeClient(private val fileChooserListener: FileChooserListener,) : WebChromeClient() {
+class JellyfinWebChromeClient(private val fileChooserListener: FileChooserListener) : WebChromeClient() {
     override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean {
         val logLevel = when (consoleMessage.messageLevel()) {
             ConsoleMessage.MessageLevel.ERROR -> Log.ERROR

@@ -23,7 +23,7 @@ object DownloadServiceUtil : KoinComponent {
     private var downloadTracker: DownloadTracker? = null
 
     @Synchronized
-    fun getDownloadNotificationHelper(context: Context?,): DownloadNotificationHelper {
+    fun getDownloadNotificationHelper(context: Context?): DownloadNotificationHelper {
         if (downloadNotificationHelper == null) {
             downloadNotificationHelper =
                 DownloadNotificationHelper(context!!, DOWNLOAD_NOTIFICATION_CHANNEL_ID)

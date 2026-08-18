@@ -4,15 +4,14 @@ param(
 )
 
 $propertyName = "piggietv.version"
-$startVersion = "0.0.50"
 $path = [System.IO.Path]::GetFullPath($PropertiesPath)
 $pattern = "^\s*$([regex]::Escape($propertyName))\s*=\s*v?(?<major>\d{1,2})\.(?<minor>\d{1,2})\.(?<patch>\d{1,2})\s*$"
 
-if (Test-Path -LiteralPath $path) {
-    $lines = @(Get-Content -LiteralPath $path)
-} else {
-    $lines = @()
+if (-not (Test-Path -LiteralPath $path)) {
+    throw "Version properties file was not found: $path"
 }
+
+$lines = @(Get-Content -LiteralPath $path)
 
 $versionLineIndex = -1
 $currentVersion = $null
@@ -31,35 +30,24 @@ for ($index = 0; $index -lt $lines.Count; $index++) {
 }
 
 if ($versionLineIndex -eq -1) {
-    $nextVersion = $startVersion
-    if ($lines.Count -gt 0 -and $lines[-1].Trim() -ne "") {
-        $lines += ""
-    }
-    $lines += "$propertyName=$nextVersion"
+    throw "Required version property '$propertyName' was not found in $path"
 } else {
     $major = $currentVersion.Major
     $minor = $currentVersion.Minor
     $patch = $currentVersion.Patch
 
-    if ($patch -lt 1) {
-        $patch = 1
-    } elseif ($patch -lt 99) {
+    if ($patch -lt 99) {
         $patch += 1
+    } elseif ($minor -lt 99) {
+        $minor += 1
+        $patch = 0
     } else {
-        $patch = 1
-        if ($minor -lt 99) {
-            $minor += 1
-        } elseif ($major -lt 99) {
-            $major += 1
-            $minor = 0
-        } else {
-            throw "Version is already at the supported maximum 99.99.99."
-        }
+        throw "Automatic major-version rollover is disabled at $major.99.99. Set the next major release explicitly."
     }
 
     $nextVersion = "$major.$minor.$patch"
     $lines[$versionLineIndex] = "$propertyName=$nextVersion"
 }
 
-Set-Content -LiteralPath $path -Value $lines
+Set-Content -LiteralPath $path -Value $lines -Encoding utf8
 Write-Output $nextVersion

@@ -3,32 +3,42 @@ package org.jellyfin.mobile.ui.screens.home
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import org.jellyfin.mobile.R
 import org.jellyfin.mobile.app.ApiClientController
 import org.jellyfin.mobile.data.entity.ServerEntity
 import org.jellyfin.mobile.player.interaction.PlayOptions
+import org.jellyfin.mobile.reporting.MediaReportDeliveryResult
 import org.jellyfin.mobile.reporting.MediaReportReason
 import org.jellyfin.mobile.reporting.MediaReportSender
+import org.jellyfin.mobile.reporting.MediaReportSource
 import org.jellyfin.mobile.reporting.MediaReportTarget
 import org.jellyfin.sdk.api.client.ApiClient
 import org.jellyfin.sdk.api.client.exception.ApiClientException
 import org.jellyfin.sdk.api.client.extensions.authenticateUserByName
 import org.jellyfin.sdk.api.client.extensions.genresApi
+import org.jellyfin.sdk.api.client.extensions.get
 import org.jellyfin.sdk.api.client.extensions.imageApi
 import org.jellyfin.sdk.api.client.extensions.itemsApi
 import org.jellyfin.sdk.api.client.extensions.studiosApi
+import org.jellyfin.sdk.api.client.extensions.tvShowsApi
 import org.jellyfin.sdk.api.client.extensions.userApi
 import org.jellyfin.sdk.api.client.extensions.userViewsApi
 import org.jellyfin.sdk.model.UUID
@@ -39,9 +49,12 @@ import org.jellyfin.sdk.model.api.ImageType
 import org.jellyfin.sdk.model.api.ItemFields
 import org.jellyfin.sdk.model.api.ItemSortBy
 import org.jellyfin.sdk.model.api.MediaType
+import org.jellyfin.sdk.model.api.SearchHint
+import org.jellyfin.sdk.model.api.SearchHintResult
 import org.jellyfin.sdk.model.api.SortOrder
 import org.jellyfin.sdk.model.api.UserDto
 import timber.log.Timber
+import java.util.concurrent.TimeoutException
 import kotlin.random.Random
 import kotlin.time.Duration.Companion.ZERO
 
@@ -53,16 +66,18 @@ class NativeHomeViewModel(
 ) : AndroidViewModel(app) {
     private val _uiState = MutableStateFlow<NativeHomeUiState>(NativeHomeUiState.Loading)
     val uiState: StateFlow<NativeHomeUiState> get() = _uiState
+    private val _mediaReportMessages = MutableSharedFlow<Int>(extraBufferCapacity = 1)
+    val mediaReportMessages: SharedFlow<Int> = _mediaReportMessages.asSharedFlow()
 
     private var currentServer: ServerEntity? = null
     private var currentUserId: UUID? = null
-    private var currentUserName: String = ""
     private var homeRowsJob: Job? = null
     private var movieSearchJob: Job? = null
     private var homeLoadVersion = 0
     private var movieSearchVersion = 0
     private val genreIdsByUser = mutableMapOf<UUID, Map<String, UUID>>()
     private val studioIdsByUser = mutableMapOf<UUID, Map<String, UUID>>()
+    private val searchCategoryCache = NativeSearchCategoryCache()
 
     fun load(server: ServerEntity, force: Boolean = false) {
         if (!force && currentServer?.id == server.id && uiState.value is NativeHomeUiState.Content) return
@@ -80,7 +95,6 @@ class NativeHomeViewModel(
                 showLogin(server)
             } else {
                 currentUserId = user.id
-                currentUserName = user.name.orEmpty()
                 loadHome(user)
             }
         }
@@ -103,7 +117,6 @@ class NativeHomeViewModel(
                 val accessToken = requireNotNull(result.accessToken) { "PiggieTV did not return an access token." }
                 apiClientController.setupUser(server.id, user.id, accessToken)
                 currentUserId = user.id
-                currentUserName = user.name.orEmpty()
                 loadHome(user)
             } catch (e: Exception) {
                 _uiState.value = (previous ?: NativeHomeUiState.Login(server.hostname)).copy(
@@ -154,6 +167,49 @@ class NativeHomeViewModel(
         }
     }
 
+    fun openSearchCategory(item: NativeMediaItem) {
+        val target = NativeCatalogSearch.categoryTarget(item) ?: return
+
+        viewModelScope.launch {
+            val content = uiState.value as? NativeHomeUiState.Content ?: return@launch
+            _uiState.value = content.copy(isLoadingLibrary = true)
+            val query = NativeLibraryQuery(
+                parentId = null,
+                recursive = true,
+                includeItemTypes = target.includeItemTypes,
+                sortBy = listOf(ItemSortBy.SORT_NAME),
+                genreIds = target.genreIds,
+                studioIds = target.studioIds,
+            )
+            try {
+                val page = loadLibraryPage(query = query, startIndex = 0)
+
+                _uiState.value = content.copy(
+                    selectedLibrary = NativeLibraryContent(
+                        title = item.title,
+                        subtitle = target.subtitle,
+                        query = query,
+                        items = page.items,
+                        totalCount = page.totalCount,
+                        hasMore = page.hasMore,
+                    ),
+                    isLoadingLibrary = false,
+                )
+            } catch (error: Exception) {
+                _uiState.value = content.copy(
+                    selectedLibrary = NativeLibraryContent(
+                        title = item.title,
+                        subtitle = target.subtitle,
+                        query = query,
+                        items = emptyList(),
+                        error = error.friendlyMessage("Could not open this catalog."),
+                    ),
+                    isLoadingLibrary = false,
+                )
+            }
+        }
+    }
+
     fun openFolder(item: NativeMediaItem) {
         viewModelScope.launch {
             val content = uiState.value as? NativeHomeUiState.Content ?: return@launch
@@ -193,7 +249,7 @@ class NativeHomeViewModel(
         }
     }
 
-    suspend fun loadFolderItems(item: NativeMediaItem): List<NativeMediaItem> {
+    private suspend fun loadFolderItems(item: NativeMediaItem): List<NativeMediaItem> {
         val includeItemTypes = item.childContentTypes()
         if (includeItemTypes.isEmpty()) return emptyList()
 
@@ -209,18 +265,81 @@ class NativeHomeViewModel(
         ).items
     }
 
+    suspend fun loadMediaDetails(item: NativeMediaItem): NativeMediaDetailsData = coroutineScope {
+        val childrenRequest = async {
+            captureMediaDetailsRequest("children", item.id) { loadFolderItems(item) }
+        }
+        val seriesPlaybackRequest = when (item.type) {
+            BaseItemKind.SERIES -> async {
+                captureMediaDetailsRequest("seriesPlayback", item.id) { loadSeriesPlaybackItemIds(item.id) }
+            }
+
+            else -> null
+        }
+
+        val childrenResult = childrenRequest.await()
+        val playbackResult = when (item.type) {
+            BaseItemKind.SERIES -> seriesPlaybackRequest?.await() ?: Result.success(emptyList())
+            BaseItemKind.SEASON -> childrenResult.map { children ->
+                children.filter(NativeMediaItem::isPlayable).map(NativeMediaItem::id)
+            }
+
+            else -> Result.success(emptyList())
+        }
+
+        NativeMediaDetailsData(
+            children = childrenResult.getOrDefault(emptyList()),
+            playbackItemIds = SeriesPlaybackQueuePolicy.ordered(playbackResult.getOrDefault(emptyList())),
+            childrenUnavailable = childrenResult.isFailure,
+            playbackUnavailable = playbackResult.isFailure,
+        )
+    }
+
+    private suspend fun loadSeriesPlaybackItemIds(seriesId: UUID): List<UUID> = withContext(Dispatchers.IO) {
+        val userId = currentUserId ?: apiClient.userApi.getCurrentUser().content.id.also { currentUserId = it }
+        apiClient.tvShowsApi.getEpisodes(
+            seriesId = seriesId,
+            userId = userId,
+            fields = emptyList(),
+            isMissing = false,
+            enableImages = false,
+            enableUserData = false,
+        ).content.items.map(BaseItemDto::id)
+    }
+
+    private suspend fun <T> captureMediaDetailsRequest(
+        source: String,
+        itemId: UUID,
+        block: suspend () -> T,
+    ): Result<T> = try {
+        Result.success(block())
+    } catch (error: CancellationException) {
+        throw error
+    } catch (error: Exception) {
+        Timber.w(error, "PTV media details request failed source=$source itemId=$itemId")
+        Result.failure(error)
+    }
+
     private suspend fun loadLibraryPage(
         query: NativeLibraryQuery,
         startIndex: Int,
         limit: Int = LIBRARY_PAGE_SIZE,
     ): NativeLibraryPage {
-        if (query.includeItemTypes.isEmpty()) return NativeLibraryPage(emptyList(), totalCount = 0, startIndex = startIndex)
+        if (query.includeItemTypes.isEmpty()) {
+            return NativeLibraryPage(
+                emptyList(),
+                totalCount = 0,
+                startIndex = startIndex,
+            )
+        }
 
         return withContext(Dispatchers.IO) {
             val result = apiClient.itemsApi.getItems(
                 parentId = query.parentId,
                 recursive = query.recursive,
                 includeItemTypes = query.includeItemTypes,
+                genreIds = query.genreIds,
+                studioIds = query.studioIds,
                 sortBy = query.sortBy,
                 sortOrder = listOf(SortOrder.ASCENDING),
                 fields = displayItemFields,
@@ -302,15 +421,33 @@ class NativeHomeViewModel(
         }
     }
 
-    fun searchMovies(query: String) {
+    fun searchMovies(
+        query: String,
+        filter: NativeSearchFilter = (_uiState.value as? NativeHomeUiState.Content)?.searchFilter
+            ?: NativeSearchFilter.ALL,
+    ) {
         val content = _uiState.value as? NativeHomeUiState.Content ?: return
         val trimmedQuery = query.trim()
         val version = ++movieSearchVersion
+        val mediaTypes = NativeCatalogSearch.mediaTypes(filter)
+        val loadedMatches = if (trimmedQuery.isBlank() || mediaTypes.isEmpty()) {
+            emptyList()
+        } else {
+            NativeTitleSearch.loadedMatches(
+                home = content.home,
+                query = trimmedQuery,
+                limit = MOVIE_SEARCH_LIMIT,
+                itemTypes = mediaTypes,
+            )
+        }
 
         movieSearchJob?.cancel()
         _uiState.value = content.copy(
             movieSearchQuery = query,
-            movieSearchResults = if (trimmedQuery.isBlank()) emptyList() else content.movieSearchResults,
+            movieSearchResults = loadedMatches,
+            searchGenreResults = emptyList(),
+            searchStudioResults = emptyList(),
+            searchFilter = filter,
             isSearchingMovies = trimmedQuery.isNotBlank(),
             movieSearchError = null,
         )
@@ -319,43 +456,127 @@ class NativeHomeViewModel(
 
         movieSearchJob = viewModelScope.launch {
             delay(MOVIE_SEARCH_DEBOUNCE_MS)
+            val startedAt = System.currentTimeMillis()
 
-            runCatching {
-                val userId = currentUserId ?: withContext(Dispatchers.IO) {
-                    apiClient.userApi.getCurrentUser().content.id
-                }.also { id -> currentUserId = id }
+            try {
+                val userId = apiClientController.loadSavedServerUser()
+                    ?: error("Your PiggieTV session needs to be refreshed.")
+                currentUserId = userId
+                val requestBudgets = NativeCatalogSearch.requestBudgets(filter)
+                val deadlineNanos = System.nanoTime() + requestBudgets.overallMs * NANOS_PER_MILLISECOND
+                val includesCategories = NativeCatalogSearch.includesVideoGenres(filter) ||
+                    NativeCatalogSearch.includesMusicGenres(filter) ||
+                    NativeCatalogSearch.includesStudios(filter)
 
-                withContext(Dispatchers.IO) {
-                    getPtvItems(
-                        userId = userId,
-                        searchTerm = trimmedQuery,
-                        includeItemTypes = movieSearchTypes,
-                        sortBy = listOf(ItemSortBy.SORT_NAME),
-                        sortOrder = listOf(SortOrder.ASCENDING),
-                        fields = displayItemFields,
-                        limit = MOVIE_SEARCH_LIMIT,
-                    ).map(::toNativeMediaItem)
+                val mediaResult = if (mediaTypes.isEmpty()) {
+                    SearchBranchResult()
+                } else {
+                    searchBranchBeforeDeadline(
+                        label = "media",
+                        deadlineNanos = deadlineNanos,
+                        branchBudgetMs = requestBudgets.mediaMs,
+                    ) {
+                        withContext(Dispatchers.IO) {
+                            getPtvItems(
+                                userId = userId,
+                                searchTerm = trimmedQuery,
+                                includeItemTypes = mediaTypes,
+                                sortBy = listOf(ItemSortBy.SORT_NAME),
+                                sortOrder = listOf(SortOrder.ASCENDING),
+                                fields = displayItemFields,
+                                limit = MOVIE_SEARCH_LIMIT,
+                            ).map(::toNativeMediaItem)
+                        }
+                    }
                 }
-            }.onSuccess { results ->
-                if (version != movieSearchVersion) return@onSuccess
+                if (version != movieSearchVersion) return@launch
+
+                if (mediaTypes.isNotEmpty()) {
+                    publishCatalogSearch(
+                        version = version,
+                        response = buildCatalogSearchResponse(
+                            query = trimmedQuery,
+                            filter = filter,
+                            mediaTypes = mediaTypes,
+                            loadedMatches = loadedMatches,
+                            mediaResult = mediaResult,
+                            categoryResult = SearchBranchResult(),
+                            categoryRequested = false,
+                        ),
+                        complete = !includesCategories,
+                    )
+                }
+
+                val categoryResult = if (!includesCategories) {
+                    SearchBranchResult()
+                } else {
+                    searchBranchBeforeDeadline(
+                        label = "categories",
+                        deadlineNanos = deadlineNanos,
+                        branchBudgetMs = requestBudgets.categoriesMs,
+                    ) {
+                        searchCategoryHints(userId, trimmedQuery)
+                    }
+                }
+                if (version != movieSearchVersion) return@launch
+
+                val remoteResults = buildCatalogSearchResponse(
+                    query = trimmedQuery,
+                    filter = filter,
+                    mediaTypes = mediaTypes,
+                    loadedMatches = loadedMatches,
+                    mediaResult = mediaResult,
+                    categoryResult = categoryResult,
+                    categoryRequested = includesCategories,
+                )
+                Timber.i(
+                    "PTV catalog search returned media=${remoteResults.groups.media.size} " +
+                        "genres=${remoteResults.groups.genres.size} studios=${remoteResults.groups.studios.size} " +
+                        "failedBranches=${remoteResults.failedBranchCount}/${remoteResults.requestedBranchCount} " +
+                        "queryLength=${trimmedQuery.length} in ${System.currentTimeMillis() - startedAt}ms",
+                )
                 _uiState.update { state ->
                     when (state) {
                         is NativeHomeUiState.Content -> state.copy(
-                            movieSearchResults = results,
+                            movieSearchResults = remoteResults.groups.media,
+                            searchGenreResults = remoteResults.groups.genres,
+                            searchStudioResults = remoteResults.groups.studios,
                             isSearchingMovies = false,
+                            movieSearchError = when {
+                                remoteResults.failedBranchCount == 0 -> null
+
+                                remoteResults.failedBranchCount < remoteResults.requestedBranchCount ->
+                                    "Some result groups could not load. Showing everything we found."
+
+                                remoteResults.firstError is TimeoutException ->
+                                    "Search took too long. Showing loaded matches; try again."
+
+                                else ->
+                                    remoteResults.firstError
+                                        ?.friendlyMessage("Could not search PiggieTV right now.")
+                            },
                         )
 
                         else -> state
                     }
                 }
-            }.onFailure { error ->
-                if (version != movieSearchVersion) return@onFailure
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                if (version != movieSearchVersion) return@launch
+                Timber.w(
+                    error,
+                    "PTV title search failed queryLength=${trimmedQuery.length} " +
+                        "after ${System.currentTimeMillis() - startedAt}ms",
+                )
                 _uiState.update { state ->
                     when (state) {
                         is NativeHomeUiState.Content -> state.copy(
-                            movieSearchResults = emptyList(),
+                            movieSearchResults = loadedMatches,
+                            searchGenreResults = emptyList(),
+                            searchStudioResults = emptyList(),
                             isSearchingMovies = false,
-                            movieSearchError = error.message ?: "Movie search failed.",
+                            movieSearchError = error.friendlyMessage("Could not search PiggieTV right now."),
                         )
 
                         else -> state
@@ -363,6 +584,13 @@ class NativeHomeViewModel(
                 }
             }
         }
+    }
+
+    fun selectSearchFilter(filter: NativeSearchFilter) {
+        val content = _uiState.value as? NativeHomeUiState.Content ?: return
+        if (content.searchFilter == filter) return
+
+        searchMovies(content.movieSearchQuery, filter)
     }
 
     fun signOut(server: ServerEntity) {
@@ -374,7 +602,6 @@ class NativeHomeViewModel(
             _uiState.value = NativeHomeUiState.Loading
             apiClientController.logoutCurrentUser()
             currentUserId = null
-            currentUserName = ""
             showLogin(server)
         }
     }
@@ -436,16 +663,12 @@ class NativeHomeViewModel(
             title = item.title,
             subtitle = item.subtitle,
             type = item.type.serialName,
-            source = "Native Home",
-            userName = currentUserName.takeIf(String::isNotBlank),
+            source = MediaReportSource.NATIVE_HOME,
         )
 
         viewModelScope.launch {
-            runCatching {
-                mediaReportSender.send(target, reason, details)
-            }.onFailure { error ->
-                Timber.w(error, "Failed to send PiggieTV media report")
-            }
+            val result = mediaReportSender.send(target, reason, details)
+            _mediaReportMessages.emit(result.messageResource())
         }
     }
 
@@ -526,7 +749,8 @@ class NativeHomeViewModel(
                     emptyMap()
                 }
                 val studioIdsByName = if (tierRows.any { row ->
-                        row.type == PtvRowType.SEARCH && (row.studioNames.isNotEmpty() || row.studioKeywords.isNotEmpty())
+                        row.type == PtvRowType.SEARCH &&
+                            (row.studioNames.isNotEmpty() || row.studioKeywords.isNotEmpty())
                     }
                 ) {
                     loadStudioIdsCached(userId)
@@ -587,7 +811,9 @@ class NativeHomeViewModel(
         studioIdsByName: Map<String, UUID>,
     ): List<BaseItemDto> = when (row.type) {
         PtvRowType.LIBRARIES -> userViews.take(row.itemLimit)
+
         PtvRowType.SEERR_REQUESTS -> emptyList()
+
         PtvRowType.CONTINUE -> apiClient.itemsApi.getResumeItems(
             userId = userId,
             limit = row.candidateLimit,
@@ -600,6 +826,7 @@ class NativeHomeViewModel(
             enableTotalRecordCount = false,
             enableImages = true,
         ).content.items.toPtvRowItems(row)
+
         PtvRowType.LATEST -> getPtvItems(
             userId = userId,
             includeItemTypes = row.itemTypes,
@@ -608,6 +835,7 @@ class NativeHomeViewModel(
             fields = row.queryItemFields(),
             limit = row.queryLimit,
         ).toPtvRowItems(row)
+
         PtvRowType.GENRE -> {
             val genreIds = row.genres.mapNotNull { genre -> genreIdsByName[genre.normalizePtvText()] }
 
@@ -624,6 +852,7 @@ class NativeHomeViewModel(
                 ).toPtvRowItems(row)
             }
         }
+
         PtvRowType.LIBRARY -> {
             val parentId = findLibraryParentId(row, userViews)
 
@@ -638,6 +867,7 @@ class NativeHomeViewModel(
                 limit = row.queryLimit,
             ).toPtvRowItems(row)
         }
+
         PtvRowType.SEARCH -> {
             val searchTerms = row.searchTerms.ifEmpty { listOf(row.title) }.take(PTV_SEARCH_TERM_LIMIT)
             val searchItems = fetchSearchTermItems(row, userId, searchTerms)
@@ -684,6 +914,117 @@ class NativeHomeViewModel(
                 }
             }
         }.awaitAll().flatten()
+    }
+
+    private suspend fun searchBranch(label: String, block: suspend () -> List<NativeMediaItem>): SearchBranchResult =
+        try {
+            SearchBranchResult(items = block())
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            Timber.w(error, "PTV catalog search branch failed branch=$label")
+            SearchBranchResult(error = error)
+        }
+
+    private suspend fun searchBranchBeforeDeadline(
+        label: String,
+        deadlineNanos: Long,
+        branchBudgetMs: Long,
+        block: suspend () -> List<NativeMediaItem>,
+    ): SearchBranchResult {
+        val remainingMs = ((deadlineNanos - System.nanoTime()) / NANOS_PER_MILLISECOND)
+            .coerceAtLeast(0L)
+        val timeoutMs = minOf(remainingMs, branchBudgetMs)
+        if (timeoutMs <= 0L) {
+            return SearchBranchResult(error = TimeoutException("$label search exceeded its result budget"))
+        }
+
+        return withTimeoutOrNull(timeoutMs) {
+            searchBranch(label, block)
+        } ?: SearchBranchResult(error = TimeoutException("$label search timed out after ${timeoutMs}ms"))
+    }
+
+    private fun buildCatalogSearchResponse(
+        query: String,
+        filter: NativeSearchFilter,
+        mediaTypes: List<BaseItemKind>,
+        loadedMatches: List<NativeMediaItem>,
+        mediaResult: SearchBranchResult,
+        categoryResult: SearchBranchResult,
+        categoryRequested: Boolean,
+    ): NativeCatalogSearchResponse {
+        val categories = categoryResult.items
+        val requestedBranches = listOfNotNull(
+            mediaResult.takeIf { mediaTypes.isNotEmpty() },
+            categoryResult.takeIf { categoryRequested },
+        )
+        return NativeCatalogSearchResponse(
+            groups = NativeSearchResultGroups(
+                media = NativeTitleSearch.merge(
+                    query = query,
+                    loaded = loadedMatches,
+                    remote = mediaResult.items,
+                    limit = MOVIE_SEARCH_LIMIT,
+                    itemTypes = mediaTypes,
+                ),
+                genres = NativeCatalogSearch.mergeGenres(
+                    query = query,
+                    videoGenres = categories.filter { item -> item.type == BaseItemKind.GENRE },
+                    musicGenres = categories.filter { item -> item.type == BaseItemKind.MUSIC_GENRE },
+                    limit = SEARCH_CATEGORY_LIMIT,
+                ).takeIf {
+                    NativeCatalogSearch.includesVideoGenres(filter) ||
+                        NativeCatalogSearch.includesMusicGenres(filter)
+                }.orEmpty(),
+                studios = NativeCatalogSearch.rankCategories(
+                    query = query,
+                    items = categories.filter { item -> item.type == BaseItemKind.STUDIO },
+                    limit = SEARCH_CATEGORY_LIMIT,
+                ).takeIf { NativeCatalogSearch.includesStudios(filter) }.orEmpty(),
+            ),
+            failedBranchCount = requestedBranches.count { result -> result.error != null },
+            requestedBranchCount = requestedBranches.size,
+            firstError = requestedBranches.firstNotNullOfOrNull(SearchBranchResult::error),
+        )
+    }
+
+    private fun publishCatalogSearch(version: Int, response: NativeCatalogSearchResponse, complete: Boolean) {
+        if (version != movieSearchVersion) return
+        _uiState.update { state ->
+            when (state) {
+                is NativeHomeUiState.Content -> state.copy(
+                    movieSearchResults = response.groups.media,
+                    searchGenreResults = response.groups.genres,
+                    searchStudioResults = response.groups.studios,
+                    isSearchingMovies = !complete,
+                    movieSearchError = null,
+                )
+
+                else -> state
+            }
+        }
+    }
+
+    private suspend fun searchCategoryHints(userId: UUID, searchTerm: String): List<NativeMediaItem> {
+        val serverKey = currentServer?.id?.toString().orEmpty()
+        searchCategoryCache.get(serverKey, userId, searchTerm)?.let { return it }
+
+        val results = withContext(Dispatchers.IO) {
+            apiClient.get<SearchHintResult>(
+                pathTemplate = "/Search/Hints",
+                queryParameters = NativeCatalogSearch.categoryHintQueryParameters(
+                    userId = userId,
+                    query = searchTerm,
+                    limit = SEARCH_HINT_CATEGORY_LIMIT,
+                ),
+            ).content.searchHints
+                .asSequence()
+                .filter { hint -> hint.type in NativeCatalogSearch.categoryTypes }
+                .map(::toNativeMediaItem)
+                .toList()
+        }
+        searchCategoryCache.put(serverKey, userId, searchTerm, results)
+        return results
     }
 
     private suspend fun getPtvItems(
@@ -765,15 +1106,27 @@ class NativeHomeViewModel(
     }
 
     private fun PtvHomeRowSpec.queryItemFields(): List<ItemFields> = when (matcher) {
-        PtvItemMatcher.NONE -> displayItemFields
+        PtvItemMatcher.NONE -> when (type) {
+            PtvRowType.GENRE,
+            PtvRowType.SEARCH,
+            -> recommendationItemFields
+
+            else -> displayItemFields
+        }
+
         else -> matcherItemFields
     }
 
     private fun List<BaseItemDto>.toPtvRowItems(row: PtvHomeRowSpec): List<BaseItemDto> {
-        val uniqueItems = distinctBy(BaseItemDto::id)
-        val matchedItems = uniqueItems.filter { item -> item.matchesPtvRow(row) }
+        val matchedItems = filter { item -> item.matchesPtvRow(row) }
 
-        return matchedItems.take(row.itemLimit)
+        return when (row.type) {
+            PtvRowType.GENRE,
+            PtvRowType.SEARCH,
+            -> PtvRecommendationQualityRanker.rank(matchedItems, maxItems = row.itemLimit)
+
+            else -> matchedItems.distinctBy(BaseItemDto::id).take(row.itemLimit)
+        }
     }
 
     private fun PtvHomeRowSpec.toNativeSection(items: List<NativeMediaItem>) = NativeMediaSection(
@@ -814,7 +1167,7 @@ class NativeHomeViewModel(
         val primaryTag = item.imageTags?.get(ImageType.PRIMARY)
         val backdropItemId = item.parentBackdropItemId ?: item.id
         val backdropTag = item.backdropImageTags?.firstOrNull() ?: item.parentBackdropImageTags?.firstOrNull()
-        val childCount = item.childCount ?: item.recursiveItemCount
+        val childCount = listOfNotNull(item.childCount, item.recursiveItemCount).maxOrNull()
 
         return NativeMediaItem(
             id = item.id,
@@ -844,20 +1197,63 @@ class NativeHomeViewModel(
             progress = item.userData?.playedPercentage?.toFloat(),
             isFolder = item.isFolder == true || item.type in folderTypes,
             isPlayable = item.isPlayableVideo() || item.isPlayableAudio(),
+            childCount = childCount,
         )
     }
 
+    private fun toNativeMediaItem(item: SearchHint): NativeMediaItem = NativeMediaItem(
+        id = item.id,
+        title = item.name.ifBlank { "Untitled" },
+        subtitle = when (item.type) {
+            BaseItemKind.GENRE -> "Video genre"
+            BaseItemKind.MUSIC_GENRE -> "Music genre"
+            BaseItemKind.STUDIO -> "Studio"
+            else -> null
+        },
+        overview = null,
+        type = item.type,
+        collectionType = null,
+        posterUrl = item.primaryImageTag?.let { tag ->
+            apiClient.imageApi.getItemImageUrl(
+                itemId = item.id,
+                imageType = ImageType.PRIMARY,
+                maxWidth = 420,
+                quality = 88,
+                tag = tag,
+            )
+        },
+        backdropUrl = null,
+        progress = null,
+        isFolder = true,
+        isPlayable = false,
+    )
+
     private fun BaseItemDto.subtitle(childCount: Int?): String? = when {
+        type == BaseItemKind.GENRE -> "Video genre"
+
+        type == BaseItemKind.MUSIC_GENRE -> "Music genre"
+
+        type == BaseItemKind.STUDIO -> "Studio"
+
         seriesName != null && indexNumber != null -> "S${parentIndexNumber ?: 0}:E$indexNumber"
+
         type == BaseItemKind.AUDIO -> artists?.joinToString()?.takeIf(String::isNotBlank) ?: album
+
         type == BaseItemKind.MUSIC_ALBUM -> artists?.joinToString()?.takeIf(String::isNotBlank)
             ?: childCount?.let { "$it tracks" }
+
         productionYear != null -> productionYear.toString()
+
         collectionType != null -> collectionType?.displayName
+
         childCount != null -> "$childCount items"
+
         type == BaseItemKind.SERIES -> "Series"
+
         type == BaseItemKind.SEASON -> "Season ${indexNumber ?: ""}".trim()
+
         type == BaseItemKind.FOLDER -> "Folder"
+
         else -> type.serialName
     }
 
@@ -878,8 +1274,11 @@ class NativeHomeViewModel(
         -> listOf(BaseItemKind.AUDIO)
 
         BaseItemKind.MUSIC_ARTIST -> listOf(BaseItemKind.MUSIC_ALBUM)
+
         BaseItemKind.SERIES -> listOf(BaseItemKind.SEASON)
+
         BaseItemKind.SEASON -> listOf(BaseItemKind.EPISODE)
+
         else -> emptyList()
     }
 
@@ -929,6 +1328,9 @@ class NativeHomeViewModel(
         const val RANDOM_PLAYABLE_CANDIDATE_LIMIT = 50
         const val MOVIE_SEARCH_DEBOUNCE_MS = 300L
         const val MOVIE_SEARCH_LIMIT = 60
+        const val SEARCH_CATEGORY_LIMIT = 40
+        const val SEARCH_HINT_CATEGORY_LIMIT = 14
+        const val NANOS_PER_MILLISECOND = 1_000_000L
         const val LIBRARY_PAGE_SIZE = 120
         const val FOLDER_DETAIL_ITEM_LIMIT = 200
 
@@ -948,9 +1350,9 @@ class NativeHomeViewModel(
             ItemFields.PROVIDER_IDS,
             ItemFields.ORIGINAL_TITLE,
         )
+        val recommendationItemFields = displayItemFields + listOf(ItemFields.GENRES, ItemFields.STUDIOS)
         val latestSortBy = listOf(ItemSortBy.PREMIERE_DATE, ItemSortBy.DATE_CREATED, ItemSortBy.SORT_NAME)
         val videoTypes = listOf(BaseItemKind.MOVIE, BaseItemKind.EPISODE, BaseItemKind.VIDEO)
-        val movieSearchTypes = listOf(BaseItemKind.MOVIE, BaseItemKind.SERIES, BaseItemKind.EPISODE, BaseItemKind.VIDEO)
         val playableVideoTypes = setOf(BaseItemKind.MOVIE, BaseItemKind.EPISODE, BaseItemKind.VIDEO)
         val randomPlayableTypes = listOf(BaseItemKind.MOVIE, BaseItemKind.EPISODE, BaseItemKind.VIDEO)
         val playableAudioTypes = setOf(BaseItemKind.AUDIO, BaseItemKind.AUDIO_BOOK)
@@ -964,8 +1366,27 @@ class NativeHomeViewModel(
             BaseItemKind.SERIES,
             BaseItemKind.USER_VIEW,
             BaseItemKind.BOX_SET,
+            BaseItemKind.GENRE,
+            BaseItemKind.MUSIC_GENRE,
+            BaseItemKind.STUDIO,
         )
     }
+}
+
+private data class SearchBranchResult(val items: List<NativeMediaItem> = emptyList(), val error: Exception? = null)
+
+private data class NativeCatalogSearchResponse(
+    val groups: NativeSearchResultGroups,
+    val failedBranchCount: Int,
+    val requestedBranchCount: Int,
+    val firstError: Exception?,
+)
+
+private fun MediaReportDeliveryResult.messageResource(): Int = when (this) {
+    MediaReportDeliveryResult.SENT -> R.string.media_report_sent
+    MediaReportDeliveryResult.UNAVAILABLE -> R.string.media_report_unavailable
+    MediaReportDeliveryResult.RATE_LIMITED -> R.string.media_report_rate_limited
+    MediaReportDeliveryResult.FAILED -> R.string.media_report_failed
 }
 
 sealed interface NativeHomeUiState {
@@ -983,6 +1404,9 @@ sealed interface NativeHomeUiState {
         val isLoadingLibrary: Boolean = false,
         val movieSearchQuery: String = "",
         val movieSearchResults: List<NativeMediaItem> = emptyList(),
+        val searchGenreResults: List<NativeMediaItem> = emptyList(),
+        val searchStudioResults: List<NativeMediaItem> = emptyList(),
+        val searchFilter: NativeSearchFilter = NativeSearchFilter.ALL,
         val isSearchingMovies: Boolean = false,
         val movieSearchError: String? = null,
     ) : NativeHomeUiState
@@ -999,17 +1423,15 @@ data class NativeHomeContent(
 )
 
 data class NativeLibraryQuery(
-    val parentId: UUID,
+    val parentId: UUID?,
     val recursive: Boolean,
     val includeItemTypes: List<BaseItemKind>,
     val sortBy: List<ItemSortBy>,
+    val genreIds: List<UUID> = emptyList(),
+    val studioIds: List<UUID> = emptyList(),
 )
 
-data class NativeLibraryPage(
-    val items: List<NativeMediaItem>,
-    val totalCount: Int,
-    val startIndex: Int,
-) {
+data class NativeLibraryPage(val items: List<NativeMediaItem>, val totalCount: Int, val startIndex: Int) {
     val hasMore: Boolean
         get() = startIndex + items.size < totalCount
 }
@@ -1049,4 +1471,21 @@ data class NativeMediaItem(
     val progress: Float?,
     val isFolder: Boolean,
     val isPlayable: Boolean,
+    val childCount: Int? = null,
 )
+
+data class NativeMediaDetailsData(
+    val children: List<NativeMediaItem>,
+    val playbackItemIds: List<UUID>,
+    val childrenUnavailable: Boolean,
+    val playbackUnavailable: Boolean,
+) {
+    companion object {
+        val EMPTY = NativeMediaDetailsData(
+            children = emptyList(),
+            playbackItemIds = emptyList(),
+            childrenUnavailable = false,
+            playbackUnavailable = false,
+        )
+    }
+}

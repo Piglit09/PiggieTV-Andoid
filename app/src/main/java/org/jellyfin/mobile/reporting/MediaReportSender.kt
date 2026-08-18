@@ -1,84 +1,128 @@
 package org.jellyfin.mobile.reporting
 
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import org.json.JSONArray
-import org.json.JSONObject
+import org.jellyfin.sdk.api.client.ApiClient
+import org.jellyfin.sdk.api.client.util.AuthorizationHeaderBuilder
+import timber.log.Timber
 import java.io.IOException
+import java.util.concurrent.TimeUnit
 
-class MediaReportSender(private val okHttpClient: OkHttpClient) {
-    suspend fun send(target: MediaReportTarget, reason: MediaReportReason, details: String?) {
+class MediaReportSender(
+    private val okHttpClient: OkHttpClient,
+    private val apiClient: ApiClient,
+    private val ioDispatcher: CoroutineDispatcher,
+) {
+    private val reportClient = okHttpClient.newBuilder()
+        .followRedirects(false)
+        .followSslRedirects(false)
+        .callTimeout(REPORT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+        .build()
+
+    suspend fun send(
+        target: MediaReportTarget,
+        reason: MediaReportReason,
+        details: String?,
+    ): MediaReportDeliveryResult = withContext(ioDispatcher) {
+        val endpoint = buildMediaReportEndpoint(apiClient.baseUrl)
+            ?: return@withContext MediaReportDeliveryResult.UNAVAILABLE
+        val accessToken = apiClient.accessToken?.takeIf(String::isNotBlank)
+            ?: return@withContext MediaReportDeliveryResult.UNAVAILABLE
+        val authorizationHeader = AuthorizationHeaderBuilder.buildHeader(
+            clientName = apiClient.clientInfo.name,
+            clientVersion = apiClient.clientInfo.version,
+            deviceId = apiClient.deviceInfo.id,
+            deviceName = apiClient.deviceInfo.name,
+            accessToken = accessToken,
+        )
         val request = Request.Builder()
-            .url(DISCORD_WEBHOOK_URL)
-            .post(buildPayload(target, reason, details).toString().toRequestBody(JSON_MEDIA_TYPE))
+            .url(endpoint)
+            .header("Authorization", authorizationHeader)
+            .header("Accept", "application/json")
+            .post(buildMediaReportPayload(target, reason, details).toString().toRequestBody(JSON_MEDIA_TYPE))
             .build()
 
-        withContext(Dispatchers.IO) {
-            okHttpClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    throw IOException("Discord report failed with HTTP ${response.code}")
-                }
+        try {
+            reportClient.newCall(request).execute().use { response ->
+                classifyMediaReportResponse(response.code)
             }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: IOException) {
+            Timber.w(error, "Could not deliver PiggieTV media report")
+            MediaReportDeliveryResult.FAILED
         }
-    }
-
-    private fun buildPayload(target: MediaReportTarget, reason: MediaReportReason, details: String?): JSONObject {
-        val fields = JSONArray()
-            .put(field("Reason", reason.displayName, true))
-            .put(field("Title", target.title.limit(DISCORD_FIELD_VALUE_LIMIT), false))
-            .put(field("Item ID", target.itemId, true))
-            .put(field("Source", target.source, true))
-
-        target.subtitle?.takeIf(String::isNotBlank)?.let { fields.put(field("Subtitle", it.limit(DISCORD_FIELD_VALUE_LIMIT), false)) }
-        target.type?.takeIf(String::isNotBlank)?.let { fields.put(field("Type", it, true)) }
-        target.userName?.takeIf(String::isNotBlank)?.let { fields.put(field("User", it.limit(DISCORD_FIELD_VALUE_LIMIT), true)) }
-        target.playbackPositionMs?.let { fields.put(field("Position", it.toPlaybackTime(), true)) }
-        target.mediaSourceId?.takeIf(String::isNotBlank)?.let { fields.put(field("Media Source", it.limit(DISCORD_FIELD_VALUE_LIMIT), true)) }
-        target.playMethod?.takeIf(String::isNotBlank)?.let { fields.put(field("Play Method", it, true)) }
-        details?.trim()?.takeIf(String::isNotBlank)?.let { fields.put(field("Details", it.limit(DISCORD_FIELD_VALUE_LIMIT), false)) }
-
-        val embed = JSONObject()
-            .put("title", "PiggieTV media report")
-            .put("color", DISCORD_EMBED_COLOR)
-            .put("fields", fields)
-
-        return JSONObject()
-            .put("username", "PiggieTV Reports")
-            .put("embeds", JSONArray().put(embed))
-    }
-
-    private fun field(name: String, value: String, inline: Boolean) = JSONObject()
-        .put("name", name)
-        .put("value", value.ifBlank { "Unknown" })
-        .put("inline", inline)
-
-    private fun String.limit(maxLength: Int) = when {
-        length <= maxLength -> this
-        else -> take(maxLength - 3) + "..."
-    }
-
-    private fun Long.toPlaybackTime(): String {
-        val totalSeconds = this / 1000
-        val hours = totalSeconds / 3600
-        val minutes = (totalSeconds % 3600) / 60
-        val seconds = totalSeconds % 60
-
-        return if (hours > 0) {
-            "%d:%02d:%02d".format(hours, minutes, seconds)
-        } else {
-            "%d:%02d".format(minutes, seconds)
-        }
-    }
-
-    private companion object {
-        const val DISCORD_WEBHOOK_URL =
-            "https://discord.com/api/webhooks/1509330050322010205/C11EUYAj6m9YGBYvMg-kliQ8wvaE9bx2kcyZ28EFmvOxmzU3NB8gdNzTFdUTtsSnvVO3"
-        const val DISCORD_EMBED_COLOR = 0xFF43D1
-        const val DISCORD_FIELD_VALUE_LIMIT = 1024
-        val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
     }
 }
+
+enum class MediaReportDeliveryResult {
+    SENT,
+    UNAVAILABLE,
+    RATE_LIMITED,
+    FAILED,
+}
+
+internal fun buildMediaReportEndpoint(baseUrl: String?): HttpUrl? {
+    val base = baseUrl?.toHttpUrlOrNull() ?: return null
+    val basePath = base.encodedPath.trimEnd('/')
+    return base.newBuilder()
+        .username("")
+        .password("")
+        .encodedPath("$basePath/$MEDIA_REPORT_ROUTE")
+        .query(null)
+        .fragment(null)
+        .build()
+}
+
+internal fun buildMediaReportPayload(
+    target: MediaReportTarget,
+    reason: MediaReportReason,
+    details: String?,
+): JsonObject = buildJsonObject {
+    put("schemaVersion", MEDIA_REPORT_SCHEMA_VERSION)
+    put("itemId", target.itemId.trim().limit(ITEM_ID_LIMIT))
+    put("title", target.title.trim().ifBlank { "Unknown" }.limit(TITLE_LIMIT))
+    put("source", target.source.wireName)
+    put("reason", reason.wireName)
+
+    target.subtitle?.trim()?.takeIf(String::isNotBlank)?.let { put("subtitle", it.limit(TITLE_LIMIT)) }
+    target.type?.trim()?.takeIf(String::isNotBlank)?.let { put("itemType", it.limit(TYPE_LIMIT)) }
+    target.playbackPositionMs?.coerceAtLeast(0)?.let { put("playbackPositionMs", it) }
+    target.mediaSourceId?.trim()?.takeIf(String::isNotBlank)?.let { put("mediaSourceId", it.limit(ITEM_ID_LIMIT)) }
+    target.playMethod?.trim()?.takeIf(String::isNotBlank)?.let { put("playMethod", it.limit(TYPE_LIMIT)) }
+    details?.trim()?.takeIf(String::isNotBlank)?.let { put("details", it.limit(DETAILS_LIMIT)) }
+}
+
+internal fun classifyMediaReportResponse(statusCode: Int): MediaReportDeliveryResult = when (statusCode) {
+    in HTTP_SUCCESS_MIN..HTTP_SUCCESS_MAX -> MediaReportDeliveryResult.SENT
+    HTTP_NOT_FOUND, HTTP_NOT_IMPLEMENTED, HTTP_SERVICE_UNAVAILABLE -> MediaReportDeliveryResult.UNAVAILABLE
+    HTTP_TOO_MANY_REQUESTS -> MediaReportDeliveryResult.RATE_LIMITED
+    else -> MediaReportDeliveryResult.FAILED
+}
+
+private fun String.limit(maxLength: Int): String = if (length <= maxLength) this else take(maxLength)
+
+private const val MEDIA_REPORT_ROUTE = "Ptv/v1/reports/media"
+private const val MEDIA_REPORT_SCHEMA_VERSION = 1
+private const val ITEM_ID_LIMIT = 128
+private const val TITLE_LIMIT = 256
+private const val TYPE_LIMIT = 64
+private const val DETAILS_LIMIT = 2_000
+private const val REPORT_TIMEOUT_SECONDS = 15L
+private const val HTTP_SUCCESS_MIN = 200
+private const val HTTP_SUCCESS_MAX = 299
+private const val HTTP_NOT_FOUND = 404
+private const val HTTP_TOO_MANY_REQUESTS = 429
+private const val HTTP_NOT_IMPLEMENTED = 501
+private const val HTTP_SERVICE_UNAVAILABLE = 503
+private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()

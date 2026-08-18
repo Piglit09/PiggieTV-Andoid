@@ -1,11 +1,11 @@
 package org.jellyfin.mobile.ui.screens.connect
 
 import android.view.KeyEvent
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Image
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.ExitTransition
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -244,7 +244,7 @@ private fun AddressSelection(
 
 @Stable
 @Composable
-private fun ServerUrlField(text: String, errorText: String?, onTextChange: (String) -> Unit, onSubmit: () -> Unit,) {
+private fun ServerUrlField(text: String, errorText: String?, onTextChange: (String) -> Unit, onSubmit: () -> Unit) {
     OutlinedTextField(
         value = text,
         onValueChange = onTextChange,
@@ -291,7 +291,7 @@ private fun ServerUrlField(text: String, errorText: String?, onTextChange: (Stri
 
 @Stable
 @Composable
-private fun AnimatedErrorText(errorText: String?,) {
+private fun AnimatedErrorText(errorText: String?) {
     AnimatedVisibility(
         visible = errorText != null,
         exit = ExitTransition.None,
@@ -363,7 +363,7 @@ private fun ServerDiscoveryList(
 
 @Stable
 @Composable
-private fun ServerDiscoveryItem(serverSuggestion: ServerSuggestion, onClickServer: () -> Unit,) {
+private fun ServerDiscoveryItem(serverSuggestion: ServerSuggestion, onClickServer: () -> Unit) {
     val isFeatured = serverSuggestion.type == ServerSuggestion.Type.FEATURED
     val borderColor = if (isFeatured) PiggieTvColors.Focus else PiggieTvColors.Border
     Surface(

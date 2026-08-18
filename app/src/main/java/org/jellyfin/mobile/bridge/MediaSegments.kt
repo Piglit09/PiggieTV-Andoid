@@ -8,7 +8,7 @@ import org.jellyfin.sdk.model.api.MediaSegmentType
 import timber.log.Timber
 
 @Suppress("unused")
-class MediaSegments(private val mediaSegmentRepository: MediaSegmentRepository,) {
+class MediaSegments(private val mediaSegmentRepository: MediaSegmentRepository) {
     @JavascriptInterface
     fun setSegmentTypeAction(typeString: String, actionString: String) = try {
         mediaSegmentRepository

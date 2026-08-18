@@ -13,7 +13,7 @@ import org.jellyfin.sdk.model.api.BaseItemDto
 import org.jellyfin.sdk.model.api.BaseItemKind
 import org.jellyfin.sdk.model.api.ImageType
 
-private suspend fun search(api: ApiClient, query: String, itemTypes: Collection<BaseItemKind>,) =
+private suspend fun search(api: ApiClient, query: String, itemTypes: Collection<BaseItemKind>) =
     withContext(Dispatchers.IO) {
         async {
             api.itemsApi.getItems(
@@ -36,7 +36,7 @@ val SearchLibraryPage = { api: ApiClient ->
                 LibraryPageElement.baseItem(
                     api,
                     item,
-                    action = LibraryItemAction.Navigate(LibraryRoute.Playlist(item.id))
+                    action = LibraryItemAction.Navigate(LibraryRoute.Playlist(item.id)),
                 )
             },
             search(api, route.query, setOf(BaseItemKind.MUSIC_ALBUM)) to { item: BaseItemDto ->
@@ -46,7 +46,7 @@ val SearchLibraryPage = { api: ApiClient ->
                 LibraryPageElement.baseItem(
                     api,
                     item,
-                    action = LibraryItemAction.Navigate(LibraryRoute.Artist(item.id))
+                    action = LibraryItemAction.Navigate(LibraryRoute.Artist(item.id)),
                 )
             },
         ).map { (deferred, mapper) ->
