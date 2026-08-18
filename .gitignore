@@ -2,6 +2,12 @@
 .gradle
 /.kotlin
 /local.properties
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.key
 /.idea
 .DS_Store
 build

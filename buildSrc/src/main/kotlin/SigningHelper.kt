@@ -1,28 +1,63 @@
-import org.gradle.api.Project
+import org.gradle.api.GradleException
 import java.io.File
-import java.util.*
+import java.io.IOException
+import java.nio.file.Files
+import java.util.Base64
 
 object SigningHelper {
+    private val requiredEnvironmentVariables = listOf(
+        "KEYSTORE",
+        "KEYSTORE_PASSWORD",
+        "KEY_ALIAS",
+        "KEY_PASSWORD",
+    )
 
-    fun loadSigningConfig(project: Project): Config? {
-        val serializedKeystore = System.getenv("KEYSTORE") ?: return null
-        val storeFile = try {
-            project.file("/tmp/keystore.jks").apply {
-                writeBytes(Base64.getDecoder().decode(serializedKeystore))
-            }
-        } catch (e: RuntimeException) {
-            return null
+    fun loadSigningConfig(): Config? {
+        val environment = requiredEnvironmentVariables.associateWith(System::getenv)
+        val configuredVariables = environment.filterValues { value -> !value.isNullOrBlank() }
+        if (configuredVariables.isEmpty()) return null
+
+        val missingVariables = environment
+            .filterValues { value -> value.isNullOrBlank() }
+            .keys
+            .sorted()
+        if (missingVariables.isNotEmpty()) {
+            throw GradleException(
+                "Incomplete public-beta signing configuration. Missing: ${missingVariables.joinToString()}.",
+            )
         }
-        val storePassword = System.getenv("KEYSTORE_PASSWORD") ?: return null
-        val keyAlias = System.getenv("KEY_ALIAS") ?: return null
-        val keyPassword = System.getenv("KEY_PASSWORD") ?: return null
+
+        val serializedKeystore = configuredVariables.getValue("KEYSTORE")!!
+        val keystoreBytes = try {
+            Base64.getDecoder().decode(serializedKeystore)
+        } catch (exception: IllegalArgumentException) {
+            throw GradleException("KEYSTORE must contain valid Base64-encoded keystore data.", exception)
+        }
+        if (keystoreBytes.isEmpty()) {
+            throw GradleException("KEYSTORE must not decode to an empty file.")
+        }
+
+        val storeFile = writeTemporaryKeystore(keystoreBytes)
 
         return Config(
             storeFile,
-            storePassword,
-            keyAlias,
-            keyPassword
+            configuredVariables.getValue("KEYSTORE_PASSWORD")!!,
+            configuredVariables.getValue("KEY_ALIAS")!!,
+            configuredVariables.getValue("KEY_PASSWORD")!!,
         )
+    }
+
+    private fun writeTemporaryKeystore(bytes: ByteArray): File = try {
+        Files.createTempFile("piggietv-signing-", ".jks")
+            .toFile()
+            .apply {
+                writeBytes(bytes)
+                deleteOnExit()
+            }
+    } catch (exception: IOException) {
+        throw GradleException("Unable to prepare the temporary public-beta keystore.", exception)
+    } catch (exception: SecurityException) {
+        throw GradleException("Unable to prepare the temporary public-beta keystore.", exception)
     }
 
     data class Config(
@@ -44,6 +79,6 @@ object SigningHelper {
         /**
          * Key password used when signing.
          */
-        val keyPassword: String
+        val keyPassword: String,
     )
 }

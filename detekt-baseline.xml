@@ -1,0 +1,127 @@
+<?xml version="1.0" ?>
+<SmellBaseline>
+  <ManuallySuppressedIssues/>
+  <CurrentIssues>
+    <ID>BackingPropertyNaming:ChapterMarking.kt:ChapterMarking$private val _chapterMarkingDrawingHeight = context.resources.getDimensionPixelSize(R.dimen.exo_chapter_marking_height)</ID>
+    <ID>BackingPropertyNaming:ChapterMarking.kt:ChapterMarking$private val _chapterMarkingDrawingWidth = context.resources.getDimensionPixelSize(R.dimen.exo_chapter_marking_width)</ID>
+    <ID>BackingPropertyNaming:ConnectFragment.kt:ConnectFragment$private var _viewBinding: FragmentComposeBinding? = null</ID>
+    <ID>BackingPropertyNaming:PlayerFragment.kt:PlayerFragment$private var _playerBinding: FragmentPlayerBinding? = null</ID>
+    <ID>BackingPropertyNaming:PlayerFragment.kt:PlayerFragment$private var _playerControlsBinding: ExoPlayerControlViewBinding? = null</ID>
+    <ID>BlankLineBetweenWhenConditions:NativeHomeViewModel.kt:NativeHomeViewModel$when (item.type) { BaseItemKind.SERIES -&gt; seriesPlaybackRequest?.await() ?: Result.success(emptyList()) BaseItemKind.SEASON -&gt; childrenResult.map { children -&gt; children.filter(NativeMediaItem::isPlayable).map(NativeMediaItem::id) } else -&gt; Result.success(emptyList()) }</ID>
+    <ID>ComplexCondition:MusicPlaybackController.kt:MusicPlaybackController$alreadyRequested &amp;&amp; source == "publishPlayerState" &amp;&amp; (!playbackActive || now - lastPlaybackServiceStartRequestAtMs &lt; SERVICE_RESTART_REFRESH_MS)</ID>
+    <ID>ComplexCondition:MusicPlaybackController.kt:MusicPlaybackController$released || isBuffering || playbackState == Player.STATE_ENDED || playbackQueue.isEmpty() || pendingItemId != null</ID>
+    <ID>CyclomaticComplexMethod:MusicRecommendationRanker.kt:MusicRecommendationRanker$fun rank: List&lt;MusicItem&gt;</ID>
+    <ID>CyclomaticComplexMethod:MusicRecommendationRanker.kt:MusicRecommendationRanker$private fun MergedCandidate.rank: RankedCandidate</ID>
+    <ID>CyclomaticComplexMethod:MusicRepository.kt:MusicRepository$suspend fun loadHome: MusicHome</ID>
+    <ID>CyclomaticComplexMethod:MusicViewModel.kt:MusicViewModel$fun search</ID>
+    <ID>CyclomaticComplexMethod:NativeHomeScreen.kt:@Composable fun NativeHomeScreen</ID>
+    <ID>CyclomaticComplexMethod:NativeHomeScreen.kt:@Composable private fun LibraryContent</ID>
+    <ID>CyclomaticComplexMethod:NativeHomeScreen.kt:@Composable private fun MediaDetailsScreen</ID>
+    <ID>CyclomaticComplexMethod:NativeHomeScreen.kt:@Composable private fun NativeSignupScreen</ID>
+    <ID>CyclomaticComplexMethod:NativeHomeViewModel.kt:NativeHomeViewModel$fun searchMovies</ID>
+    <ID>CyclomaticComplexMethod:PlayerViewModel.kt:PlayerViewModel$@Deprecated("Deprecated in Java") @SuppressLint("SwitchIntDef") override fun onPlayerStateChanged</ID>
+    <ID>CyclomaticComplexMethod:RemotePlayerService.kt:RemotePlayerService$@Suppress("ComplexMethod", "LongMethod") private fun notify</ID>
+    <ID>CyclomaticComplexMethod:SettingsFragment.kt:SettingsFragment$private fun androidAutoStatusSummary: String</ID>
+    <ID>FunctionSignature:SeriesPlaybackQueuePolicy.kt:SeriesPlaybackQueuePolicy$fun shuffled: List&lt;UUID&gt;</ID>
+    <ID>ImportOrdering:NativeHomeScreen.kt:import android.net.Uri import android.webkit.WebSettings import android.webkit.WebView import android.webkit.WebViewClient import androidx.compose.animation.AnimatedVisibility import androidx.compose.foundation.BorderStroke import androidx.compose.foundation.Image import androidx.compose.foundation.background import androidx.compose.foundation.clickable import androidx.compose.foundation.layout.Arrangement import androidx.compose.foundation.layout.Box import androidx.compose.foundation.layout.BoxWithConstraints import androidx.compose.foundation.layout.Column import androidx.compose.foundation.layout.PaddingValues import androidx.compose.foundation.layout.Row import androidx.compose.foundation.layout.Spacer import androidx.compose.foundation.layout.aspectRatio import androidx.compose.foundation.layout.fillMaxHeight import androidx.compose.foundation.layout.fillMaxSize import androidx.compose.foundation.layout.fillMaxWidth import androidx.compose.foundation.layout.height import androidx.compose.foundation.layout.heightIn import androidx.compose.foundation.layout.padding import androidx.compose.foundation.layout.size import androidx.compose.foundation.layout.statusBarsPadding import androidx.compose.foundation.layout.width import androidx.compose.foundation.layout.widthIn import androidx.compose.foundation.lazy.LazyColumn import androidx.compose.foundation.lazy.LazyRow import androidx.compose.foundation.lazy.grid.GridCells import androidx.compose.foundation.lazy.grid.GridItemSpan import androidx.compose.foundation.lazy.grid.LazyVerticalGrid import androidx.compose.foundation.lazy.grid.items import androidx.compose.foundation.lazy.grid.rememberLazyGridState import androidx.compose.foundation.lazy.items import androidx.compose.foundation.lazy.rememberLazyListState import androidx.compose.foundation.selection.selectable import androidx.compose.foundation.shape.RoundedCornerShape import androidx.compose.foundation.text.KeyboardActions import androidx.compose.foundation.text.KeyboardOptions import androidx.compose.material.AlertDialog import androidx.compose.material.Button import androidx.compose.material.ButtonDefaults import androidx.compose.material.Card import androidx.compose.material.CircularProgressIndicator import androidx.compose.material.DropdownMenu import androidx.compose.material.DropdownMenuItem import androidx.compose.material.Icon import androidx.compose.material.IconButton import androidx.compose.material.LinearProgressIndicator import androidx.compose.material.MaterialTheme import androidx.compose.material.OutlinedTextField import androidx.compose.material.Surface import androidx.compose.material.Text import androidx.compose.material.TextButton import androidx.compose.material.TextFieldDefaults import androidx.compose.material.icons.Icons import androidx.compose.material.icons.automirrored.outlined.ArrowBack import androidx.compose.material.icons.automirrored.outlined.Logout import androidx.compose.material.icons.outlined.ArrowDropDown import androidx.compose.material.icons.outlined.Casino import androidx.compose.material.icons.outlined.Close import androidx.compose.material.icons.outlined.CloudDownload import androidx.compose.material.icons.outlined.Dashboard import androidx.compose.material.icons.outlined.Flag import androidx.compose.material.icons.outlined.FolderOpen import androidx.compose.material.icons.outlined.PersonAdd import androidx.compose.material.icons.outlined.PlayArrow import androidx.compose.material.icons.outlined.Search import androidx.compose.material.icons.outlined.Settings import androidx.compose.material.icons.outlined.Shuffle import androidx.compose.runtime.Composable import androidx.compose.runtime.DisposableEffect import androidx.compose.runtime.LaunchedEffect import androidx.compose.runtime.SideEffect import androidx.compose.runtime.collectAsState import androidx.compose.runtime.derivedStateOf import androidx.compose.runtime.getValue import androidx.compose.runtime.mutableIntStateOf import androidx.compose.runtime.mutableStateOf import androidx.compose.runtime.produceState import androidx.compose.runtime.remember import androidx.compose.runtime.rememberCoroutineScope import androidx.compose.runtime.saveable.rememberSaveable import androidx.compose.runtime.setValue import androidx.compose.ui.Alignment import androidx.compose.ui.Modifier import androidx.compose.ui.draw.clip import androidx.compose.ui.graphics.Brush import androidx.compose.ui.graphics.Color import androidx.compose.ui.layout.ContentScale import androidx.compose.ui.platform.LocalContext import androidx.compose.ui.res.painterResource import androidx.compose.ui.res.stringResource import androidx.compose.ui.semantics.Role import androidx.compose.ui.text.font.FontWeight import androidx.compose.ui.text.input.ImeAction import androidx.compose.ui.text.input.KeyboardType import androidx.compose.ui.text.input.PasswordVisualTransformation import androidx.compose.ui.text.input.VisualTransformation import androidx.compose.ui.text.style.TextOverflow import androidx.compose.ui.unit.Dp import androidx.compose.ui.unit.dp import androidx.compose.ui.viewinterop.AndroidView import coil3.compose.AsyncImage import kotlinx.coroutines.launch import org.jellyfin.mobile.R import org.jellyfin.mobile.data.entity.ServerEntity import org.jellyfin.mobile.feature.library.LibraryScreen import org.jellyfin.mobile.feature.library.LibraryViewModel import org.jellyfin.mobile.feature.music.MusicScreen import org.jellyfin.mobile.feature.music.MusicViewModel import org.jellyfin.mobile.player.interaction.PlayOptions import org.jellyfin.mobile.reporting.MediaReportReason import org.jellyfin.mobile.signup.NativePasswordResetConfirmRequest import org.jellyfin.mobile.signup.NativeSignupRepository import org.jellyfin.mobile.signup.NativeSignupRequest import org.jellyfin.mobile.ui.utils.PiggieTvBackground import org.jellyfin.mobile.ui.utils.PiggieTvColors import org.jellyfin.mobile.utils.Constants import org.jellyfin.mobile.utils.toast import org.jellyfin.sdk.model.api.BaseItemKind import org.jellyfin.sdk.model.UUID import org.koin.compose.koinInject import kotlin.time.Duration.Companion.ZERO</ID>
+    <ID>Kdoc:WebViewUtils.kt:/** * Taken and adapted from https://github.com/tachiyomiorg/tachiyomi/blob/master/app/src/main/java/eu/kanade/tachiyomi/util/system/WebViewUtil.kt * * Copyright 2015 Javier Tomás * * Licensed under the Apache License, Version 2.0 (the "License"); * you may not use this file except in compliance with the License. * You may obtain a copy of the License at * * http://www.apache.org/licenses/LICENSE-2.0 * * Unless required by applicable law or agreed to in writing, software * distributed under the License is distributed on an "AS IS" BASIS, * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. * See the License for the specific language governing permissions and * limitations under the License. */</ID>
+    <ID>LargeClass:LibraryRepository.kt:LibraryRepository</ID>
+    <ID>LargeClass:MusicViewModel.kt:MusicViewModel : ViewModel</ID>
+    <ID>LargeClass:NativeHomeViewModel.kt:NativeHomeViewModel : AndroidViewModel</ID>
+    <ID>LargeClass:PlayerViewModel.kt:PlayerViewModel : AndroidViewModelKoinComponentListener</ID>
+    <ID>LargeClass:PtvMusicLibrarySessionCallback.kt:PtvMusicLibrarySessionCallback : Callback</ID>
+    <ID>LongMethod:MusicRecommendationRanker.kt:MusicRecommendationRanker$fun rank: List&lt;MusicItem&gt;</ID>
+    <ID>LongMethod:MusicSongActions.kt:MusicSongActionHandler$suspend fun execute: MusicSongActionResult</ID>
+    <ID>LongMethod:MusicViewModel.kt:MusicViewModel$fun search</ID>
+    <ID>LongMethod:NativeHomeScreen.kt:@Composable fun NativeHomeScreen</ID>
+    <ID>LongMethod:NativeHomeScreen.kt:@Composable private fun HeroBanner</ID>
+    <ID>LongMethod:NativeHomeScreen.kt:@Composable private fun HomeContent</ID>
+    <ID>LongMethod:NativeHomeScreen.kt:@Composable private fun HomeRows</ID>
+    <ID>LongMethod:NativeHomeScreen.kt:@Composable private fun HomeTopBar</ID>
+    <ID>LongMethod:NativeHomeScreen.kt:@Composable private fun LibraryContent</ID>
+    <ID>LongMethod:NativeHomeScreen.kt:@Composable private fun LoginScreen</ID>
+    <ID>LongMethod:NativeHomeScreen.kt:@Composable private fun MediaDetailsScreen</ID>
+    <ID>LongMethod:NativeHomeScreen.kt:@Composable private fun MediaReportDialog</ID>
+    <ID>LongMethod:NativeHomeScreen.kt:@Composable private fun MediaSection</ID>
+    <ID>LongMethod:NativeHomeScreen.kt:@Composable private fun NativeSignupScreen</ID>
+    <ID>LongMethod:NativeHomeScreen.kt:@Composable private fun PosterCard</ID>
+    <ID>LongMethod:NativeHomeScreen.kt:PtvAdaptiveLayout.Companion$fun forWidth</ID>
+    <ID>LongMethod:NativeHomeViewModel.kt:NativeHomeViewModel$fun searchMovies</ID>
+    <ID>LongMethod:NativeHomeViewModel.kt:NativeHomeViewModel$private suspend fun fetchPtvRow: List&lt;BaseItemDto&gt;</ID>
+    <ID>LongMethod:PlayerMenus.kt:PlayerMenus$fun onQueueItemChanged</ID>
+    <ID>LongMethod:PlayerViewModel.kt:PlayerViewModel$@Deprecated("Deprecated in Java") @SuppressLint("SwitchIntDef") override fun onPlayerStateChanged</ID>
+    <ID>LongMethod:PtvCoreRuntime.kt:PtvCoreRuntime$private fun createCoordinator: PtvCoreRuntimeCoordinator</ID>
+    <ID>LongMethod:PtvHomeRows.kt:internal fun BaseItemDto.matchesPtvRow: Boolean</ID>
+    <ID>LongMethod:PtvMusicAutoResumeCoordinator.kt:PtvMusicAutoResumeCoordinator$suspend fun restoreQueueIfNeeded: PtvMusicAutoRestoreResult</ID>
+    <ID>LongMethod:PtvMusicLibrarySessionCallback.kt:PtvMusicLibrarySessionCallback$override fun onGetChildren: ListenableFuture&lt;LibraryResult&lt;ImmutableList&lt;MediaItem&gt;&gt;&gt;</ID>
+    <ID>LongMethod:PtvMusicLibrarySessionCallback.kt:PtvMusicLibrarySessionCallback$private suspend fun loadGeneratedQueueForMediaId: AutoGeneratedQueueResult</ID>
+    <ID>LongMethod:PtvMusicService.kt:PtvMusicService$override fun onCreate</ID>
+    <ID>LongMethod:PtvMusicService.kt:PtvMusicService$private fun buildMediaNotification: Notification</ID>
+    <ID>MagicNumber:ConnectScreen.kt:0.86f</ID>
+    <ID>MagicNumber:DownloadsList.kt:0.82f</ID>
+    <ID>MagicNumber:MusicPlaybackController.kt:10_000L</ID>
+    <ID>MagicNumber:MusicPlaybackController.kt:MusicPlaybackController$100</ID>
+    <ID>MagicNumber:MusicPlaybackController.kt:MusicPlaybackController$16</ID>
+    <ID>MagicNumber:MusicRecommendationRanker.kt:MusicRecommendationPolicy$100</ID>
+    <ID>MagicNumber:MusicRecommendationRanker.kt:MusicRecommendationSource.ALBUM_AFFINITY$32</ID>
+    <ID>MagicNumber:MusicRecommendationRanker.kt:MusicRecommendationSource.ARTIST_AFFINITY$28</ID>
+    <ID>MagicNumber:MusicRecommendationRanker.kt:MusicRecommendationSource.DISCOVERY$8</ID>
+    <ID>MagicNumber:MusicRecommendationRanker.kt:MusicRecommendationSource.FAVORITE$24</ID>
+    <ID>MagicNumber:MusicRecommendationRanker.kt:MusicRecommendationSource.GENRE_AFFINITY$16</ID>
+    <ID>MagicNumber:MusicRecommendationRanker.kt:MusicRecommendationSource.LISTENING_HISTORY$20</ID>
+    <ID>MagicNumber:MusicRecommendationRanker.kt:MusicRecommendationSource.RECOMMENDATION$12</ID>
+    <ID>MagicNumber:MusicRepository.kt:MusicRepository$16</ID>
+    <ID>MagicNumber:NativeHomeScreen.kt:0.68f</ID>
+    <ID>MagicNumber:NativeHomeScreen.kt:0.72f</ID>
+    <ID>MagicNumber:NativeHomeScreen.kt:0.82f</ID>
+    <ID>MagicNumber:NativeHomeScreen.kt:0.84f</ID>
+    <ID>MagicNumber:NativeHomeScreen.kt:0.92f</ID>
+    <ID>MagicNumber:NativeHomeScreen.kt:0.9f</ID>
+    <ID>MagicNumber:NativeHomeScreen.kt:0xFF5865F2</ID>
+    <ID>MagicNumber:NativeHomeScreen.kt:1.08f</ID>
+    <ID>MagicNumber:NativeHomeScreen.kt:1.48f</ID>
+    <ID>MagicNumber:PlaybackRecoveryPolicy.kt:PlaybackRecoveryPolicy$1_500L</ID>
+    <ID>MagicNumber:PlaybackRecoveryPolicy.kt:PlaybackRecoveryPolicy$408</ID>
+    <ID>MagicNumber:PlaybackRecoveryPolicy.kt:PlaybackRecoveryPolicy$429</ID>
+    <ID>MagicNumber:PlaybackRecoveryPolicy.kt:PlaybackRecoveryPolicy$500</ID>
+    <ID>MagicNumber:PlaybackRecoveryPolicy.kt:PlaybackRecoveryPolicy$599</ID>
+    <ID>MagicNumber:PlaybackRecoveryPolicy.kt:PlaybackRecoveryPolicy$750L</ID>
+    <ID>MagicNumber:PlayerViewModel.kt:8</ID>
+    <ID>MagicNumber:PlayerViewModel.kt:PlayerViewModel$250</ID>
+    <ID>MagicNumber:PtvMusicLibrarySessionCallback.kt:16</ID>
+    <ID>MagicNumber:PtvMusicLibrarySessionCallback.kt:PtvMusicAutoCommand$3</ID>
+    <ID>MagicNumber:PtvMusicLibrarySessionCallback.kt:PtvMusicAutoCommand$4</ID>
+    <ID>MagicNumber:PtvMusicService.kt:16</ID>
+    <ID>MagicNumber:PtvMusicSessionPlayer.kt:16</ID>
+    <ID>MagicNumber:PtvRecommendationQualityRanker.kt:PtvRecommendationQualityRanker$4</ID>
+    <ID>MatchingDeclarationName:AppTheme.kt:PiggieTvColors</ID>
+    <ID>MaxLineLength:PtvHomeRows.kt:PtvHomeRows$searchTerms = listOf("Star Trek", "The Original Series", "The Next Generation", "Deep Space Nine", "Voyager", "Star Trek Enterprise", "Star Trek Discovery", "Star Trek Picard", "Strange New Worlds", "Lower Decks", "Star Trek Prodigy", "Wrath of Khan", "Search for Spock", "Voyage Home", "Undiscovered Country", "First Contact")</ID>
+    <ID>MaxLineLength:PtvHomeRows.kt:PtvHomeRows$searchTerms = listOf("Star Wars", "A New Hope", "Empire Strikes Back", "Return of the Jedi", "Phantom Menace", "Attack of the Clones", "Revenge of the Sith", "Force Awakens", "Last Jedi", "Rise of Skywalker", "Rogue One", "The Mandalorian", "Andor", "Ahsoka", "Clone Wars", "Bad Batch", "Rebels", "Obi-Wan Kenobi", "Boba Fett")</ID>
+    <ID>MaxLineLength:PtvHomeRows.kt:PtvHomeRows$studioKeywords = listOf("toei animation", "mappa", "bones", "madhouse", "studio pierrot", "trigger", "a 1 pictures", "kyoto animation", "sunrise", "production i g", "ufotable", "shaft", "wit studio", "cloverworks")</ID>
+    <ID>MaxLineLength:PtvHomeRows.kt:PtvHomeRows$studioNames = listOf("Toei Animation", "MAPPA", "Bones", "Madhouse", "Studio Pierrot", "Trigger", "A-1 Pictures", "Kyoto Animation", "Sunrise", "Production I.G", "Ufotable", "Shaft", "Wit Studio", "CloverWorks")</ID>
+    <ID>MaxLineLength:PtvHomeRows.kt:PtvHomeRows$studioNames = listOf("Walt Disney Animation Studios", "Walt Disney Feature Animation", "Walt Disney Television Animation", "Disney Television Animation", "DisneyToon Studios", "Walt Disney Pictures", "Pixar", "Pixar Animation Studios", "Disney Channel", "Disney Junior", "Blue Sky Studios")</ID>
+    <ID>MaxLineLength:PtvHomeRows.kt:listOf("animation", "animated", "cartoon", "walt disney animation", "disney television animation", "pixar", "dreamworks animation", "illumination", "studio ghibli", "cartoon network", "nickelodeon")</ID>
+    <ID>MixedConditionOperators:TrackSelectionHelper.kt:TrackSelectionHelper$!initial &amp;&amp; audioStream === mediaSource.selectedAudioStream</ID>
+    <ID>ReturnCount:MusicRepository.kt:MusicRepository$private fun cachedBrowsePageInternal: MusicPage?</ID>
+    <ID>ReturnCount:PlayerViewModel.kt:PlayerViewModel$private fun recoverTransientNetworkFailure: Boolean</ID>
+    <ID>ReturnCount:PtvMusicLibrarySessionCallback.kt:PtvMusicLibrarySessionCallback$private suspend fun loadGeneratedQueueForMediaId: AutoGeneratedQueueResult</ID>
+    <ID>ReturnCount:PtvMusicLibrarySessionCallback.kt:PtvMusicLibrarySessionCallback$private suspend fun loadMediaItemsWithCache: List&lt;MediaItem&gt;</ID>
+    <ID>ReturnCount:QueueManager.kt:QueueManager$fun tryRestartPlayback: Boolean</ID>
+    <ID>ReturnCount:QueueManager.kt:QueueManager$suspend fun initializePlaybackQueue: PlayerException?</ID>
+    <ID>ReturnCount:QueueManager.kt:QueueManager$suspend fun selectAudioStreamAndRestartPlayback: Boolean</ID>
+    <ID>ReturnCount:QueueManager.kt:QueueManager$suspend fun selectSubtitleStreamAndRestartPlayback: Boolean</ID>
+    <ID>ReturnCount:SecureLibraryCredentials.kt:SecureLibraryCredentials$@Synchronized private fun getLegacySecretKey: SecretKey?</ID>
+    <ID>ThrowsCount:SecureLibraryCredentials.kt:SecureLibraryCredentials$private fun setEncrypted</ID>
+    <ID>TooGenericExceptionCaught:MusicViewModel.kt:MusicViewModel$error: Exception</ID>
+    <ID>TooGenericExceptionCaught:NativeHomeViewModel.kt:NativeHomeViewModel$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:NativeHomeViewModel.kt:NativeHomeViewModel$error: Exception</ID>
+    <ID>TooGenericExceptionCaught:PlayerViewModel.kt:PlayerViewModel$error: Exception</ID>
+    <ID>TooGenericExceptionCaught:PtvCoreRuntimeCoordinator.kt:PtvCoreRuntimeCoordinator$exception: Exception</ID>
+    <ID>TooGenericExceptionCaught:QueueManager.kt:QueueManager$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:SecureLibraryCredentials.kt:SecureLibraryCredentials$exception: Exception</ID>
+    <ID>TooManyFunctions:NativeHomeScreen.kt:org.jellyfin.mobile.ui.screens.home.NativeHomeScreen.kt</ID>
+    <ID>TooManyFunctions:NativeHomeViewModel.kt:NativeHomeViewModel : AndroidViewModel</ID>
+    <ID>TooManyFunctions:QueueManager.kt:QueueManager : KoinComponent</ID>
+    <ID>UnusedParameter:NativeHomeScreen.kt:onPlay: (PlayOptions) -&gt; Unit</ID>
+  </CurrentIssues>
+</SmellBaseline>

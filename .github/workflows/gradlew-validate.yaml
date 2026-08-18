@@ -3,10 +3,13 @@ name: Gradle / Validate wrapper
 on:
   push:
     branches:
-      - master
+      - main
   pull_request:
     paths:
-      - '**/gradlе-wrapper.jar'
+      - 'gradle/wrapper/gradle-wrapper.jar'
+      - 'gradle/wrapper/gradle-wrapper.properties'
+      - 'gradlew'
+      - 'gradlew.bat'
 
 permissions:
   contents: read
