@@ -16,7 +16,8 @@ detekt {
     buildUponDefaultConfig.set(true)
     allRules.set(false)
     config.setFrom("${rootProject.projectDir}/detekt.yml")
-    autoCorrect.set(true)
+    baseline = file("$rootDir/detekt-baseline.xml")
+    autoCorrect.set(false)
 }
 
 kotlin {
@@ -24,6 +25,31 @@ kotlin {
         jvmTarget = JvmTarget.JVM_11
         optIn.add("kotlin.RequiresOptIn")
     }
+}
+
+val publicBetaSigningConfiguration = SigningHelper.loadSigningConfig()
+val requestedTaskNames = gradle.startParameter.taskNames.map { taskName -> taskName.substringAfterLast(':') }
+val releasePackagingRequested = requestedTaskNames.any { taskName ->
+    taskName == "verifyPublicBetaRelease" ||
+        taskName in setOf(
+            "assemble",
+            "assembleLibre",
+            "assembleProprietary",
+            "bundle",
+            "bundleLibre",
+            "bundleProprietary",
+            "build",
+        ) ||
+        (
+            taskName.contains("Release") &&
+                (taskName.startsWith("assemble") || taskName.startsWith("bundle"))
+            ) ||
+        taskName.matches(Regex("^package.+Release(?:Bundle|UniversalApk)?$"))
+}
+if (releasePackagingRequested && publicBetaSigningConfiguration == null) {
+    throw GradleException(
+        "Public-beta signing is unavailable. Set KEYSTORE, KEYSTORE_PASSWORD, KEY_ALIAS, and KEY_PASSWORD.",
+    )
 }
 
 android {
@@ -40,7 +66,7 @@ android {
         vectorDrawables.useSupportLibrary = true
     }
 
-    val releaseSigningConfig = SigningHelper.loadSigningConfig(project)?.let { config ->
+    val releaseSigningConfig = publicBetaSigningConfiguration?.let { config ->
         signingConfigs.create("release") {
             storeFile = config.storeFile
             storePassword = config.storePassword
@@ -98,7 +124,7 @@ android {
     }
     lint {
         lintConfig = file("$rootDir/android-lint.xml")
-        abortOnError = false
+        abortOnError = true
         sarifReport = true
     }
     room {
@@ -175,6 +201,43 @@ dependencies {
 }
 
 tasks {
+    val requirePublicBetaSigning = register("requirePublicBetaSigning") {
+        group = "verification"
+        description = "Fails unless complete public-beta signing material is available."
+
+        doLast {
+            if (publicBetaSigningConfiguration == null) {
+                throw GradleException(
+                    "Public-beta signing is unavailable. Set KEYSTORE, KEYSTORE_PASSWORD, " +
+                        "KEY_ALIAS, and KEY_PASSWORD.",
+                )
+            }
+        }
+    }
+
+    matching { task ->
+        val releaseAssemblyTask = task.name.contains("Release") &&
+            (task.name.startsWith("assemble") || task.name.startsWith("bundle"))
+        val releasePackageTask = task.name.matches(Regex("^package.+Release(?:Bundle|UniversalApk)?$"))
+        releaseAssemblyTask || releasePackageTask
+    }.configureEach {
+        dependsOn(requirePublicBetaSigning)
+    }
+
+    val publicBetaTaskNames = setOf(
+        "test",
+        "detekt",
+        "lintLibreRelease",
+        "lintProprietaryRelease",
+        "assembleLibreRelease",
+        "assembleProprietaryRelease",
+        "bundleProprietaryRelease",
+        "versionTxt",
+    )
+    matching { task -> task.name in publicBetaTaskNames }.configureEach {
+        mustRunAfter(requirePublicBetaSigning)
+    }
+
     withType<Detekt> {
         jvmTarget.set(JavaVersion.VERSION_11.toString())
 
@@ -201,6 +264,15 @@ tasks {
             println("Writing [$versionString] to $path")
             path.writeText("$versionString\n")
         }
+    }
+
+    register("verifyPublicBetaRelease") {
+        group = "verification"
+        description = "Runs release gates and builds signed public-beta APK/AAB candidates."
+        dependsOn(
+            requirePublicBetaSigning,
+            publicBetaTaskNames,
+        )
     }
 
     register("installDebug") {

@@ -72,7 +72,9 @@ class MusicPlaybackController(
     private val audioApi = apiClient.audioApi
     private val playStateApi = apiClient.playStateApi
     private val universalAudioApi = apiClient.universalAudioApi
-    private val audioManager = appContext.getSystemService(AudioManager::class.java)
+    private val audioManager = checkNotNull(
+        ContextCompat.getSystemService(appContext, AudioManager::class.java),
+    )
     private val player = ExoPlayer.Builder(appContext)
         .setWakeMode(C.WAKE_MODE_NETWORK)
         .setLoadControl(

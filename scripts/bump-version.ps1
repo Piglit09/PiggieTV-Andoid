@@ -1,7 +1,11 @@
 [CmdletBinding()]
 param(
-    [string] $PropertiesPath = (Join-Path $PSScriptRoot "..\gradle.properties")
+    [string] $PropertiesPath
 )
+
+if ([string]::IsNullOrWhiteSpace($PropertiesPath)) {
+    $PropertiesPath = Join-Path $PSScriptRoot "..\gradle.properties"
+}
 
 $propertyName = "piggietv.version"
 $path = [System.IO.Path]::GetFullPath($PropertiesPath)
@@ -49,5 +53,5 @@ if ($versionLineIndex -eq -1) {
     $lines[$versionLineIndex] = "$propertyName=$nextVersion"
 }
 
-Set-Content -LiteralPath $path -Value $lines -Encoding utf8
+[System.IO.File]::WriteAllLines($path, $lines, [System.Text.UTF8Encoding]::new($false))
 Write-Output $nextVersion
