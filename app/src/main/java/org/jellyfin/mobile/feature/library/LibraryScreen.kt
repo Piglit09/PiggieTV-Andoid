@@ -77,12 +77,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
+import coil3.network.NetworkHeaders
+import coil3.network.httpHeaders
+import coil3.request.ImageRequest
 import org.jellyfin.mobile.R
+import org.jellyfin.mobile.auth.transport.INTERNAL_LIBRARY_AUTH_HEADER
+import org.jellyfin.mobile.auth.transport.INTERNAL_LIBRARY_AUTH_VALUE
 import org.jellyfin.mobile.ui.utils.PiggieTvColors
 
 @Composable
@@ -90,7 +96,7 @@ fun LibraryScreen(
     viewModel: LibraryViewModel,
     title: String = "Library",
     onDownload: (Uri, String, String) -> Unit,
-    onRead: (Uri, String, String, String?, String?, String?) -> Unit,
+    onRead: (Uri, String, String, String?, String, String?, LibraryBookSource) -> Unit,
     onBackHandlerChanged: ((() -> Boolean)?) -> Unit,
     onScrollHeaderCollapsedChange: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier,
@@ -316,7 +322,7 @@ private fun BookRow(title: String, books: List<LibraryBook>, posterWidth: Dp, on
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text(text = title, color = PiggieTvColors.TextPrimary, style = MaterialTheme.typography.h6, fontWeight = FontWeight.Bold)
         LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            items(books, key = LibraryBook::id) { book ->
+            items(books, key = LibraryBook::readerKey) { book ->
                 BookCard(book = book, posterWidth = posterWidth, onClick = { onBookClick(book) })
             }
         }
@@ -338,7 +344,7 @@ private fun BookCard(book: LibraryBook, posterWidth: Dp, onClick: () -> Unit) {
         ) {
             Box {
                 AsyncImage(
-                    model = book.coverUrl,
+                    model = book.coverImageModel(),
                     contentDescription = null,
                     modifier = Modifier.fillMaxSize(),
                     contentScale = ContentScale.Crop,
@@ -386,7 +392,7 @@ private fun BookGrid(
         verticalArrangement = Arrangement.spacedBy(layout.gridSpacing),
         horizontalArrangement = Arrangement.spacedBy(layout.gridSpacing),
     ) {
-        items(books, key = LibraryBook::id) { book ->
+        items(books, key = LibraryBook::readerKey) { book ->
             BookCard(book = book, posterWidth = layout.gridPosterWidth, onClick = { onBookClick(book) })
         }
     }
@@ -399,7 +405,7 @@ private fun BookDetail(
     isLoading: Boolean,
     onBack: () -> Unit,
     onDownload: (Uri, String, String) -> Unit,
-    onRead: (Uri, String, String, String?, String?, String?) -> Unit,
+    onRead: (Uri, String, String, String?, String, String?, LibraryBookSource) -> Unit,
     onStartOver: (LibraryBook) -> Unit,
     onToggleFavorite: (LibraryBook) -> Unit,
 ) {
@@ -417,7 +423,7 @@ private fun BookDetail(
                     .heightIn(min = layout.detailHeroHeight),
             ) {
                 AsyncImage(
-                    model = book.coverUrl,
+                    model = book.coverImageModel(),
                     contentDescription = null,
                     modifier = Modifier.fillMaxSize(),
                     contentScale = ContentScale.Crop,
@@ -533,6 +539,19 @@ private fun BookMetadata(book: LibraryBook) {
 }
 
 @Composable
+private fun LibraryBook.coverImageModel(): Any? {
+    val url = coverUrl ?: return null
+    if (source != LibraryBookSource.OPDS) return url
+    val headers = NetworkHeaders.Builder()
+        .set(INTERNAL_LIBRARY_AUTH_HEADER, INTERNAL_LIBRARY_AUTH_VALUE)
+        .build()
+    return ImageRequest.Builder(LocalContext.current)
+        .data(url)
+        .httpHeaders(headers)
+        .build()
+}
+
+@Composable
 private fun BookCover(book: LibraryBook, width: Dp) {
     Card(
         modifier = Modifier.width(width).aspectRatio(0.66f),
@@ -542,7 +561,7 @@ private fun BookCover(book: LibraryBook, width: Dp) {
         elevation = 0.dp,
     ) {
         AsyncImage(
-            model = book.coverUrl,
+            model = book.coverImageModel(),
             contentDescription = null,
             modifier = Modifier.fillMaxSize(),
             contentScale = ContentScale.Crop,
@@ -556,7 +575,7 @@ private fun BookCover(book: LibraryBook, width: Dp) {
 private fun BookActions(
     book: LibraryBook,
     onDownload: (Uri, String, String) -> Unit,
-    onRead: (Uri, String, String, String?, String?, String?) -> Unit,
+    onRead: (Uri, String, String, String?, String, String?, LibraryBookSource) -> Unit,
     onStartOver: (LibraryBook) -> Unit,
     onToggleFavorite: (LibraryBook) -> Unit,
 ) {
@@ -589,6 +608,7 @@ private fun BookActions(
                                 link.type,
                                 book.readerKey,
                                 book.jellyfinItemId,
+                                book.source,
                             )
                         }
                     },
@@ -637,6 +657,7 @@ private fun BookActions(
                         link.type,
                         book.readerKey,
                         book.jellyfinItemId,
+                        book.source,
                     )
                 },
                 colors = ButtonDefaults.buttonColors(backgroundColor = PiggieTvColors.Accent, contentColor = PiggieTvColors.Night),

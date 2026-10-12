@@ -9,6 +9,7 @@
     "ImportOrdering",
     "MaximumLineLength",
     "ParameterListWrapping",
+    "ThrowsCount",
     "Wrapping",
 )
 
@@ -18,8 +19,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.Credentials
 import okhttp3.FormBody
+import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import org.jellyfin.mobile.auth.transport.AuthTransportRealm
+import org.jellyfin.mobile.auth.transport.authTransportRealm
+import org.jellyfin.mobile.auth.transport.stripAuthenticationQueryParameters
 import org.w3c.dom.Element
 import org.w3c.dom.Node
 import java.io.ByteArrayInputStream
@@ -35,13 +42,16 @@ class OpdsClient(private val okHttpClient: OkHttpClient) {
             .connectTimeout(OPDS_CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .readTimeout(OPDS_READ_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .callTimeout(OPDS_CALL_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .followRedirects(false)
+            .followSslRedirects(false)
             .build()
     }
 
     suspend fun fetchFeed(baseUrl: String, pathOrUrl: String, authConfig: OpdsAuthConfig): OpdsFeed = withContext(Dispatchers.IO) {
-        val url = resolveUrl(baseUrl, pathOrUrl)
+        val url = resolveAuthenticatedOpdsUrl(baseUrl, pathOrUrl)
         val requestBuilder = Request.Builder()
             .url(url)
+            .authTransportRealm(AuthTransportRealm.LIBRARY)
             .header("Accept", "application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.8")
 
         authConfig.bearerToken?.takeIf(String::isNotBlank)?.let { token ->
@@ -53,7 +63,7 @@ class OpdsClient(private val okHttpClient: OkHttpClient) {
 
         try {
             val request = requestBuilder.build()
-            feedClient.newCall(request).execute().use { response ->
+            executeTrustedGet(request, baseUrl).use { response ->
                 if (response.code == HTTP_UNAUTHORIZED) {
                     val loggedIn = authConfig.username
                         ?.takeIf(String::isNotBlank)
@@ -61,7 +71,7 @@ class OpdsClient(private val okHttpClient: OkHttpClient) {
                         ?: false
 
                     if (loggedIn) {
-                        feedClient.newCall(request).execute().use { retryResponse ->
+                        executeTrustedGet(request, baseUrl).use { retryResponse ->
                             if (retryResponse.code == HTTP_UNAUTHORIZED) {
                                 throw LibraryLoginRequiredException()
                             }
@@ -83,15 +93,22 @@ class OpdsClient(private val okHttpClient: OkHttpClient) {
                 val body = response.body?.bytes() ?: throw IOException("Library server returned an empty OPDS feed")
                 parseFeed(baseUrl, url, body)
             }
-        } catch (error: SocketTimeoutException) {
-            throw IOException("Library server timed out while loading OPDS.", error)
+        } catch (_: SocketTimeoutException) {
+            throw IOException("Library server timed out while loading OPDS.")
         }
     }
 
     private fun authenticateSession(baseUrl: String, username: String, password: String): Boolean {
-        val loginUrl = resolveUrl(baseUrl, "/login")
+        val loginUrl = resolveAuthenticatedOpdsUrl(baseUrl, "/login")
         val loginPage = runCatching {
-            feedClient.newCall(Request.Builder().url(loginUrl).get().build()).execute().use { response ->
+            executeTrustedGet(
+                request = Request.Builder()
+                    .url(loginUrl)
+                    .authTransportRealm(AuthTransportRealm.LIBRARY)
+                    .get()
+                    .build(),
+                trustedBaseUrl = baseUrl,
+            ).use { response ->
                 response.body?.string().orEmpty()
             }
         }.getOrDefault("")
@@ -109,6 +126,7 @@ class OpdsClient(private val okHttpClient: OkHttpClient) {
             feedClient.newCall(
                 Request.Builder()
                     .url(loginUrl)
+                    .authTransportRealm(AuthTransportRealm.LIBRARY)
                     .post(formBuilder.build())
                     .build(),
             ).execute().use { response ->
@@ -130,8 +148,9 @@ class OpdsClient(private val okHttpClient: OkHttpClient) {
             val links = entry.childElements("link").mapNotNull { link ->
                 val href = link.attr("href").takeIf(String::isNotBlank) ?: return@mapNotNull null
                 if (href.isUriTemplate()) return@mapNotNull null
+                val resolvedHref = resolveUrl(feedUrl, href) ?: return@mapNotNull null
                 OpdsLink(
-                    href = resolveUrl(feedUrl, href),
+                    href = resolvedHref,
                     rel = link.attr("rel").ifBlank { null },
                     type = link.attr("type").ifBlank { null },
                     title = link.attr("title").ifBlank { null },
@@ -157,8 +176,9 @@ class OpdsClient(private val okHttpClient: OkHttpClient) {
             links = root.childElements("link").mapNotNull { link ->
                 val href = link.attr("href").takeIf(String::isNotBlank) ?: return@mapNotNull null
                 if (href.isUriTemplate()) return@mapNotNull null
+                val resolvedHref = resolveUrl(feedUrl, href) ?: return@mapNotNull null
                 OpdsLink(
-                    href = resolveUrl(feedUrl, href),
+                    href = resolvedHref,
                     rel = link.attr("rel").ifBlank { null },
                     type = link.attr("type").ifBlank { null },
                     title = link.attr("title").ifBlank { null },
@@ -168,8 +188,35 @@ class OpdsClient(private val okHttpClient: OkHttpClient) {
         )
     }
 
-    private fun resolveUrl(baseUrl: String, pathOrUrl: String): String =
-        URI(baseUrl.trimEnd('/') + "/").resolve(pathOrUrl).toString()
+    private fun resolveUrl(baseUrl: String, pathOrUrl: String): String? =
+        resolveOpdsLinkUrl(baseUrl, pathOrUrl)
+
+    private fun executeTrustedGet(request: Request, trustedBaseUrl: String): Response {
+        val trustedOrigin = trustedBaseUrl.toHttpUrlOrNull()
+            ?: throw IOException("Library server URL is invalid")
+        var currentRequest = request
+
+        repeat(MAX_OPDS_REDIRECTS + 1) { redirectCount ->
+            val response = feedClient.newCall(currentRequest).execute()
+            if (!response.isRedirect) return response
+
+            val redirectedUrl = response.header("Location")
+                ?.let(response.request.url::resolve)
+                ?: return response
+            if (!trustedOrigin.hasSameOrigin(redirectedUrl)) {
+                response.close()
+                throw IOException("Library server redirected outside its authenticated origin")
+            }
+            if (redirectCount == MAX_OPDS_REDIRECTS) {
+                response.close()
+                throw IOException("Library server returned too many redirects")
+            }
+
+            response.close()
+            currentRequest = currentRequest.newBuilder().url(redirectedUrl).get().build()
+        }
+        error("Unreachable")
+    }
 
     private fun String.isUriTemplate(): Boolean = '{' in this || '}' in this
 
@@ -195,14 +242,49 @@ private const val HTTP_UNAUTHORIZED = 401
 private const val OPDS_CONNECT_TIMEOUT_SECONDS = 30L
 private const val OPDS_READ_TIMEOUT_SECONDS = 90L
 private const val OPDS_CALL_TIMEOUT_SECONDS = 120L
+private const val MAX_OPDS_REDIRECTS = 5
 private val CSRF_TOKEN_REGEX = Regex("""name=["']csrf_token["'][^>]*value=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+
+internal fun resolveAuthenticatedOpdsUrl(baseUrl: String, pathOrUrl: String): String {
+    val base = baseUrl.trimEnd('/').plus('/').toHttpUrlOrNull()
+        ?.withoutAuthenticationMaterial()
+        ?: throw IOException("Library server URL is invalid")
+    val resolved = base.resolve(pathOrUrl)
+        ?.withoutAuthenticationMaterial()
+        ?: throw IOException("Library feed URL is invalid")
+    if (!base.hasSameOrigin(resolved)) {
+        throw IOException("Library feed URL is outside its authenticated origin")
+    }
+    return resolved.toString()
+}
+
+internal fun sanitizeOpdsLinkUrl(value: String): String? = value.toHttpUrlOrNull()
+    ?.withoutAuthenticationMaterial()
+    ?.toString()
+
+internal fun resolveOpdsLinkUrl(baseUrl: String, pathOrUrl: String): String? = runCatching {
+    URI(baseUrl.trimEnd('/') + "/").resolve(pathOrUrl).toString()
+}.getOrNull()?.let(::sanitizeOpdsLinkUrl)
+
+private fun HttpUrl.withoutAuthenticationMaterial(): HttpUrl = stripAuthenticationQueryParameters()
+    .newBuilder()
+    .username("")
+    .password("")
+    .fragment(null)
+    .build()
+
+private fun HttpUrl.hasSameOrigin(other: HttpUrl): Boolean =
+    scheme == other.scheme && host == other.host && port == other.port
 
 data class OpdsFeed(
     val url: String,
     val title: String,
     val entries: List<OpdsEntry>,
     val links: List<OpdsLink>,
-)
+) {
+    override fun toString(): String =
+        "OpdsFeed(content=[REDACTED], entries=${entries.size}, links=${links.size})"
+}
 
 data class OpdsEntry(
     val id: String,
@@ -213,7 +295,10 @@ data class OpdsEntry(
     val categories: List<String>,
     val updated: String?,
     val links: List<OpdsLink>,
-)
+) {
+    override fun toString(): String =
+        "OpdsEntry(content=[REDACTED], links=${links.size})"
+}
 
 data class OpdsLink(
     val href: String,
@@ -221,4 +306,6 @@ data class OpdsLink(
     val type: String?,
     val title: String?,
     val lengthBytes: Long?,
-)
+) {
+    override fun toString(): String = "OpdsLink(content=[REDACTED], lengthBytes=$lengthBytes)"
+}

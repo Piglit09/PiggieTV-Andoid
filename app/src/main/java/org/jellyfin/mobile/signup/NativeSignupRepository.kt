@@ -6,6 +6,8 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.jellyfin.mobile.auth.transport.AuthTransportRealm
+import org.jellyfin.mobile.auth.transport.authTransportRealm
 import org.jellyfin.mobile.utils.Constants
 import org.json.JSONObject
 import java.io.IOException
@@ -21,7 +23,12 @@ class NativeSignupRepository(private val okHttpClient: OkHttpClient) {
             .put("confirmPassword", signupRequest.confirmPassword)
             .put("verificationBaseUrl", signupVerificationBaseUrl(serverUrl))
 
-        postSignupRequest(signupCreateUserUrl(serverUrl), payload, DEFAULT_SUCCESS_MESSAGE)
+        postSignupRequest(
+            url = signupCreateUserUrl(serverUrl),
+            payload = payload,
+            successMessage = DEFAULT_SUCCESS_MESSAGE,
+            failureMessage = DEFAULT_SIGNUP_FAILURE_MESSAGE,
+        )
     }
 
     suspend fun requestPasswordReset(serverUrl: String, email: String): NativeSignupResult = withContext(
@@ -30,7 +37,8 @@ class NativeSignupRepository(private val okHttpClient: OkHttpClient) {
         postSignupRequest(
             url = signupPasswordResetRequestUrl(serverUrl),
             payload = JSONObject().put("email", email.trim()),
-            defaultMessage = DEFAULT_RESET_REQUEST_MESSAGE,
+            successMessage = DEFAULT_RESET_REQUEST_MESSAGE,
+            failureMessage = DEFAULT_RESET_REQUEST_FAILURE_MESSAGE,
         )
     }
 
@@ -47,51 +55,62 @@ class NativeSignupRepository(private val okHttpClient: OkHttpClient) {
         postSignupRequest(
             url = signupPasswordResetConfirmUrl(serverUrl),
             payload = payload,
-            defaultMessage = DEFAULT_RESET_CONFIRM_MESSAGE,
+            successMessage = DEFAULT_RESET_CONFIRM_MESSAGE,
+            failureMessage = DEFAULT_RESET_CONFIRM_FAILURE_MESSAGE,
         )
     }
 
-    private fun postSignupRequest(url: String, payload: JSONObject, defaultMessage: String): NativeSignupResult {
+    private fun postSignupRequest(
+        url: String,
+        payload: JSONObject,
+        successMessage: String,
+        failureMessage: String,
+    ): NativeSignupResult {
         val request = Request.Builder()
             .url(url)
+            .authTransportRealm(AuthTransportRealm.EXCLUDED)
             .post(payload.toString().toRequestBody(JSON_MEDIA_TYPE))
             .build()
 
         return okHttpClient.newCall(request).execute().use { response ->
             val responseText = response.body?.string().orEmpty()
-            val json = responseText
-                .takeIf(String::isNotBlank)
-                ?.let { runCatching { JSONObject(it) }.getOrNull() }
-            val message = json?.optionalString("message")
-
-            if (!response.isSuccessful) {
-                throw NativeSignupException(message ?: "PiggieTV signup failed with HTTP ${response.code}.")
-            }
-
-            val result = NativeSignupResult(
-                ok = json?.optBoolean("ok", true) ?: true,
-                message = message ?: defaultMessage,
-                userId = json?.optionalString("userId"),
-                username = json?.optionalString("username"),
+            classifyNativeSignupResponse(
+                statusCode = response.code,
+                responseBody = responseText,
+                successMessage = successMessage,
+                failureMessage = failureMessage,
             )
-
-            if (!result.ok) {
-                throw NativeSignupException(result.message)
-            }
-
-            result
         }
     }
-
-    private fun JSONObject.optionalString(name: String): String? = optString(name)
-        .takeIf { value -> value.isNotBlank() && value != "null" }
 
     private companion object {
         val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
         const val DEFAULT_SUCCESS_MESSAGE = "Check your email for the PiggieTV verification link."
         const val DEFAULT_RESET_REQUEST_MESSAGE = "Check your email for the PiggieTV password reset code."
         const val DEFAULT_RESET_CONFIRM_MESSAGE = "Your PiggieTV password has been reset."
+        const val DEFAULT_SIGNUP_FAILURE_MESSAGE = "PiggieTV signup failed. Please check your details and try again."
+        const val DEFAULT_RESET_REQUEST_FAILURE_MESSAGE =
+            "PiggieTV could not request a password reset. Please try again."
+        const val DEFAULT_RESET_CONFIRM_FAILURE_MESSAGE =
+            "PiggieTV could not reset your password. Please try again."
     }
+}
+
+/** Maps an untrusted response body to fixed operation-owned messages only. */
+internal fun classifyNativeSignupResponse(
+    statusCode: Int,
+    responseBody: String,
+    successMessage: String,
+    failureMessage: String,
+): NativeSignupResult {
+    val serverAccepted = responseBody
+        .takeIf(String::isNotBlank)
+        ?.let { body -> runCatching { JSONObject(body).optBoolean("ok", true) }.getOrDefault(true) }
+        ?: true
+    if (statusCode !in HTTP_SUCCESS_MIN..HTTP_SUCCESS_MAX || !serverAccepted) {
+        throw NativeSignupException(failureMessage)
+    }
+    return NativeSignupResult(ok = true, message = successMessage)
 }
 
 data class NativeSignupRequest(
@@ -99,18 +118,27 @@ data class NativeSignupRequest(
     val username: String,
     val password: String,
     val confirmPassword: String,
-)
+) {
+    override fun toString(): String =
+        "NativeSignupRequest(email=[REDACTED], username=[REDACTED], password=[REDACTED], confirmPassword=[REDACTED])"
+}
 
 data class NativePasswordResetConfirmRequest(
     val email: String,
     val code: String,
     val password: String,
     val confirmPassword: String,
-)
+) {
+    override fun toString(): String = "NativePasswordResetConfirmRequest(email=[REDACTED], code=[REDACTED], " +
+        "password=[REDACTED], confirmPassword=[REDACTED])"
+}
 
-data class NativeSignupResult(val ok: Boolean, val message: String, val userId: String?, val username: String?)
+data class NativeSignupResult(val ok: Boolean, val message: String)
 
 class NativeSignupException(message: String) : IOException(message)
+
+private const val HTTP_SUCCESS_MIN = 200
+private const val HTTP_SUCCESS_MAX = 299
 
 internal fun signupCreateUserUrl(serverUrl: String): String {
     val baseUrl = serverUrl.trim().trimEnd('/')

@@ -14,4 +14,11 @@ val databaseModule = module {
     single { get<JellyfinDatabase>().serverDao }
     single { get<JellyfinDatabase>().userDao }
     single { get<JellyfinDatabase>().downloadDao }
+    single<LegacyTokenResidueRemediation> {
+        LegacyTokenResidueRemediator(
+            context = androidApplication(),
+            database = get(),
+            userDao = get(),
+        )
+    }
 }

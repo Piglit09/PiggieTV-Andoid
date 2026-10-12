@@ -23,6 +23,13 @@ data class PlayOptions(
     val forceQueueAdvance: Boolean = false,
 ) : Parcelable {
     companion object {
+        fun fromJson(candidate: String): PlayOptions? = try {
+            fromJson(JSONObject(candidate))
+        } catch (_: JSONException) {
+            Timber.e("Playback options were malformed")
+            null
+        }
+
         fun fromJson(json: JSONObject): PlayOptions? = try {
             PlayOptions(
                 ids = json.optJSONArray("ids")?.let { array ->
@@ -40,8 +47,8 @@ data class PlayOptions(
                 playFromDownloads = false,
                 forceQueueAdvance = false,
             )
-        } catch (e: JSONException) {
-            Timber.e(e, "Failed to parse playback options: %s", json)
+        } catch (_: JSONException) {
+            Timber.e("Playback options were malformed")
             null
         }
     }

@@ -28,12 +28,16 @@ data class UserEntity(
     @ColumnInfo(name = USER_ID)
     val userId: UUID,
     @ColumnInfo(name = ACCESS_TOKEN)
-    val accessToken: String?,
+    val legacyAccessToken: String?,
     @ColumnInfo(name = LAST_LOGIN_TIMESTAMP)
     val lastLoginTimestamp: Long,
 ) {
-    constructor(serverId: Long, userId: UUID, accessToken: String?) :
-        this(0, serverId, userId, accessToken, System.currentTimeMillis())
+    constructor(serverId: Long, userId: UUID) :
+        this(0, serverId, userId, null, System.currentTimeMillis())
+
+    override fun toString(): String =
+        "UserEntity(id=$id, serverId=[REDACTED], userId=[REDACTED], legacyAccessToken=[REDACTED], " +
+            "lastLoginTimestamp=$lastLoginTimestamp)"
 
     companion object Key {
         const val TABLE_NAME = "user"

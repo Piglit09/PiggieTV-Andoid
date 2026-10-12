@@ -1,24 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <full-backup-content>
-    <include
-        domain="root"
-        path="app_webview" />
-    <exclude
-        domain="root"
-        path="app_webview/blob_storage" />
-    <exclude
-        domain="root"
-        path="app_webview/GPUCache" />
-    <exclude
-        domain="root"
-        path="app_webview/VideoDecodeStats" />
-    <include
-        domain="database"
-        path="." />
-    <include
-        domain="sharedpref"
-        path="org.jellyfin.mobile_preferences" />
-    <include
-        domain="sharedpref"
-        path="org.jellyfin.mobile.debug_preferences" />
+    <!-- Android 11 and lower: an include makes this an exact allowlist. Every unlisted
+         preference file, database (including sidecars), root file, and WebView file is omitted. -->
+    <include domain="sharedpref" path="com.piggietv.android_preferences.xml" />
+    <include domain="sharedpref" path="com.piggietv.android.debug_preferences.xml" />
+    <include domain="sharedpref" path="org.jellyfin.mobile_preferences.xml" />
+    <include domain="sharedpref" path="org.jellyfin.mobile.debug_preferences.xml" />
 </full-backup-content>

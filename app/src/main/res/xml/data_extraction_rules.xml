@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<data-extraction-rules>
+    <cloud-backup>
+        <!-- Exact allowlist: all unlisted preferences, databases, root files, and WebView data are omitted. -->
+        <include domain="sharedpref" path="com.piggietv.android_preferences.xml" />
+        <include domain="sharedpref" path="com.piggietv.android.debug_preferences.xml" />
+        <include domain="sharedpref" path="org.jellyfin.mobile_preferences.xml" />
+        <include domain="sharedpref" path="org.jellyfin.mobile.debug_preferences.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <!-- Device transfer uses the same exact allowlist as cloud backup. -->
+        <include domain="sharedpref" path="com.piggietv.android_preferences.xml" />
+        <include domain="sharedpref" path="com.piggietv.android.debug_preferences.xml" />
+        <include domain="sharedpref" path="org.jellyfin.mobile_preferences.xml" />
+        <include domain="sharedpref" path="org.jellyfin.mobile.debug_preferences.xml" />
+    </device-transfer>
+</data-extraction-rules>

@@ -2,33 +2,15 @@ package org.jellyfin.mobile.webapp
 
 import android.content.Intent
 import android.net.Uri
-import android.util.Log
 import android.webkit.ConsoleMessage
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebView
-import timber.log.Timber
 
 class JellyfinWebChromeClient(private val fileChooserListener: FileChooserListener) : WebChromeClient() {
-    override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean {
-        val logLevel = when (consoleMessage.messageLevel()) {
-            ConsoleMessage.MessageLevel.ERROR -> Log.ERROR
-            ConsoleMessage.MessageLevel.WARNING -> Log.WARN
-            ConsoleMessage.MessageLevel.DEBUG -> Log.DEBUG
-            ConsoleMessage.MessageLevel.TIP -> Log.VERBOSE
-            else -> Log.INFO
-        }
-
-        Timber.tag("WebView").log(
-            logLevel,
-            "%s, %s (%d)",
-            consoleMessage.message(),
-            consoleMessage.sourceId(),
-            consoleMessage.lineNumber(),
-        )
-
-        return true
-    }
+    /** Consume console output because message text and source URLs are not secret-safe diagnostics. */
+    @Suppress("UNUSED_PARAMETER")
+    override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean = true
 
     override fun onShowFileChooser(
         webView: WebView,

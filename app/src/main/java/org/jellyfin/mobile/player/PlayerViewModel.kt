@@ -28,6 +28,7 @@ import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.exoplayer.util.EventLogger
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -519,6 +520,8 @@ class PlayerViewModel(application: Application) :
             try {
                 val result = mediaReportSender.send(target, reason, details)
                 _mediaReportMessages.emit(result.messageResource())
+            } catch (error: CancellationException) {
+                throw error
             } catch (error: Exception) {
                 Timber.w(error, "Failed to send PiggieTV playback report")
             }

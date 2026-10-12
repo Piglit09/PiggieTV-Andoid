@@ -20,9 +20,12 @@ import coil3.request.CachePolicy
 import coil3.request.ImageRequest
 import coil3.request.SuccessResult
 import org.jellyfin.mobile.BuildConfig
+import org.jellyfin.mobile.auth.AuthSessionCoordinator
+import org.jellyfin.mobile.auth.MobileAuthState
+import org.jellyfin.mobile.auth.transport.AuthTransportSession
+import org.jellyfin.mobile.auth.transport.INTERNAL_AUTH_EPOCH_HEADER
 import org.jellyfin.sdk.api.client.ApiClient
 import org.jellyfin.sdk.api.client.extensions.imageApi
-import org.jellyfin.sdk.api.client.util.AuthorizationHeaderBuilder
 import org.jellyfin.sdk.api.operations.ImageApi
 import org.jellyfin.sdk.model.api.ImageType
 import org.jellyfin.sdk.model.serializer.toUUIDOrNull
@@ -57,6 +60,8 @@ class ImageProvider :
     private val apiClient: ApiClient by inject()
     private val imageApi: ImageApi by lazy { apiClient.imageApi }
     private val imageLoader: ImageLoader by inject()
+    private val authTransportSession: AuthTransportSession by inject()
+    private val authCoordinator: AuthSessionCoordinator by inject()
 
     override fun onCreate(): Boolean = true
 
@@ -114,19 +119,21 @@ class ImageProvider :
             else -> throw FileNotFoundException("Invalid content type $type")
         }
 
-        val authorizationHeader = AuthorizationHeaderBuilder.buildHeader(
-            clientName = apiClient.clientInfo.name,
-            clientVersion = apiClient.clientInfo.version,
-            deviceId = apiClient.deviceInfo.id,
-            deviceName = apiClient.deviceInfo.name,
-            accessToken = apiClient.accessToken,
-        )
+        val authenticatedState = authCoordinator.state.value as? MobileAuthState.Authenticated
+            ?: throw FileNotFoundException("An authenticated image session is unavailable")
+        val credentialEpoch = authTransportSession.currentSnapshot()
+            ?.epoch
+            ?.takeIf { epoch -> epoch == authenticatedState.credentialEpoch }
+            ?: throw FileNotFoundException("An authenticated image session is unavailable")
         val headers = NetworkHeaders.Builder()
-            .set("Authorization", authorizationHeader)
+            .set(INTERNAL_AUTH_EPOCH_HEADER, credentialEpoch.toString())
             .build()
+        val sessionCacheKey = "$imageUrl#credential=${authenticatedState.credentialInstanceId}"
 
         val imageRequest = ImageRequest.Builder(context!!)
             .data(imageUrl)
+            .memoryCacheKey(sessionCacheKey)
+            .diskCacheKey(sessionCacheKey)
             .diskCachePolicy(CachePolicy.ENABLED)
             .httpHeaders(headers)
             .build()

@@ -6,6 +6,7 @@ import org.jellyfin.mobile.events.ActivityEvent
 import org.jellyfin.mobile.events.ActivityEvent.DownloadFile
 import org.jellyfin.mobile.events.ActivityEvent.ReadLibraryBook
 import org.jellyfin.mobile.events.ActivityEventHandler
+import org.jellyfin.mobile.feature.library.LibraryReaderLaunchRequest
 import org.jellyfin.mobile.feature.library.LibraryViewModel
 import org.jellyfin.mobile.feature.music.MusicViewModel
 import org.jellyfin.mobile.ui.ComposeFragment
@@ -44,8 +45,20 @@ class NativeHomeFragment :
             onDownloadLibraryBook = { uri, title, filename ->
                 activityEventHandler.emit(DownloadFile(uri, title, filename))
             },
-            onReadLibraryBook = { uri, title, filename, mimeType, readerKey, jellyfinItemId ->
-                activityEventHandler.emit(ReadLibraryBook(uri, title, filename, mimeType, readerKey, jellyfinItemId))
+            onReadLibraryBook = { uri, title, filename, mimeType, readerKey, jellyfinItemId, source ->
+                activityEventHandler.emit(
+                    ReadLibraryBook(
+                        LibraryReaderLaunchRequest(
+                            uri = uri.toString(),
+                            title = title,
+                            filename = filename,
+                            mimeType = mimeType,
+                            readerKey = readerKey,
+                            jellyfinItemId = jellyfinItemId,
+                            source = source,
+                        ),
+                    ),
+                )
             },
             onSelectServer = { activityEventHandler.emit(ActivityEvent.SelectServer) },
             onPlay = { playOptions -> activityEventHandler.emit(ActivityEvent.LaunchNativePlayer(playOptions)) },

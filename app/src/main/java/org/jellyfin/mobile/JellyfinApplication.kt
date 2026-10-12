@@ -1,13 +1,17 @@
 package org.jellyfin.mobile
 
 import android.app.Application
+import android.webkit.CookieManager
+import android.webkit.WebStorage
 import android.webkit.WebView
+import android.webkit.WebViewDatabase
 import coil3.ImageLoader
 import coil3.SingletonImageLoader
 import org.jellyfin.mobile.app.apiModule
 import org.jellyfin.mobile.app.applicationModule
 import org.jellyfin.mobile.core.PtvCoreRuntime
 import org.jellyfin.mobile.data.databaseModule
+import org.jellyfin.mobile.downloads.AuthenticatedDownloadIndexSanitizer
 import org.jellyfin.mobile.utils.JellyTree
 import org.jellyfin.mobile.utils.isWebViewSupported
 import org.koin.android.ext.koin.androidContext
@@ -27,11 +31,14 @@ class JellyfinApplication :
         // Setup logging
         Timber.plant(JellyTree())
 
-        if (BuildConfig.DEBUG) {
+        val webViewSupported = isWebViewSupported()
+        if (webViewSupported) {
+            purgeLegacyWebViewCredentials()
+        }
+
+        if (BuildConfig.DEBUG && webViewSupported) {
             // Enable WebView debugging
-            if (isWebViewSupported()) {
-                WebView.setWebContentsDebuggingEnabled(true)
-            }
+            WebView.setWebContentsDebuggingEnabled(true)
         }
 
         startKoin {
@@ -45,10 +52,28 @@ class JellyfinApplication :
             )
         }
 
+        get<AuthenticatedDownloadIndexSanitizer>().sanitizeAtStartup()
+
         SingletonImageLoader.setSafe {
             get<ImageLoader>()
         }
 
         PtvCoreRuntime.initialize(this)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun purgeLegacyWebViewCredentials() {
+        try {
+            WebStorage.getInstance().deleteAllData()
+            WebViewDatabase.getInstance(this).apply {
+                clearFormData()
+                clearHttpAuthUsernamePassword()
+            }
+            CookieManager.getInstance().removeAllCookies {
+                CookieManager.getInstance().flush()
+            }
+        } catch (_: RuntimeException) {
+            Timber.w("Legacy WebView credential purge was unavailable")
+        }
     }
 }

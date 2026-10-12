@@ -1,6 +1,7 @@
 package org.jellyfin.mobile.ui.screens.home
 
 import android.net.Uri
+import android.os.SystemClock
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -105,9 +106,13 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import coil3.compose.AsyncImage
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.jellyfin.mobile.R
+import org.jellyfin.mobile.auth.AuthMethod
+import org.jellyfin.mobile.auth.MobileAuthState
 import org.jellyfin.mobile.data.entity.ServerEntity
+import org.jellyfin.mobile.feature.library.LibraryBookSource
 import org.jellyfin.mobile.feature.library.LibraryScreen
 import org.jellyfin.mobile.feature.library.LibraryViewModel
 import org.jellyfin.mobile.feature.music.MusicScreen
@@ -121,8 +126,8 @@ import org.jellyfin.mobile.ui.utils.PiggieTvBackground
 import org.jellyfin.mobile.ui.utils.PiggieTvColors
 import org.jellyfin.mobile.utils.Constants
 import org.jellyfin.mobile.utils.toast
-import org.jellyfin.sdk.model.api.BaseItemKind
 import org.jellyfin.sdk.model.UUID
+import org.jellyfin.sdk.model.api.BaseItemKind
 import org.koin.compose.koinInject
 import kotlin.time.Duration.Companion.ZERO
 
@@ -137,12 +142,13 @@ fun NativeHomeScreen(
     onOpenDashboard: (String) -> Unit,
     onOpenExternalUrl: (String) -> Unit,
     onDownloadLibraryBook: (Uri, String, String) -> Unit,
-    onReadLibraryBook: (Uri, String, String, String?, String?, String?) -> Unit,
+    onReadLibraryBook: (Uri, String, String, String?, String, String?, LibraryBookSource) -> Unit,
     onSelectServer: () -> Unit,
     onPlay: (PlayOptions) -> Unit,
     onBackHandlerChanged: ((() -> Boolean)?) -> Unit,
 ) {
     val uiState by viewModel.uiState.collectAsState()
+    val authState by viewModel.authState.collectAsState()
     val context = LocalContext.current
     var reportItem by remember { mutableStateOf<NativeMediaItem?>(null) }
     var detailsSelection by remember { mutableStateOf<NativeMediaDetailsSelection?>(null) }
@@ -228,7 +234,10 @@ fun NativeHomeScreen(
     }
 
     DisposableEffect(Unit) {
-        onDispose { onBackHandlerChanged(null) }
+        onDispose {
+            viewModel.cancelQuickConnect()
+            onBackHandlerChanged(null)
+        }
     }
 
     PiggieTvBackground(modifier = Modifier.fillMaxSize()) {
@@ -241,7 +250,10 @@ fun NativeHomeScreen(
                 is NativeHomeUiState.Login -> LoginScreen(
                     layout = layout,
                     state = state,
+                    authState = authState,
                     onSignIn = { username, password -> viewModel.signIn(server, username, password) },
+                    onStartQuickConnect = { viewModel.startQuickConnect(server) },
+                    onCancelQuickConnect = viewModel::cancelQuickConnect,
                     onOpenDiscord = { onOpenExternalUrl(Constants.PIGGIETV_DISCORD_URL) },
                     onSelectServer = onSelectServer,
                 )
@@ -320,6 +332,11 @@ fun NativeHomeScreen(
                     layout = layout,
                     message = state.message,
                     onRetry = { viewModel.load(server, force = true) },
+                    onForgetSavedSession = if (state.canForgetSavedSession) {
+                        { viewModel.forgetSavedSession(server) }
+                    } else {
+                        null
+                    },
                     onSelectServer = onSelectServer,
                 )
             }
@@ -360,17 +377,61 @@ private fun LoadingScreen(layout: PtvAdaptiveLayout) {
 }
 
 @Composable
+@Suppress("CyclomaticComplexMethod", "LongMethod")
 private fun LoginScreen(
     layout: PtvAdaptiveLayout,
     state: NativeHomeUiState.Login,
+    authState: MobileAuthState,
     onSignIn: (String, String) -> Unit,
+    onStartQuickConnect: () -> Unit,
+    onCancelQuickConnect: () -> Unit,
     onOpenDiscord: () -> Unit,
     onSelectServer: () -> Unit,
 ) {
     var username by rememberSaveable(state.serverName) { mutableStateOf(state.username) }
-    var password by rememberSaveable(state.serverName) { mutableStateOf("") }
+    var password by remember(state.serverName) { mutableStateOf("") }
     var showSignup by rememberSaveable(state.serverName) { mutableStateOf(false) }
     var showPasswordReset by rememberSaveable(state.serverName) { mutableStateOf(false) }
+    val passwordSignInInProgress = authState is MobileAuthState.Authenticating &&
+        authState.method == AuthMethod.PASSWORD
+    val quickConnectInProgress = authState.isQuickConnectInProgress()
+    val authenticationInProgress = when (authState) {
+        MobileAuthState.Restoring,
+        MobileAuthState.Validating,
+        MobileAuthState.QuickConnectRequesting,
+        MobileAuthState.LoggingOut,
+        is MobileAuthState.QuickConnectWaiting,
+        is MobileAuthState.Authenticating,
+        -> true
+
+        else -> false
+    }
+
+    fun submitSignIn() {
+        if (username.isBlank() || authenticationInProgress) return
+        val submittedPassword = password
+        password = ""
+        onSignIn(username, submittedPassword)
+    }
+
+    fun startQuickConnect() {
+        if (authenticationInProgress) return
+        password = ""
+        onStartQuickConnect()
+    }
+
+    fun openLoginSubflow(open: () -> Unit) {
+        if (quickConnectInProgress) onCancelQuickConnect()
+        password = ""
+        open()
+    }
+
+    DisposableEffect(state.serverName) {
+        onDispose {
+            password = ""
+            onCancelQuickConnect()
+        }
+    }
 
     if (showSignup) {
         NativeSignupScreen(
@@ -474,7 +535,7 @@ private fun LoginScreen(
                 label = "Password",
                 imeAction = ImeAction.Go,
                 isPassword = true,
-                onGo = { if (username.isNotBlank()) onSignIn(username, password) },
+                onGo = ::submitSignIn,
                 modifier = Modifier
                     .fillMaxWidth()
                     .widthIn(max = layout.loginMaxWidth),
@@ -494,8 +555,8 @@ private fun LoginScreen(
         }
         item {
             Button(
-                onClick = { onSignIn(username, password) },
-                enabled = username.isNotBlank() && !state.isSigningIn,
+                onClick = ::submitSignIn,
+                enabled = username.isNotBlank() && !authenticationInProgress,
                 modifier = Modifier
                     .fillMaxWidth()
                     .widthIn(max = layout.loginMaxWidth)
@@ -508,7 +569,7 @@ private fun LoginScreen(
                 ),
                 shape = MaterialTheme.shapes.medium,
             ) {
-                if (state.isSigningIn) {
+                if (passwordSignInInProgress) {
                     CircularProgressIndicator(
                         modifier = Modifier.size(18.dp),
                         color = PiggieTvColors.TextPrimary,
@@ -520,7 +581,39 @@ private fun LoginScreen(
             }
         }
         item {
-            TextButton(onClick = { showPasswordReset = true }) {
+            if (quickConnectInProgress) {
+                QuickConnectStatus(
+                    authState = authState,
+                    onCancel = onCancelQuickConnect,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .widthIn(max = layout.loginMaxWidth),
+                )
+            } else {
+                Button(
+                    onClick = ::startQuickConnect,
+                    enabled = !authenticationInProgress,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .widthIn(max = layout.loginMaxWidth)
+                        .heightIn(min = 50.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        backgroundColor = PiggieTvColors.Focus,
+                        contentColor = PiggieTvColors.Night,
+                        disabledBackgroundColor = PiggieTvColors.PanelHigh,
+                        disabledContentColor = PiggieTvColors.TextSecondary,
+                    ),
+                    shape = MaterialTheme.shapes.medium,
+                ) {
+                    Text(text = "Quick Connect", fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+        item {
+            TextButton(
+                onClick = { openLoginSubflow { showPasswordReset = true } },
+                enabled = !authenticationInProgress,
+            ) {
                 Text(text = "Forgot password?", color = PiggieTvColors.FocusSoft)
             }
         }
@@ -532,7 +625,8 @@ private fun LoginScreen(
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 Button(
-                    onClick = { showSignup = true },
+                    onClick = { openLoginSubflow { showSignup = true } },
+                    enabled = !authenticationInProgress,
                     modifier = Modifier
                         .weight(1f)
                         .heightIn(min = 46.dp),
@@ -584,6 +678,100 @@ private fun LoginScreen(
 }
 
 @Composable
+@Suppress("LongMethod")
+private fun QuickConnectStatus(authState: MobileAuthState, onCancel: () -> Unit, modifier: Modifier = Modifier) {
+    val waiting = authState as? MobileAuthState.QuickConnectWaiting
+    val deadline = waiting?.deadlineElapsedRealtimeMillis
+    val secondsRemaining by produceState(
+        initialValue = deadline?.quickConnectSecondsRemaining() ?: 0L,
+        key1 = deadline,
+    ) {
+        val activeDeadline = deadline ?: return@produceState
+        while (true) {
+            value = activeDeadline.quickConnectSecondsRemaining()
+            if (value == 0L) break
+            delay(1_000L)
+        }
+    }
+
+    Surface(
+        modifier = modifier,
+        color = PiggieTvColors.Panel.copy(alpha = 0.88f),
+        border = BorderStroke(1.dp, PiggieTvColors.Border),
+        shape = MaterialTheme.shapes.medium,
+    ) {
+        Column(
+            modifier = Modifier.padding(18.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            when {
+                waiting != null -> {
+                    Text(
+                        text = waiting.displayCode,
+                        color = PiggieTvColors.TextPrimary,
+                        style = MaterialTheme.typography.h4,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Text(
+                        text = "Enter this code in a signed-in Jellyfin client.",
+                        color = PiggieTvColors.TextSecondary,
+                        style = MaterialTheme.typography.body2,
+                    )
+                    Text(
+                        text = "Expires in ${secondsRemaining.quickConnectTimeLabel()}",
+                        color = PiggieTvColors.FocusSoft,
+                        style = MaterialTheme.typography.caption,
+                    )
+                }
+
+                authState is MobileAuthState.Authenticating && authState.method == AuthMethod.QUICK_CONNECT -> {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(22.dp),
+                        color = PiggieTvColors.Focus,
+                        strokeWidth = 2.dp,
+                    )
+                    Text(
+                        text = "Approved. Finishing sign-in…",
+                        color = PiggieTvColors.TextPrimary,
+                        style = MaterialTheme.typography.body2,
+                    )
+                }
+
+                else -> {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(22.dp),
+                        color = PiggieTvColors.Focus,
+                        strokeWidth = 2.dp,
+                    )
+                    Text(
+                        text = "Requesting a Quick Connect code…",
+                        color = PiggieTvColors.TextPrimary,
+                        style = MaterialTheme.typography.body2,
+                    )
+                }
+            }
+            TextButton(onClick = onCancel) {
+                Text(text = "Cancel Quick Connect", color = PiggieTvColors.FocusSoft)
+            }
+        }
+    }
+}
+
+private fun Long.quickConnectSecondsRemaining(): Long =
+    ((this - SystemClock.elapsedRealtime()).coerceAtLeast(0L) + ROUND_UP_MILLISECONDS) /
+        MILLISECONDS_PER_SECOND
+
+private fun Long.quickConnectTimeLabel(): String {
+    val minutes = this / 60L
+    val seconds = this % 60L
+    return "$minutes:${seconds.toString().padStart(2, '0')}"
+}
+
+private const val MILLISECONDS_PER_SECOND = 1_000L
+private const val ROUND_UP_MILLISECONDS = MILLISECONDS_PER_SECOND - 1L
+
+@Composable
 @Suppress("CyclomaticComplexMethod", "LongMethod", "MagicNumber")
 private fun NativePasswordResetScreen(
     layout: PtvAdaptiveLayout,
@@ -594,13 +782,21 @@ private fun NativePasswordResetScreen(
     val scope = rememberCoroutineScope()
     var mode by rememberSaveable(server) { mutableStateOf(PasswordResetMode.REQUEST_CODE) }
     var email by rememberSaveable(server) { mutableStateOf("") }
-    var resetCode by rememberSaveable(server) { mutableStateOf("") }
-    var password by rememberSaveable(server) { mutableStateOf("") }
-    var confirmPassword by rememberSaveable(server) { mutableStateOf("") }
+    var resetCode by remember(server) { mutableStateOf("") }
+    var password by remember(server) { mutableStateOf("") }
+    var confirmPassword by remember(server) { mutableStateOf("") }
     var isSubmitting by rememberSaveable(server) { mutableStateOf(false) }
     var isComplete by rememberSaveable(server) { mutableStateOf(false) }
     var message by rememberSaveable(server) { mutableStateOf<String?>(null) }
     var messageTone by rememberSaveable(server) { mutableStateOf(SignupMessageTone.ERROR) }
+
+    DisposableEffect(server) {
+        onDispose {
+            resetCode = ""
+            password = ""
+            confirmPassword = ""
+        }
+    }
 
     fun showError(text: String) {
         messageTone = SignupMessageTone.ERROR
@@ -614,6 +810,15 @@ private fun NativePasswordResetScreen(
             return
         }
 
+        val submittedReset = NativePasswordResetConfirmRequest(
+            email = email,
+            code = resetCode,
+            password = password,
+            confirmPassword = confirmPassword,
+        )
+        resetCode = ""
+        password = ""
+        confirmPassword = ""
         isSubmitting = true
         message = null
         scope.launch {
@@ -623,17 +828,16 @@ private fun NativePasswordResetScreen(
 
                     PasswordResetMode.CONFIRM -> signupRepository.confirmPasswordReset(
                         serverUrl = server,
-                        resetRequest = NativePasswordResetConfirmRequest(
-                            email = email,
-                            code = resetCode,
-                            password = password,
-                            confirmPassword = confirmPassword,
-                        ),
+                        resetRequest = submittedReset,
                     )
                 }
-            }.onSuccess { result ->
+            }.onSuccess {
                 messageTone = SignupMessageTone.SUCCESS
-                message = result.message
+                message = if (mode == PasswordResetMode.REQUEST_CODE) {
+                    "Check your email for the PiggieTV password reset code."
+                } else {
+                    "Your PiggieTV password has been reset."
+                }
                 if (mode == PasswordResetMode.REQUEST_CODE) {
                     mode = PasswordResetMode.CONFIRM
                 } else {
@@ -642,8 +846,8 @@ private fun NativePasswordResetScreen(
                     resetCode = ""
                     isComplete = true
                 }
-            }.onFailure { error ->
-                showError(error.message ?: "PiggieTV could not reset your password. Please try again.")
+            }.onFailure {
+                showError("PiggieTV could not reset your password. Please try again.")
             }
             isSubmitting = false
         }
@@ -820,12 +1024,19 @@ private fun NativeSignupScreen(
     val scope = rememberCoroutineScope()
     var email by rememberSaveable(server) { mutableStateOf("") }
     var username by rememberSaveable(server) { mutableStateOf("") }
-    var password by rememberSaveable(server) { mutableStateOf("") }
-    var confirmPassword by rememberSaveable(server) { mutableStateOf("") }
+    var password by remember(server) { mutableStateOf("") }
+    var confirmPassword by remember(server) { mutableStateOf("") }
     var isSubmitting by rememberSaveable(server) { mutableStateOf(false) }
     var created by rememberSaveable(server) { mutableStateOf(false) }
     var message by rememberSaveable(server) { mutableStateOf<String?>(null) }
     var messageTone by rememberSaveable(server) { mutableStateOf(SignupMessageTone.ERROR) }
+
+    DisposableEffect(server) {
+        onDispose {
+            password = ""
+            confirmPassword = ""
+        }
+    }
 
     fun showError(text: String) {
         created = false
@@ -841,29 +1052,32 @@ private fun NativeSignupScreen(
             return
         }
 
+        val submittedSignup = NativeSignupRequest(
+            email = email,
+            username = username,
+            password = password,
+            confirmPassword = confirmPassword,
+        )
+        password = ""
+        confirmPassword = ""
         isSubmitting = true
         message = null
         scope.launch {
             runCatching {
                 signupRepository.createUser(
                     serverUrl = server,
-                    signupRequest = NativeSignupRequest(
-                        email = email,
-                        username = username,
-                        password = password,
-                        confirmPassword = confirmPassword,
-                    ),
+                    signupRequest = submittedSignup,
                 )
-            }.onSuccess { result ->
+            }.onSuccess {
                 password = ""
                 confirmPassword = ""
                 created = true
                 messageTone = SignupMessageTone.SUCCESS
-                message = result.message
-            }.onFailure { error ->
+                message = "Check your email for the PiggieTV verification link."
+            }.onFailure {
                 created = false
                 messageTone = SignupMessageTone.ERROR
-                message = error.message ?: "PiggieTV signup failed. Please try again."
+                message = "PiggieTV signup failed. Please try again."
             }
             isSubmitting = false
         }
@@ -1088,7 +1302,7 @@ private fun HomeContent(
     libraryViewModel: LibraryViewModel,
     musicViewModel: MusicViewModel,
     onDownloadLibraryBook: (Uri, String, String) -> Unit,
-    onReadLibraryBook: (Uri, String, String, String?, String?, String?) -> Unit,
+    onReadLibraryBook: (Uri, String, String, String?, String, String?, LibraryBookSource) -> Unit,
     onBackHandlerChanged: ((() -> Boolean)?) -> Unit,
     onPlay: (PlayOptions) -> Unit,
     onSignOut: () -> Unit,
@@ -2803,7 +3017,13 @@ private fun MediaReportDialog(
 }
 
 @Composable
-private fun ErrorScreen(layout: PtvAdaptiveLayout, message: String, onRetry: () -> Unit, onSelectServer: () -> Unit) {
+private fun ErrorScreen(
+    layout: PtvAdaptiveLayout,
+    message: String,
+    onRetry: () -> Unit,
+    onForgetSavedSession: (() -> Unit)?,
+    onSelectServer: () -> Unit,
+) {
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -2827,6 +3047,11 @@ private fun ErrorScreen(layout: PtvAdaptiveLayout, message: String, onRetry: () 
                 shape = MaterialTheme.shapes.medium,
             ) {
                 Text(text = "Retry", fontWeight = FontWeight.Bold)
+            }
+            onForgetSavedSession?.let { forgetSavedSession ->
+                TextButton(onClick = forgetSavedSession) {
+                    Text(text = "Forget saved session", color = PiggieTvColors.FocusSoft)
+                }
             }
             TextButton(onClick = onSelectServer) {
                 Text(text = "Use a different server", color = PiggieTvColors.FocusSoft)

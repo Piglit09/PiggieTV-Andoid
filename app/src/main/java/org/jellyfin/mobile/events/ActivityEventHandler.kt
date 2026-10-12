@@ -15,6 +15,7 @@ import org.jellyfin.mobile.R
 import org.jellyfin.mobile.bridge.JavascriptCallback
 import org.jellyfin.mobile.downloads.DownloadsFragment
 import org.jellyfin.mobile.feature.library.LibraryReaderFragment
+import org.jellyfin.mobile.feature.library.LibraryReaderLaunchRequestRegistry
 import org.jellyfin.mobile.player.ui.PlayerFragment
 import org.jellyfin.mobile.player.ui.PlayerFullscreenHelper
 import org.jellyfin.mobile.settings.SettingsFragment
@@ -25,7 +26,10 @@ import org.jellyfin.mobile.utils.requestDownload
 import org.jellyfin.mobile.webapp.WebappFunctionChannel
 import timber.log.Timber
 
-class ActivityEventHandler(private val webappFunctionChannel: WebappFunctionChannel) {
+class ActivityEventHandler(
+    private val webappFunctionChannel: WebappFunctionChannel,
+    private val readerLaunchRequests: LibraryReaderLaunchRequestRegistry,
+) {
     private val eventsFlow = MutableSharedFlow<ActivityEvent>(
         extraBufferCapacity = 10,
         onBufferOverflow = BufferOverflow.SUSPEND,
@@ -70,8 +74,8 @@ class ActivityEventHandler(private val webappFunctionChannel: WebappFunctionChan
                 try {
                     val intent = Intent(Intent.ACTION_VIEW, event.uri.toUri())
                     startActivity(intent)
-                } catch (e: android.content.ActivityNotFoundException) {
-                    Timber.e("openIntent: %s", e.message)
+                } catch (_: android.content.ActivityNotFoundException) {
+                    Timber.e("No activity is available for the requested external URL")
                 }
             }
 
@@ -82,13 +86,9 @@ class ActivityEventHandler(private val webappFunctionChannel: WebappFunctionChan
             }
 
             is ActivityEvent.ReadLibraryBook -> {
+                val requestId = readerLaunchRequests.register(event.request)
                 val args = Bundle().apply {
-                    putParcelable(Constants.EXTRA_LIBRARY_READER_URI, event.uri)
-                    putString(Constants.EXTRA_LIBRARY_READER_TITLE, event.title)
-                    putString(Constants.EXTRA_LIBRARY_READER_FILENAME, event.filename)
-                    putString(Constants.EXTRA_LIBRARY_READER_MIME_TYPE, event.mimeType)
-                    putString(Constants.EXTRA_LIBRARY_READER_KEY, event.readerKey)
-                    putString(Constants.EXTRA_LIBRARY_READER_ITEM_ID, event.jellyfinItemId)
+                    putString(Constants.EXTRA_LIBRARY_READER_REQUEST_ID, requestId)
                 }
                 supportFragmentManager.addFragment<LibraryReaderFragment>(args)
             }

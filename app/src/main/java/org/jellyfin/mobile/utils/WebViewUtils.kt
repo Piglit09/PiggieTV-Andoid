@@ -32,8 +32,8 @@ fun Context.isWebViewSupported(): Boolean {
     try {
         // May throw android.webkit.WebViewFactory$MissingWebViewPackageException if WebView is not installed
         CookieManager.getInstance()
-    } catch (e: Exception) {
-        Timber.e(e)
+    } catch (_: Exception) {
+        Timber.e("WebView provider is unavailable")
         return false
     }
 
@@ -48,7 +48,7 @@ private fun WebView.getWebViewMajorVersion(): Int {
         match.groupValues.getOrNull(1)?.toInt()
     } ?: 0
 
-    Timber.i("WebView user agent is $userAgent, detected version is $version")
+    Timber.i("WebView detected major version=%d", version)
 
     return version
 }

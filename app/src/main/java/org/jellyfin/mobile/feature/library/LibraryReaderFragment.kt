@@ -11,6 +11,7 @@
     "LongMethod",
     "MagicNumber",
     "MaximumLineLength",
+    "ThrowsCount",
     "TooManyFunctions",
 )
 
@@ -85,13 +86,17 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.jellyfin.mobile.auth.transport.AuthTransportRealm
+import org.jellyfin.mobile.auth.transport.AuthTransportSession
+import org.jellyfin.mobile.auth.transport.authTransportEpoch
+import org.jellyfin.mobile.auth.transport.authTransportRealm
+import org.jellyfin.mobile.auth.transport.hasSameOrigin
+import org.jellyfin.mobile.auth.transport.toHttpUrlWithoutAuthenticationQuery
 import org.jellyfin.mobile.ui.ComposeFragment
 import org.jellyfin.mobile.ui.utils.PiggieTvBackground
 import org.jellyfin.mobile.ui.utils.PiggieTvColors
 import org.jellyfin.mobile.utils.Constants
-import org.jellyfin.mobile.utils.extensions.getParcelableCompat
 import org.jellyfin.sdk.api.client.ApiClient
-import org.jellyfin.sdk.api.client.util.AuthorizationHeaderBuilder
 import org.jellyfin.sdk.api.client.extensions.itemsApi
 import org.jellyfin.sdk.model.api.UpdateUserItemDataDto
 import org.jellyfin.sdk.model.serializer.toUUIDOrNull
@@ -108,7 +113,9 @@ import kotlin.math.roundToInt
 class LibraryReaderFragment : ComposeFragment() {
     private val okHttpClient: OkHttpClient by inject()
     private val readerStore: LibraryReaderStore by inject()
+    private val readerLaunchRequests: LibraryReaderLaunchRequestRegistry by inject()
     private val apiClient: ApiClient by inject()
+    private val authTransportSession: AuthTransportSession by inject()
     private val readerClient by lazy {
         okHttpClient.newBuilder()
             .connectTimeout(READER_CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
@@ -138,6 +145,10 @@ class LibraryReaderFragment : ComposeFragment() {
     private var jellyfinItemId: String? = null
     private var lastServerProgressSyncAtMs = 0L
     private var lastServerProgressPageIndex = -1
+    private val launchRequest: LibraryReaderLaunchRequest? by lazy(LazyThreadSafetyMode.NONE) {
+        arguments?.getString(Constants.EXTRA_LIBRARY_READER_REQUEST_ID)
+            ?.let(readerLaunchRequests::resolve)
+    }
 
     override fun onDestroyView() {
         ++readerGeneration
@@ -150,7 +161,7 @@ class LibraryReaderFragment : ComposeFragment() {
 
     @Composable
     override fun Content() {
-        val title = requireArguments().getString(Constants.EXTRA_LIBRARY_READER_TITLE).orEmpty()
+        val title = launchRequest?.title.orEmpty()
         val currentState = state
         val currentSettings = settings
 
@@ -203,11 +214,11 @@ class LibraryReaderFragment : ComposeFragment() {
 
         viewLifecycleOwner.lifecycleScope.launch {
             try {
-                val args = requireArguments()
-                val uri = requireNotNull(args.getParcelableCompat<Uri>(Constants.EXTRA_LIBRARY_READER_URI))
-                val filename = requireNotNull(args.getString(Constants.EXTRA_LIBRARY_READER_FILENAME))
-                val mimeType = args.getString(Constants.EXTRA_LIBRARY_READER_MIME_TYPE)
-                val providedReaderKey = args.getString(Constants.EXTRA_LIBRARY_READER_KEY)
+                val request = launchRequest
+                    ?: throw IOException("The reader launch request is no longer available. Reopen the book.")
+                val uri = Uri.parse(request.uri)
+                val filename = request.filename
+                val mimeType = request.mimeType
                 val format = detectLibraryBookFormat(mimeType, filename, uri.toString())
                 val supportStatus = format.supportStatus()
                 if (supportStatus != LibraryFormatSupport.NATIVE) {
@@ -216,10 +227,13 @@ class LibraryReaderFragment : ComposeFragment() {
                     return@launch
                 }
 
-                readerTitle = args.getString(Constants.EXTRA_LIBRARY_READER_TITLE).orEmpty()
-                readerKey = providedReaderKey ?: uri.toString()
-                jellyfinItemId = args.getString(Constants.EXTRA_LIBRARY_READER_ITEM_ID)
-                val file = downloadToReaderCache(uri, filename)
+                readerTitle = request.title
+                readerKey = request.readerKey
+                    .takeIf(String::isSafePersistentReaderKey)
+                    ?: throw IOException("The reader identity is invalid. Reopen the book.")
+                jellyfinItemId = request.jellyfinItemId
+                val source = request.source
+                val file = downloadToReaderCache(uri, filename, source)
                 val loadedDocument = withContext(Dispatchers.IO) {
                     withTimeoutOrNull<ReaderDocument>(DOCUMENT_OPEN_TIMEOUT_MS) {
                         ReaderDocument.open(file, mimeType, format)
@@ -252,35 +266,40 @@ class LibraryReaderFragment : ComposeFragment() {
                 renderPagesAround(firstVisiblePage = initialPageIndex, lookAhead = INITIAL_PAGE_PRELOAD)
             } catch (error: CancellationException) {
                 throw error
-            } catch (error: OutOfMemoryError) {
+            } catch (_: OutOfMemoryError) {
                 memoryWarningState = "Low memory while opening reader."
-                showPrepareError(error)
-            } catch (error: IOException) {
-                showPrepareError(error)
-            } catch (error: IllegalArgumentException) {
-                showPrepareError(error)
-            } catch (error: SecurityException) {
-                showPrepareError(error)
+                showPrepareError()
+            } catch (_: IOException) {
+                showPrepareError()
+            } catch (_: IllegalArgumentException) {
+                showPrepareError()
+            } catch (_: SecurityException) {
+                showPrepareError()
             }
         }
     }
 
-    private fun showPrepareError(error: Throwable) {
-        Timber.w(error, "Could not prepare native Library reader")
-        lastReaderError = error.message ?: "Could not prepare this book for reading."
-        state = ReaderUiState.Error(lastReaderError ?: "Could not prepare this book for reading.")
+    private fun showPrepareError() {
+        Timber.w("Could not prepare native Library reader")
+        lastReaderError = SAFE_READER_PREPARATION_ERROR
+        state = ReaderUiState.Error(SAFE_READER_PREPARATION_ERROR)
     }
 
-    private suspend fun downloadToReaderCache(uri: Uri, filename: String): File = withContext(Dispatchers.IO) {
+    private suspend fun downloadToReaderCache(
+        uri: Uri,
+        filename: String,
+        source: LibraryBookSource,
+    ): File = withContext(Dispatchers.IO) {
         val readerDir = File(requireContext().cacheDir, READER_CACHE_DIR).apply { mkdirs() }
         val target = File(readerDir, filename)
         var lastFailure: IOException? = null
 
         uri.downloadCandidates().forEachIndexed { index, candidate ->
+            val safeCandidate = candidate.withoutJellyfinAuthenticationQuery()
             val candidateTarget = File(readerDir, "$filename.part")
             val request = Request.Builder()
-                .url(candidate.toString())
-                .addJellyfinAuthorizationIfNeeded(candidate)
+                .url(safeCandidate.toString())
+                .routeReaderAuthentication(safeCandidate, source)
                 .build()
             runCatching {
                 readerClient.newCall(request).execute().use { response ->
@@ -320,11 +339,10 @@ class LibraryReaderFragment : ComposeFragment() {
                 candidateTarget.delete()
                 lastFailure = IOException(
                     if (index == 0) {
-                        error.message
+                        "Library reader download failed."
                     } else {
-                        "Library reader fallback download failed: ${error.message}"
+                        "Library reader fallback download failed."
                     },
-                    error,
                 )
             }
         }
@@ -350,20 +368,34 @@ class LibraryReaderFragment : ComposeFragment() {
         return listOfNotNull(original, fallback).distinctBy(Uri::toString)
     }
 
-    private fun Request.Builder.addJellyfinAuthorizationIfNeeded(uri: Uri): Request.Builder {
-        val jellyfinAuthority = apiClient.baseUrl?.let(Uri::parse)?.authority
-        val accessToken = apiClient.accessToken
-        if (jellyfinAuthority != null && uri.authority == jellyfinAuthority && accessToken != null) {
-            header(
-                "Authorization",
-                AuthorizationHeaderBuilder.buildHeader(
-                    clientName = apiClient.clientInfo.name,
-                    clientVersion = apiClient.clientInfo.version,
-                    deviceId = apiClient.deviceInfo.id,
-                    deviceName = apiClient.deviceInfo.name,
-                    accessToken = accessToken,
-                ),
-            )
+    private fun Uri.withoutJellyfinAuthenticationQuery(): Uri {
+        val candidate = toString().toHttpUrlWithoutAuthenticationQuery() ?: return this
+        return candidate.newBuilder()
+            .username("")
+            .password("")
+            .fragment(null)
+            .build()
+            .toString()
+            .let(Uri::parse)
+    }
+
+    private fun Request.Builder.routeReaderAuthentication(
+        uri: Uri,
+        source: LibraryBookSource,
+    ): Request.Builder {
+        if (source == LibraryBookSource.OPDS) {
+            return authTransportRealm(AuthTransportRealm.LIBRARY)
+        }
+        val jellyfinOrigin = apiClient.baseUrl?.toHttpUrlWithoutAuthenticationQuery()
+        val candidate = uri.toString().toHttpUrlWithoutAuthenticationQuery()
+        if (jellyfinOrigin != null && candidate != null && jellyfinOrigin.hasSameOrigin(candidate)) {
+            val snapshot = authTransportSession.currentSnapshot()
+                ?.takeIf { active -> active.serverOrigin?.hasSameOrigin(candidate) == true }
+                ?: throw IOException("An authenticated reader session is unavailable.")
+            authTransportRealm(AuthTransportRealm.JELLYFIN)
+            authTransportEpoch(snapshot.epoch)
+        } else {
+            authTransportRealm(AuthTransportRealm.EXCLUDED)
         }
         return this
     }
@@ -440,7 +472,7 @@ class LibraryReaderFragment : ComposeFragment() {
             } ?: ReaderPage.Error("PTV Books timed out while rendering this page. Try Retry or reopen the reader.")
         }.getOrElse { error ->
             if (error is CancellationException) throw error
-            Timber.w(error, "PTV Books could not render page $pageIndex")
+            Timber.w("PTV Books could not render page index=%d", pageIndex)
             val message = when (error) {
                 is OutOfMemoryError -> "PTV Books ran low on memory while rendering this page. The cache was cleared; try Retry."
                 else -> "PTV Books could not render this page. The file may be corrupt or too large."
@@ -1162,8 +1194,8 @@ class LibraryReaderFragment : ComposeFragment() {
                         played = resumeState.progress >= SERVER_PROGRESS_PLAYED_THRESHOLD,
                     ),
                 )
-            }.onFailure { error ->
-                Timber.w(error, "PTV Books could not sync Jellyfin reading progress")
+            }.onFailure {
+                Timber.w("PTV Books could not sync Jellyfin reading progress")
             }
         }
     }
@@ -1474,6 +1506,7 @@ class LibraryReaderFragment : ComposeFragment() {
         const val READER_CONNECT_TIMEOUT_SECONDS = 30L
         const val READER_READ_TIMEOUT_SECONDS = 180L
         const val READER_CALL_TIMEOUT_SECONDS = 600L
+        const val SAFE_READER_PREPARATION_ERROR = "Could not prepare this book for reading. Reopen the book and try again."
         const val OPDS_DOWNLOAD_PREFIX = "/opds/download/"
         const val DOWNLOAD_PREFIX = "/download/"
         const val FONT_STEP = 0.08f

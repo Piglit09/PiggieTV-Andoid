@@ -2,9 +2,9 @@ package org.jellyfin.mobile.downloads
 
 import android.Manifest.permission.WRITE_EXTERNAL_STORAGE
 import android.annotation.SuppressLint
-import android.app.DownloadManager
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.content.ContentValues
 import android.content.Context
 import android.content.pm.PackageManager.PERMISSION_GRANTED
 import android.net.ConnectivityManager
@@ -13,10 +13,15 @@ import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
 import android.os.Build.VERSION_CODES.P
+import android.os.Build.VERSION_CODES.Q
+import android.os.Environment
+import android.provider.MediaStore
 import android.util.AndroidException
 import androidx.annotation.RequiresApi
 import androidx.core.content.getSystemService
 import androidx.core.net.toUri
+import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DataSpec
 import androidx.media3.exoplayer.offline.DownloadRequest
 import androidx.media3.exoplayer.offline.DownloadService
 import androidx.media3.exoplayer.scheduler.Requirements
@@ -27,6 +32,11 @@ import kotlinx.coroutines.withTimeout
 import org.jellyfin.mobile.MainActivity
 import org.jellyfin.mobile.R
 import org.jellyfin.mobile.app.AppPreferences
+import org.jellyfin.mobile.auth.AuthSessionCoordinator
+import org.jellyfin.mobile.auth.MobileAuthState
+import org.jellyfin.mobile.auth.transport.INTERNAL_AUTH_EPOCH_HEADER
+import org.jellyfin.mobile.auth.transport.hasSameOrigin
+import org.jellyfin.mobile.auth.transport.toHttpUrlWithoutAuthenticationQuery
 import org.jellyfin.mobile.data.dao.DownloadDao
 import org.jellyfin.mobile.data.entity.DownloadEntity
 import org.jellyfin.mobile.downloads.DownloadServiceUtil.getDownloadTracker
@@ -47,20 +57,25 @@ import org.koin.core.component.get
 import org.koin.core.component.inject
 import java.io.File
 import java.io.IOException
+import java.io.OutputStream
+import java.net.URLConnection
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 
-class DownloadUtils(
-    val context: Context,
-    private val filename: String,
-    private val downloadURL: String,
-    private val downloadMethod: Int,
-) : KoinComponent {
+class DownloadUtils(val context: Context, filename: String, downloadURL: String, private val downloadMethod: Int) :
+    KoinComponent {
     private val mainActivity: MainActivity = context as MainActivity
     private val downloadFolder: File
     private val itemId: String
     private val itemUUID: UUID
     private val contentId: String
+    private val downloadTarget = requireNotNull(AuthenticatedDownloadTarget.parse(downloadURL)) {
+        "Unsupported or invalid Jellyfin download URL."
+    }
+    private val downloadUri: Uri = downloadTarget.url.toString().toUri()
+    private val safeFilename = requireNotNull(filename.toSafeDownloadFileName()) {
+        "Download filename is invalid."
+    }
     private val downloadDao: DownloadDao by inject()
     private val apiClient: ApiClient = get()
     private val mediaSourceResolver: MediaSourceResolver by inject()
@@ -69,12 +84,21 @@ class DownloadUtils(
     private val notificationManager: NotificationManager? by lazy { context.getSystemService() }
     private val connectivityManager: ConnectivityManager? by lazy { context.getSystemService() }
     private val appPreferences: AppPreferences by inject()
+    private val authCoordinator: AuthSessionCoordinator by inject()
+    private val dataSourceFactory: DataSource.Factory by inject()
     private var downloadTracker: DownloadTracker = getDownloadTracker()
+    private val downloadOwner = requireNotNull(authCoordinator.state.value as? MobileAuthState.Authenticated) {
+        "An authenticated session is required for downloads."
+    }
 
     init {
-        val regex = Regex("""Items/([a-f0-9]{32})/Download""")
-        val matchResult = regex.find(downloadURL)
-        itemId = matchResult?.groups?.get(1)?.value.toString()
+        val configuredServer = requireNotNull(
+            apiClient.baseUrl?.toHttpUrlWithoutAuthenticationQuery(),
+        ) { "An authenticated Jellyfin server is required for downloads." }
+        require(downloadTarget.url.hasSameOrigin(configuredServer)) {
+            "Jellyfin downloads must use the authenticated server origin."
+        }
+        itemId = downloadTarget.itemId
         itemUUID = itemId.toUUID()
         contentId = itemUUID.toString()
         downloadFolder = File(context.filesDir, "/Downloads/$itemId/")
@@ -93,7 +117,7 @@ class DownloadUtils(
                 downloadFiles(jellyfinMediaSource)
             }
         } else {
-            downloadExternalMediaFile(jellyfinMediaSource)
+            downloadExternalMediaFile()
         }
     }
 
@@ -167,12 +191,11 @@ class DownloadUtils(
     }
 
     private fun downloadMediaFile(jellyfinMediaSource: JellyfinMediaSource) {
-        val downloadUri = downloadURL.toUri()
-        val cacheKey = downloadURL.toUri().extractId()
+        val cacheKey = downloadUri.extractId()
 
         val downloadRequest = DownloadRequest.Builder(contentId, downloadUri)
             .setData(jellyfinMediaSource.item!!.name!!.encodeToByteArray())
-            .setCustomCacheKey(cacheKey)
+            .setCustomCacheKey(AuthenticatedDownloadOwnership.encode(downloadOwner, cacheKey))
             .build()
         DownloadService.sendAddDownload(
             context,
@@ -184,11 +207,13 @@ class DownloadUtils(
 
     private fun downloadExternalSubtitles(jellyfinMediaSource: JellyfinMediaSource) {
         jellyfinMediaSource.externalSubtitleStreams.forEach {
-            val subtitleDownloadURL = apiClient.createUrl(it.deliveryUrl).toUri()
-            val subtitleCacheKey: String = subtitleDownloadURL.extractId()
+            val subtitleDownloadUrl = requireNotNull(
+                apiClient.createUrl(it.deliveryUrl).toHttpUrlWithoutAuthenticationQuery(),
+            ) { "Jellyfin returned an invalid subtitle URL." }.toString().toUri()
+            val subtitleCacheKey: String = subtitleDownloadUrl.extractId()
 
-            val downloadRequest = DownloadRequest.Builder("$contentId:${it.index}", subtitleDownloadURL)
-                .setCustomCacheKey(subtitleCacheKey)
+            val downloadRequest = DownloadRequest.Builder("$contentId:${it.index}", subtitleDownloadUrl)
+                .setCustomCacheKey(AuthenticatedDownloadOwnership.encode(downloadOwner, subtitleCacheKey))
                 .build()
             DownloadService.sendAddDownload(
                 context,
@@ -202,13 +227,13 @@ class DownloadUtils(
     private suspend fun storeDownloadSpecs(jellyfinMediaSource: JellyfinMediaSource) = LocalJellyfinMediaSource(
         jellyfinMediaSource,
         downloadFolder.canonicalPath,
-        downloadURL,
-        downloadTracker.getDownloadSize(downloadURL.toUri()),
+        downloadTarget.url.toString(),
+        downloadTracker.getDownloadSize(downloadUri),
     ).also {
         downloadDao.insert(DownloadEntity(it))
     }
 
-    private suspend fun downloadExternalMediaFile(jellyfinMediaSource: JellyfinMediaSource) {
+    private suspend fun downloadExternalMediaFile() {
         if (!AndroidVersion.isAtLeastQ) {
             @Suppress("MagicNumber")
             val granted = withTimeout(2 * 60 * 1000) {
@@ -224,14 +249,95 @@ class DownloadUtils(
             }
         }
 
-        val downloadRequest = DownloadManager.Request(downloadURL.toUri())
-            .setTitle(jellyfinMediaSource.getName(context))
-            .setDescription(context.getString(R.string.downloading))
-            .setDestinationUri(Uri.fromFile(File(appPreferences.downloadLocation, filename)))
-            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-
-        context.getSystemService<DownloadManager>()?.enqueue(downloadRequest)
+        withContext(Dispatchers.IO) {
+            if (AndroidVersion.isAtLeastQ) {
+                downloadExternalToMediaStore()
+            } else {
+                downloadExternalToFile()
+            }
+        }
     }
+
+    @RequiresApi(Q)
+    @Suppress("ThrowsCount")
+    private fun downloadExternalToMediaStore() {
+        val resolver = context.contentResolver
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, safeFilename)
+            put(MediaStore.MediaColumns.MIME_TYPE, downloadMimeType())
+            put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+            put(MediaStore.MediaColumns.IS_PENDING, 1)
+        }
+        val destination = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            ?: throw IOException("Unable to create the external download destination.")
+        var published = false
+        try {
+            val output = resolver.openOutputStream(destination, "w")
+                ?: throw IOException("Unable to open the external download destination.")
+            output.use(::copyAuthenticatedDownload)
+
+            values.clear()
+            values.put(MediaStore.MediaColumns.IS_PENDING, 0)
+            if (resolver.update(destination, values, null, null) != 1) {
+                throw IOException("Unable to publish the completed external download.")
+            }
+            published = true
+        } finally {
+            if (!published) resolver.delete(destination, null, null)
+        }
+    }
+
+    @Suppress("ThrowsCount")
+    private fun downloadExternalToFile() {
+        val directory = File(appPreferences.downloadLocation).canonicalFile
+        if (!directory.isDirectory) {
+            throw IOException("The selected download directory is unavailable.")
+        }
+        val destination = File(directory, safeFilename).canonicalFile
+        if (destination.parentFile != directory || destination.exists()) {
+            throw IOException("The external download destination is unavailable.")
+        }
+
+        val temporaryFile = File.createTempFile(".piggietv-", ".download", directory)
+        try {
+            temporaryFile.outputStream().buffered().use(::copyAuthenticatedDownload)
+            if (!temporaryFile.renameTo(destination)) {
+                throw IOException("Unable to publish the completed external download.")
+            }
+        } finally {
+            if (temporaryFile.exists()) temporaryFile.delete()
+        }
+    }
+
+    private fun copyAuthenticatedDownload(output: OutputStream) {
+        val current = authCoordinator.state.value as? MobileAuthState.Authenticated
+        if (current == null || !current.matches(downloadOwner)) {
+            throw IOException("AUTH_OPERATION_SUPERSEDED")
+        }
+        val dataSource = dataSourceFactory.createDataSource()
+        try {
+            dataSource.open(
+                DataSpec.Builder()
+                    .setUri(downloadUri)
+                    .setHttpRequestHeaders(
+                        mapOf(INTERNAL_AUTH_EPOCH_HEADER to current.credentialEpoch.toString()),
+                    )
+                    .build(),
+            )
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                val bytesRead = dataSource.read(buffer, 0, buffer.size)
+                if (bytesRead == END_OF_INPUT) break
+                output.write(buffer, 0, bytesRead)
+            }
+            output.flush()
+        } finally {
+            dataSource.close()
+        }
+    }
+
+    private fun downloadMimeType(): String =
+        URLConnection.guessContentTypeFromName(safeFilename) ?: DEFAULT_DOWNLOAD_MIME_TYPE
 
     private fun removeDownloadRemains(jellyfinMediaSource: JellyfinMediaSource) {
         downloadFolder.deleteRecursively()
@@ -271,17 +377,27 @@ class DownloadUtils(
     private inner class JellyfinDownloadTracker(val jellyfinMediaSource: JellyfinMediaSource) :
         DownloadTracker.Listener {
         override fun onDownloadsChanged() {
-            if (downloadTracker.isDownloaded(downloadURL.toUri())) {
+            if (downloadTracker.isDownloaded(downloadUri)) {
                 runBlocking {
                     withContext(Dispatchers.IO) {
                         storeDownloadSpecs(jellyfinMediaSource)
                     }
                 }
                 downloadTracker.removeListener(this)
-            } else if (downloadTracker.isFailed(downloadURL.toUri())) {
+            } else if (downloadTracker.isFailed(downloadUri)) {
                 removeDownloadRemains(jellyfinMediaSource)
                 downloadTracker.removeListener(this)
             }
         }
     }
+
+    private companion object {
+        const val END_OF_INPUT = -1
+        const val DEFAULT_DOWNLOAD_MIME_TYPE = "application/octet-stream"
+    }
 }
+
+private fun MobileAuthState.Authenticated.matches(owner: MobileAuthState.Authenticated): Boolean =
+    serverId == owner.serverId &&
+        userId == owner.userId &&
+        credentialInstanceId == owner.credentialInstanceId

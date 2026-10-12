@@ -4,6 +4,7 @@ import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.session.MediaLibraryService
 import androidx.media3.session.MediaSession
 import kotlinx.coroutines.runBlocking
@@ -14,6 +15,7 @@ import org.koin.android.ext.android.inject
 class LibraryService : MediaLibraryService() {
     private val apiClientController: ApiClientController by inject()
     private val apiClient: ApiClient by inject()
+    private val mediaSourceFactory: MediaSource.Factory by inject()
 
     private var mediaLibrarySession: MediaLibrarySession? = null
     private var callback: MediaLibrarySession.Callback? = null
@@ -24,10 +26,12 @@ class LibraryService : MediaLibraryService() {
         .build()
 
     private val exoPlayer: Player by lazy {
-        ExoPlayer.Builder(this).build().apply {
-            setAudioAttributes(playerAudioAttributes, true)
-            setHandleAudioBecomingNoisy(true)
-        }
+        ExoPlayer.Builder(this)
+            .setMediaSourceFactory(mediaSourceFactory)
+            .build().apply {
+                setAudioAttributes(playerAudioAttributes, true)
+                setHandleAudioBecomingNoisy(true)
+            }
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession? = mediaLibrarySession

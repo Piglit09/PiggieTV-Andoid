@@ -14,7 +14,7 @@ class PtvCorePlatformAdapterTest {
         assertTrue(report.supports(PtvClientCapability.VIDEO_PLAYBACK))
         assertTrue(report.supports(PtvClientCapability.ANDROID_AUTO))
         assertTrue(report.supports(PtvClientCapability.READER))
-        assertFalse(report.supports(PtvClientCapability.QUICK_CONNECT))
+        assertTrue(report.supports(PtvClientCapability.QUICK_CONNECT))
         assertFalse(report.supports(PtvClientCapability.DEEP_LINKS))
         assertEquals(
             PtvClientCapability.entries.map(PtvClientCapability::wireName).toSet(),
@@ -25,7 +25,6 @@ class PtvCorePlatformAdapterTest {
             PtvClientCapability.POINTER_INPUT,
             PtvClientCapability.REMOTE_INPUT,
             PtvClientCapability.TELEMETRY,
-            PtvClientCapability.QUICK_CONNECT,
             PtvClientCapability.DEEP_LINKS,
         )
         PtvClientCapability.entries.forEach { capability ->
