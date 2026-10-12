@@ -5,6 +5,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 $guard = Join-Path $root 'scripts/ptv-mobile-workspace-preflight.ps1'
+. (Join-Path $root 'scripts/ptv-mobile-approval-rules.ps1')
 $initialStatus = @(git -C $root status --porcelain=v1 -uall)
 $passCount = 0
 
@@ -48,6 +49,50 @@ function Invoke-Case {
     Write-Output "PASS $Name"
 }
 
+function Invoke-TargetCase {
+    param([string]$Name, [string]$Mode, [hashtable]$Values, [bool]$Allowed)
+    $policy = [pscustomobject]$Values
+    $denied = $false
+    try {
+        Assert-PTVMobileTargetApproval -Mode $Mode -Policy $policy
+    } catch {
+        $denied = $true
+    }
+    if ($denied -eq $Allowed) {
+        throw "$Name returned an unexpected target authorization result."
+    }
+    $script:passCount++
+    Write-Output "PASS $Name"
+}
+
+function Invoke-AclCase {
+    param(
+        [string]$Name,
+        [string]$OwnerSid,
+        [string]$RuleSid,
+        [Security.AccessControl.RegistryRights]$Rights,
+        [bool]$Allowed
+    )
+    $acl = [Security.AccessControl.RegistrySecurity]::new()
+    $acl.SetOwner([Security.Principal.SecurityIdentifier]::new($OwnerSid))
+    $acl.AddAccessRule([Security.AccessControl.RegistryAccessRule]::new(
+        [Security.Principal.SecurityIdentifier]::new($RuleSid),
+        $Rights,
+        [Security.AccessControl.AccessControlType]::Allow
+    ))
+    $denied = $false
+    try {
+        Assert-PTVMobileRegistryAcl -Acl $acl -Path 'in-memory fixture'
+    } catch {
+        $denied = $true
+    }
+    if ($denied -eq $Allowed) {
+        throw "$Name returned an unexpected Registry ACL result."
+    }
+    $script:passCount++
+    Write-Output "PASS $Name"
+}
+
 Invoke-Case -Name 'approved root audit' -Mode Audit -ExpectedExit 0
 Invoke-Case -Name 'approved root local build' -Mode Build -ExpectedExit 0
 Invoke-Case -Name 'unapproved release package denied' -Mode Package -ExpectedExit 1
@@ -61,6 +106,30 @@ Invoke-Case -Name 'wrong remote denied' -Mode Build -ExpectedExit 1 -Environment
 }
 Invoke-Case -Name 'wrong Git common directory denied' -Mode Build -ExpectedExit 1 -Environment @{
     GIT_COMMON_DIR = (Join-Path $env:TEMP 'ptv-mobile-nonexistent-common')
+}
+Invoke-TargetCase -Name 'ordinary serial classified as test device' -Mode Install -Values @{ targetClass = 'TEST_DEVICE' } -Allowed $true
+Invoke-TargetCase -Name 'production device denied without separate approval' -Mode Install -Values @{ targetClass = 'PRODUCTION_DEVICE'; productionApproval = $false; productionApprovalId = '' } -Allowed $false
+Invoke-TargetCase -Name 'production device denied without approval identity' -Mode Install -Values @{ targetClass = 'PRODUCTION_DEVICE'; productionApproval = $true; productionApprovalId = '' } -Allowed $false
+Invoke-TargetCase -Name 'production device requires explicit approval identity' -Mode Install -Values @{ targetClass = 'PRODUCTION_DEVICE'; productionApproval = $true; productionApprovalId = 'operator-record-fixture' } -Allowed $true
+Invoke-TargetCase -Name 'unknown device class denied' -Mode Install -Values @{ targetClass = 'UNKNOWN' } -Allowed $false
+Invoke-TargetCase -Name 'publication denied without separate release approval' -Mode Publish -Values @{ targetClass = 'RELEASE_CHANNEL'; releaseApproval = $false; releaseApprovalId = '' } -Allowed $false
+Invoke-TargetCase -Name 'publication requires explicit release approval identity' -Mode Publish -Values @{ targetClass = 'RELEASE_CHANNEL'; releaseApproval = $true; releaseApprovalId = 'operator-record-fixture' } -Allowed $true
+$currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+Invoke-AclCase -Name 'task-owned approval ancestor denied' -OwnerSid $currentSid -RuleSid 'S-1-5-18' -Rights ReadKey -Allowed $false
+Invoke-AclCase -Name 'writable approval ancestor denied' -OwnerSid 'S-1-5-18' -RuleSid 'S-1-1-0' -Rights CreateSubKey -Allowed $false
+Invoke-AclCase -Name 'non-writable approval ancestor accepted' -OwnerSid 'S-1-5-18' -RuleSid 'S-1-1-0' -Rights ReadKey -Allowed $true
+foreach ($installer in @('tools/books/install-debug-apk.ps1', 'tools/android-auto/install-debug-apk.ps1')) {
+    $installerSource = Get-Content -LiteralPath (Join-Path $root $installer) -Raw
+    $resolvedIndex = $installerSource.IndexOf('$resolvedApkPath = Resolve-ApkPath', [StringComparison]::Ordinal)
+    $guardIndex = $installerSource.IndexOf('-ArtifactPath $resolvedApkPath', [StringComparison]::Ordinal)
+    $adbIndex = $installerSource.IndexOf('$deviceResult = Get-AuthorizedDevices', [StringComparison]::Ordinal)
+    $installIndex = $installerSource.IndexOf('install -r $resolvedApkPath', [StringComparison]::Ordinal)
+    if ($resolvedIndex -lt 0 -or $guardIndex -le $resolvedIndex -or
+        $adbIndex -le $guardIndex -or $installIndex -le $adbIndex) {
+        throw "$installer does not verify the same resolved APK before device access."
+    }
+    $passCount++
+    Write-Output "PASS $installer canonical APK approval order"
 }
 $fixture = Join-Path ([IO.Path]::GetFullPath($env:TEMP)) ("ptv-mobile-guard-" + [guid]::NewGuid().ToString('N'))
 try {

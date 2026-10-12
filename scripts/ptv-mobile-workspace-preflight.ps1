@@ -17,6 +17,7 @@ $registryPolicyKey = 'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\PiggieTV\WorkspaceAu
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $isWindows = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
 $comparison = if ($isWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+. (Join-Path $PSScriptRoot 'ptv-mobile-approval-rules.ps1')
 
 function Assert-True {
     param([bool]$Condition, [string]$Message)
@@ -58,21 +59,16 @@ function Assert-ProtectedRegistryPolicy {
     $key = Get-Item -LiteralPath $registryPolicyKey -ErrorAction SilentlyContinue
     Assert-True ($null -ne $key) 'Operator-controlled Android Mobile approval policy is absent.'
 
-    $acl = Get-Acl -LiteralPath $registryPolicyKey
-    $untrustedSids = @('S-1-1-0', 'S-1-5-11', 'S-1-5-32-545', 'S-1-5-4')
-    $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-    $writeRights = [Security.AccessControl.RegistryRights]::SetValue -bor
-        [Security.AccessControl.RegistryRights]::CreateSubKey -bor
-        [Security.AccessControl.RegistryRights]::WriteKey -bor
-        [Security.AccessControl.RegistryRights]::ChangePermissions -bor
-        [Security.AccessControl.RegistryRights]::TakeOwnership
-    foreach ($rule in $acl.Access) {
-        if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) { continue }
-        $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
-        if (($untrustedSids -contains $sid -or $sid -eq $currentSid) -and
-            (($rule.RegistryRights -band $writeRights) -ne 0)) {
-            throw 'Approval policy has a task-writable Registry ACL.'
-        }
+    $registryAncestors = @(
+        'Registry::HKEY_LOCAL_MACHINE',
+        'Registry::HKEY_LOCAL_MACHINE\SOFTWARE',
+        'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\PiggieTV',
+        'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\PiggieTV\WorkspaceAuthority',
+        $registryPolicyKey
+    )
+    foreach ($registryPath in $registryAncestors) {
+        Assert-True (Test-Path -LiteralPath $registryPath) "Approval Registry ancestor is absent: $registryPath"
+        Assert-PTVMobileRegistryAcl -Acl (Get-Acl -LiteralPath $registryPath) -Path $registryPath
     }
 
     $raw = (Get-ItemProperty -LiteralPath $registryPolicyKey -Name PolicyJson -ErrorAction Stop).PolicyJson
@@ -96,6 +92,7 @@ function Assert-ProtectedRegistryPolicy {
     if ($Mode -in @('Install', 'Publish')) {
         Assert-True (-not [string]::IsNullOrWhiteSpace($TargetId)) 'An exact target ID is required.'
         Assert-True ($TargetId -ceq $policy.targetId) 'Target does not match the approval record.'
+        Assert-PTVMobileTargetApproval -Mode $Mode -Policy $policy
         Assert-True (-not [string]::IsNullOrWhiteSpace($ArtifactPath)) 'An exact artifact is required.'
         Assert-True (Test-Path -LiteralPath $ArtifactPath -PathType Leaf) 'Approved artifact is missing.'
         $resolvedArtifact = Normalize-Path $ArtifactPath
@@ -117,9 +114,6 @@ function Assert-ProtectedRegistryPolicy {
             $manifest.version -ceq $Version) 'Artifact manifest source provenance differs.'
         $artifactName = Split-Path -Leaf $resolvedArtifact
         Assert-True (@($manifest.files | Where-Object { $_.path -ceq $artifactName -and $_.sha256 -ceq $digest }).Count -eq 1) 'Artifact is absent or duplicated in manifest.'
-        if ($TargetId -match '(?i)prod|release|public') {
-            Assert-True ($policy.productionApproval -eq $true) 'Production/public target needs separate explicit approval.'
-        }
     }
 }
 

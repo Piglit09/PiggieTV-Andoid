@@ -9,10 +9,6 @@ $ErrorActionPreference = "Stop"
 if ([string]::IsNullOrWhiteSpace($Serial) -or [string]::IsNullOrWhiteSpace($ApkPath)) {
     throw 'An exact approved device serial and APK path are required.'
 }
-& powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot '..\..\scripts\ptv-mobile-workspace-preflight.ps1') -Mode Install -TargetId $Serial -ArtifactPath $ApkPath
-if ($LASTEXITCODE -ne 0) {
-    throw 'PTV Mobile device-install preflight denied the operation.'
-}
 
 function Get-RepoRoot {
     return (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
@@ -118,8 +114,12 @@ function Get-AuthorizedDevices {
 }
 
 $repoRoot = Get-RepoRoot
-$resolvedAdbPath = Resolve-AdbPath -ExplicitAdbPath $AdbPath
 $resolvedApkPath = Resolve-ApkPath -RepoRoot $repoRoot -ExplicitApkPath $ApkPath
+& powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot '..\..\scripts\ptv-mobile-workspace-preflight.ps1') -Mode Install -TargetId $Serial -ArtifactPath $resolvedApkPath
+if ($LASTEXITCODE -ne 0) {
+    throw 'PTV Mobile device-install preflight denied the operation.'
+}
+$resolvedAdbPath = Resolve-AdbPath -ExplicitAdbPath $AdbPath
 $deviceResult = Get-AuthorizedDevices -ResolvedAdbPath $resolvedAdbPath
 $authorizedDevices = @($deviceResult.Devices)
 

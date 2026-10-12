@@ -19,7 +19,8 @@ $requestedOutput = [IO.Path]::GetFullPath((Join-Path $repoRoot $OutputDirectory)
 if (-not $requestedOutput.Equals($approvedOutput, [StringComparison]::OrdinalIgnoreCase)) {
     throw 'Public-beta artifact output must remain under the approved build directory.'
 }
-& powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'ptv-mobile-workspace-preflight.ps1') -Mode Package
+$powerShell = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { 'powershell.exe' } else { 'pwsh' }
+& $powerShell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'ptv-mobile-workspace-preflight.ps1') -Mode Package
 if ($LASTEXITCODE -ne 0) {
     throw 'PTV Mobile release-package preflight denied artifact verification.'
 }

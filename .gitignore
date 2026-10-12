@@ -1,6 +1,7 @@
 *.iml
 .gradle
 /.kotlin
+/buildSrc/.kotlin/
 /local.properties
 *.jks
 *.keystore
