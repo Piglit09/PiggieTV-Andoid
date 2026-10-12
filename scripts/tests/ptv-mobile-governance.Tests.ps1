@@ -121,12 +121,15 @@ Invoke-AclCase -Name 'non-writable approval ancestor accepted' -OwnerSid 'S-1-5-
 foreach ($installer in @('tools/books/install-debug-apk.ps1', 'tools/android-auto/install-debug-apk.ps1')) {
     $installerSource = Get-Content -LiteralPath (Join-Path $root $installer) -Raw
     $resolvedIndex = $installerSource.IndexOf('$resolvedApkPath = Resolve-ApkPath', [StringComparison]::Ordinal)
+    $lockIndex = $installerSource.IndexOf('$apkLock = [IO.File]::Open', [StringComparison]::Ordinal)
     $guardIndex = $installerSource.IndexOf('-ArtifactPath $resolvedApkPath', [StringComparison]::Ordinal)
     $adbIndex = $installerSource.IndexOf('$deviceResult = Get-AuthorizedDevices', [StringComparison]::Ordinal)
     $installIndex = $installerSource.IndexOf('install -r $resolvedApkPath', [StringComparison]::Ordinal)
-    if ($resolvedIndex -lt 0 -or $guardIndex -le $resolvedIndex -or
-        $adbIndex -le $guardIndex -or $installIndex -le $adbIndex) {
-        throw "$installer does not verify the same resolved APK before device access."
+    $disposeIndex = $installerSource.IndexOf('$apkLock.Dispose()', [StringComparison]::Ordinal)
+    if ($resolvedIndex -lt 0 -or $lockIndex -le $resolvedIndex -or
+        $guardIndex -le $lockIndex -or $adbIndex -le $guardIndex -or
+        $installIndex -le $adbIndex -or $disposeIndex -le $installIndex) {
+        throw "$installer does not hold the resolved APK read lock through device installation."
     }
     $passCount++
     Write-Output "PASS $installer canonical APK approval order"
@@ -134,6 +137,24 @@ foreach ($installer in @('tools/books/install-debug-apk.ps1', 'tools/android-aut
 $fixture = Join-Path ([IO.Path]::GetFullPath($env:TEMP)) ("ptv-mobile-guard-" + [guid]::NewGuid().ToString('N'))
 try {
     New-Item -ItemType Directory -Path (Join-Path $fixture 'scripts') -Force | Out-Null
+    $fixtureApk = Join-Path $fixture 'mock.apk'
+    [IO.File]::WriteAllText($fixtureApk, 'disposable fixture')
+    $readLock = [IO.File]::Open($fixtureApk, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    try {
+        $null = Get-FileHash -LiteralPath $fixtureApk -Algorithm SHA256
+        $writeDenied = $false
+        try {
+            $writeHandle = [IO.File]::Open($fixtureApk, [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::None)
+            $writeHandle.Dispose()
+        } catch {
+            $writeDenied = $true
+        }
+        if (-not $writeDenied) { throw 'Read lock permitted concurrent fixture APK mutation.' }
+        $passCount++
+        Write-Output 'PASS held APK read lock denies concurrent writes'
+    } finally {
+        $readLock.Dispose()
+    }
     Copy-Item -LiteralPath $guard -Destination (Join-Path $fixture 'scripts/ptv-mobile-workspace-preflight.ps1')
     Invoke-Case -Name 'unauthorized source copy denied' -Mode Build -ExpectedExit 1 -ScriptPath (Join-Path $fixture 'scripts/ptv-mobile-workspace-preflight.ps1') -WorkingDirectory $fixture
     Invoke-Case -Name 'outside working directory denied' -Mode Build -ExpectedExit 1 -WorkingDirectory $fixture
