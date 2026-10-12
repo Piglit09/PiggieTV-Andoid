@@ -14,6 +14,15 @@ $ErrorActionPreference = 'Stop'
 
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 Set-Location -LiteralPath $repoRoot
+$approvedOutput = [IO.Path]::GetFullPath((Join-Path $repoRoot 'build/public-beta'))
+$requestedOutput = [IO.Path]::GetFullPath((Join-Path $repoRoot $OutputDirectory))
+if (-not $requestedOutput.Equals($approvedOutput, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Public-beta artifact output must remain under the approved build directory.'
+}
+& powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'ptv-mobile-workspace-preflight.ps1') -Mode Package
+if ($LASTEXITCODE -ne 0) {
+    throw 'PTV Mobile release-package preflight denied artifact verification.'
+}
 
 function Normalize-CertificateDigest {
     param([string]$Value)
@@ -349,7 +358,7 @@ if (-not $outputPath.StartsWith($allowedPrefix, [StringComparison]::OrdinalIgnor
     throw 'Candidate output directory must be a child of the repository build directory.'
 }
 if (Test-Path -LiteralPath $outputPath) {
-    Remove-Item -LiteralPath $outputPath -Recurse -Force
+    throw 'Candidate output directory already exists; preserving its existing artifacts.'
 }
 New-Item -ItemType Directory -Path $outputPath | Out-Null
 
@@ -359,16 +368,41 @@ foreach ($expectedFile in $expectedFiles) {
 Copy-Item -LiteralPath $versionFile.FullName -Destination (Join-Path $outputPath 'version.txt')
 
 $sourceCommit = (Invoke-CheckedTool 'git' @('rev-parse', 'HEAD') 'Source commit lookup').Trim()
+$sourceTree = (Invoke-CheckedTool 'git' @('rev-parse', 'HEAD^{tree}') 'Source tree lookup').Trim()
+$sourceBranch = (Invoke-CheckedTool 'git' @('branch', '--show-current') 'Source branch lookup').Trim()
 $trackedChanges = (Invoke-CheckedTool 'git' @('status', '--porcelain', '--untracked-files=all') 'Worktree lookup').Trim()
+$artifactFiles = @(Get-ChildItem -LiteralPath $outputPath -File |
+    Sort-Object Name |
+    ForEach-Object {
+        [pscustomobject]@{
+            path = $_.Name
+            bytes = $_.Length
+            sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+        }
+    })
+$digestLines = @($artifactFiles | ForEach-Object { "$($_.path)|$($_.bytes)|$($_.sha256)" })
+$digestBytes = [Text.Encoding]::UTF8.GetBytes(($digestLines -join [char]10))
+$sha = [Security.Cryptography.SHA256]::Create()
+try {
+    $payloadDigest = [BitConverter]::ToString($sha.ComputeHash($digestBytes)).Replace('-', '')
+} finally {
+    $sha.Dispose()
+}
 $manifest = [ordered]@{
+    schemaVersion = 2
     version = $Version
     versionCode = [int]$versionCode
     packageId = 'com.piggietv.android'
     minSdk = 21
     targetSdk = 36
     sourceCommit = $sourceCommit
+    sourceTree = $sourceTree
+    sourceBranch = $sourceBranch
+    sourceRoot = $repoRoot
     worktreeState = if ([string]::IsNullOrWhiteSpace($trackedChanges)) { 'clean' } else { 'dirty' }
     artifacts = $verifiedArtifacts
+    files = $artifactFiles
+    payloadDigestSha256 = $payloadDigest
 }
 $manifestPath = Join-Path $outputPath 'artifact-manifest.json'
 $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
