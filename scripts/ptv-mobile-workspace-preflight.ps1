@@ -3,7 +3,10 @@ param(
     [ValidateSet('Audit', 'Edit', 'Build', 'Package', 'Install', 'Publish')]
     [string]$Mode = 'Audit',
     [string]$TargetId,
-    [string]$ArtifactPath
+    [string]$ArtifactPath,
+    [string]$GradleTaskList,
+    [string]$JavaHome,
+    [string]$AndroidSdkRoot
 )
 
 Set-StrictMode -Version Latest
@@ -14,6 +17,7 @@ $approvedRemote = 'https://github.com/Piglit09/PiggieTV-Andoid.git'
 $approvedAppId = 'com.piggietv.android'
 $approvedArtifactRoot = 'C:\Users\Piggie\Documents\GitHub\_PTV-Artifacts\Builds\Android-Mobile'
 $registryPolicyKey = 'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\PiggieTV\WorkspaceAuthority\AndroidMobile'
+$sharedPolicyKey = 'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\PiggieTV\WorkspaceAuthority'
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $isWindows = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
 $comparison = if ($isWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
@@ -68,12 +72,22 @@ function Assert-ProtectedRegistryPolicy {
     )
     foreach ($registryPath in $registryAncestors) {
         Assert-True (Test-Path -LiteralPath $registryPath) "Approval Registry ancestor is absent: $registryPath"
-        Assert-PTVMobileRegistryAcl -Acl (Get-Acl -LiteralPath $registryPath) -Path $registryPath
+        Assert-PTVMobileRegistryAcl -Acl ((Get-Item -LiteralPath $registryPath).GetAccessControl()) -Path $registryPath
     }
 
+    Assert-PTVMobileLiteralRegistryValueKind -Kind ($key.GetValueKind('PolicyJson'))
     $raw = (Get-ItemProperty -LiteralPath $registryPolicyKey -Name PolicyJson -ErrorAction Stop).PolicyJson
     Assert-True (-not [string]::IsNullOrWhiteSpace($raw)) 'Approval policy is empty.'
     $policy = $raw | ConvertFrom-Json
+    if ($Mode -eq 'Package') {
+        $tasks = @($GradleTaskList -split '\|' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        Assert-PTVMobileDebugPackageApproval -Policy $policy -Head $Head -Tree $Tree -Version $Version `
+            -Root $repoRoot -CommonDirectory $CommonDirectory -Remote $approvedRemote -ArtifactRoot $approvedArtifactRoot `
+            -GradleTasks $tasks -JavaHome $JavaHome -SdkRoot $AndroidSdkRoot
+        Assert-NoReparseAncestor $JavaHome
+        Assert-NoReparseAncestor $AndroidSdkRoot
+        return
+    }
     Assert-True ($policy.schemaVersion -eq 1) 'Approval policy schema is invalid.'
     Assert-True ($policy.projectId -ceq 'PTV_ANDROID_MOBILE') 'Approval policy project is invalid.'
     Assert-True ((Normalize-Path $policy.sourceRoot).Equals((Normalize-Path $repoRoot), $comparison)) 'Approval policy source root differs.'
@@ -115,6 +129,42 @@ function Assert-ProtectedRegistryPolicy {
         $artifactName = Split-Path -Leaf $resolvedArtifact
         Assert-True (@($manifest.files | Where-Object { $_.path -ceq $artifactName -and $_.sha256 -ceq $digest }).Count -eq 1) 'Artifact is absent or duplicated in manifest.'
     }
+}
+
+function Assert-SharedPolicyIfPresent {
+    param([string]$CommonDirectory)
+    if ($Mode -eq 'Audit' -or -not $isWindows) { return }
+    $key = Get-Item -LiteralPath $sharedPolicyKey -ErrorAction SilentlyContinue
+    if ($null -eq $key) { return }
+    foreach ($registryPath in @(
+        'Registry::HKEY_LOCAL_MACHINE',
+        'Registry::HKEY_LOCAL_MACHINE\SOFTWARE',
+        'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\PiggieTV',
+        $sharedPolicyKey
+    )) {
+        Assert-PTVMobileRegistryAcl -Acl ((Get-Item -LiteralPath $registryPath).GetAccessControl()) -Path $registryPath
+    }
+    $minimum = $key.GetValue('MinimumSchemaVersion', $null)
+    if ($null -ne $minimum) {
+        Assert-True ($key.GetValueKind('MinimumSchemaVersion') -eq [Microsoft.Win32.RegistryValueKind]::DWord -and
+            $minimum -is [int] -and $minimum -ge 1 -and $minimum -le 2) 'Protected minimum schema marker is invalid.'
+    }
+    $policyValue = $key.GetValue('PolicyJson', $null)
+    if ($null -ne $policyValue) {
+        Assert-PTVMobileLiteralRegistryValueKind -Kind ($key.GetValueKind('PolicyJson'))
+    }
+    $raw = [string]$policyValue
+    if ([string]::IsNullOrWhiteSpace($raw)) {
+        Assert-True ($null -eq $minimum -or $minimum -lt 2) 'Shared v2 policy is required by the protected minimum schema marker.'
+        return
+    }
+    $shared = $raw | ConvertFrom-Json
+    $minimumVersion = if ($null -eq $minimum) { 1 } else { [int]$minimum }
+    $format = Resolve-PTVMobilePolicyFormat -Policy $shared -MinimumSchemaVersion $minimumVersion
+    if ($format -ceq 'LegacyWebOS') { return }
+    $null = Resolve-PTVMobileSharedPolicy -Policy $shared -Root $repoRoot -CommonDirectory $CommonDirectory `
+        -Remote $approvedRemote -ApplicationId $approvedAppId -VersionSource 'gradle.properties:piggietv.version' `
+        -ArtifactRoot $approvedArtifactRoot -Mode $Mode
 }
 
 try {
@@ -172,6 +222,8 @@ try {
         Assert-True ($isWindows) 'Non-Windows source requires an exact-ref CI context.'
         Assert-True ($root.Equals((Normalize-Path $approvedRoot), $comparison)) 'This is not the approved Android Mobile source root.'
     }
+
+    Assert-SharedPolicyIfPresent -CommonDirectory $commonDirectory
 
     if ($Mode -in @('Package', 'Install', 'Publish')) {
         Assert-True ($status.Count -eq 0) 'Release packaging and external actions require clean committed source.'
