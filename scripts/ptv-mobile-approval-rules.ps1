@@ -29,7 +29,7 @@ function ConvertTo-PTVMobilePolicyPath {
 
 function Resolve-PTVMobilePolicyFormat {
     param([Parameter(Mandatory = $true)]$Policy, [int]$MinimumSchemaVersion = 1)
-    if ($MinimumSchemaVersion -notin @(1,2) -or $null -eq $Policy -or $Policy -isnot [pscustomobject]) {
+    if ($MinimumSchemaVersion -notin @(1,2,3) -or $null -eq $Policy -or $Policy -isnot [pscustomobject]) {
         throw 'Protected policy format or minimum schema marker is invalid.'
     }
     $fields = @($Policy.PSObject.Properties | ForEach-Object { $_.Name })
@@ -37,8 +37,10 @@ function Resolve-PTVMobilePolicyFormat {
     $hasProjects = $fields -ccontains 'projects'
     if ($hasVersion -and $hasProjects) {
         if (($Policy.schemaVersion -isnot [int] -and $Policy.schemaVersion -isnot [long]) -or
-            $Policy.schemaVersion -ne 2) { throw 'Shared policy schema version is invalid.' }
-        return 'SharedV2'
+            $Policy.schemaVersion -notin @(2,3) -or $Policy.schemaVersion -lt $MinimumSchemaVersion) {
+            throw 'Shared policy schema version is invalid.'
+        }
+        return "SharedV$($Policy.schemaVersion)"
     }
     if ($hasVersion -or $hasProjects) { throw 'Partial shared policy cannot fall back to legacy authority.' }
     if ($MinimumSchemaVersion -ge 2) { throw 'Legacy policy is denied by the protected minimum schema marker.' }
@@ -60,7 +62,7 @@ function Resolve-PTVMobileSharedPolicy {
         [Parameter(Mandatory = $true)][string]$Mode
     )
     Assert-PTVMobilePolicyFields $Policy @('schemaVersion','policyId','issuedUtc','expiresUtc','projects','approvals')
-    if (($Policy.schemaVersion -isnot [int] -and $Policy.schemaVersion -isnot [long]) -or $Policy.schemaVersion -ne 2 -or
+    if (($Policy.schemaVersion -isnot [int] -and $Policy.schemaVersion -isnot [long]) -or $Policy.schemaVersion -notin @(2,3) -or
         [string]::IsNullOrWhiteSpace([string]$Policy.policyId)) {
         throw 'Shared policy version or identity is invalid.'
     }
@@ -92,7 +94,22 @@ function Resolve-PTVMobileSharedPolicy {
             Assert-PTVMobilePolicyFields $project @('projectId','state','reason')
             if ([string]::IsNullOrWhiteSpace([string]$project.reason)) { throw 'HOLD reason is absent.' }
         } elseif ($project.state -ceq 'ACTIVE') {
-            Assert-PTVMobilePolicyFields $project @('projectId','state','sourceRoot','gitCommonDir','remote','applicationId','versionSource','artifactRoots','allowedModes','packageEnabled','externalOperations')
+            if ($Policy.schemaVersion -eq 2) {
+                Assert-PTVMobilePolicyFields $project @('projectId','state','sourceRoot','gitCommonDir','remote','applicationId','versionSource','artifactRoots','allowedModes','packageEnabled','externalOperations')
+            } else {
+                Assert-PTVMobilePolicyFields $project @('projectId','state','sourceRoot','gitCommonDir','remote','applicationId','versionSource','artifactRoots','permissions')
+                Assert-PTVMobilePolicyFields $project.permissions @('sourceEdit','localBuild','debugPackage','testDeviceInstall','testDeploy125','githubPublish','productionDeploy50')
+                foreach ($permission in @('sourceEdit','localBuild','debugPackage','testDeviceInstall','testDeploy125','githubPublish','productionDeploy50')) {
+                    if ($project.permissions.$permission -isnot [bool]) { throw 'Shared project permission must be a boolean.' }
+                }
+                if ($id -eq 'PTV_WEBOS' -and $project.permissions.debugPackage) {
+                    throw 'webOS cannot authorize Android debug packaging.'
+                }
+                if ($project.permissions.testDeviceInstall -or $project.permissions.testDeploy125 -or
+                    $project.permissions.githubPublish -or $project.permissions.productionDeploy50) {
+                    throw 'Shared v3 policy cannot grant unimplemented external operations.'
+                }
+            }
             if ($id -ceq 'PTV_WEB') { throw 'PTV Web authority remains on HOLD.' }
             $projectRoot = ConvertTo-PTVMobilePolicyPath ([string]$project.sourceRoot)
             $projectCommon = ConvertTo-PTVMobilePolicyPath ([string]$project.gitCommonDir)
@@ -110,26 +127,42 @@ function Resolve-PTVMobileSharedPolicy {
             if ([string]::IsNullOrWhiteSpace([string]$project.remote) -or
                 [string]::IsNullOrWhiteSpace([string]$project.applicationId) -or
                 [string]::IsNullOrWhiteSpace([string]$project.versionSource) -or
-                $project.artifactRoots -isnot [array] -or @($project.artifactRoots).Count -lt 1 -or
-                $project.allowedModes -isnot [array] -or $project.externalOperations -isnot [array] -or
-                $project.packageEnabled -isnot [bool] -or $project.packageEnabled -or
-                @($project.externalOperations).Count -ne 0) {
+                $project.artifactRoots -isnot [array] -or @($project.artifactRoots).Count -lt 1) {
                 throw 'Shared project source or permissions are invalid.'
             }
             foreach ($artifactPath in $project.artifactRoots) { $null = ConvertTo-PTVMobilePolicyPath ([string]$artifactPath) }
-            $modes = @($project.allowedModes)
-            if (@($modes | Select-Object -Unique).Count -ne $modes.Count -or
-                @($modes | Where-Object { $_ -cnotin @('Edit','Build') }).Count -ne 0) {
-                throw 'Shared project modes are invalid or privileged.'
+            if ($Policy.schemaVersion -eq 2) {
+                if ($project.allowedModes -isnot [array] -or $project.externalOperations -isnot [array] -or
+                    $project.packageEnabled -isnot [bool] -or $project.packageEnabled -or
+                    @($project.externalOperations).Count -ne 0) {
+                    throw 'Shared project source or permissions are invalid.'
+                }
+                $modes = @($project.allowedModes)
+                if (@($modes | Select-Object -Unique).Count -ne $modes.Count -or
+                    @($modes | Where-Object { $_ -cnotin @('Edit','Build') }).Count -ne 0) {
+                    throw 'Shared project modes are invalid or privileged.'
+                }
             }
         } else {
             throw 'Shared project state is invalid.'
         }
         if ($id -ceq 'PTV_ANDROID_MOBILE') { $selected = $project }
     }
-    if ($null -eq $selected -or $selected.state -cne 'ACTIVE' -or $Mode -cnotin @('Edit','Build') -or
-        @($selected.allowedModes) -cnotcontains $Mode) {
+    if ($null -eq $selected -or $selected.state -cne 'ACTIVE') {
         throw 'Shared policy does not authorize the Mobile operation.'
+    }
+    if ($Policy.schemaVersion -eq 2) {
+        if ($Mode -cnotin @('Edit','Build') -or @($selected.allowedModes) -cnotcontains $Mode) {
+            throw 'Shared policy does not authorize the Mobile operation.'
+        }
+    } else {
+        $permission = switch -CaseSensitive ($Mode) {
+            'Edit' { 'sourceEdit' }
+            'Build' { 'localBuild' }
+            'DebugPackage' { 'debugPackage' }
+            default { throw 'Shared policy does not authorize the Mobile operation.' }
+        }
+        if (-not $selected.permissions.$permission) { throw 'Shared policy does not authorize the Mobile operation.' }
     }
     if (-not (ConvertTo-PTVMobilePolicyPath $selected.sourceRoot).Equals((ConvertTo-PTVMobilePolicyPath $Root), [StringComparison]::OrdinalIgnoreCase) -or
         -not (ConvertTo-PTVMobilePolicyPath $selected.gitCommonDir).Equals((ConvertTo-PTVMobilePolicyPath $CommonDirectory), [StringComparison]::OrdinalIgnoreCase) -or
@@ -139,6 +172,14 @@ function Resolve-PTVMobileSharedPolicy {
         throw 'Shared Mobile source identity differs.'
     }
     return $selected
+}
+
+function Assert-PTVMobileDevelopmentDebugTasks {
+    param([Parameter(Mandatory = $true)][string[]]$GradleTasks)
+    if ($GradleTasks.Count -ne 1 -or
+        $GradleTasks[0] -cnotin @(':app:assembleLibreDebug', ':app:assembleProprietaryDebug')) {
+        throw 'Development packaging requires one exact approved debug APK task.'
+    }
 }
 
 function Assert-PTVMobileDebugPackageTask {

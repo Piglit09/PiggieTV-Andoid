@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('Audit', 'Edit', 'Build', 'Package', 'Install', 'Publish')]
+    [ValidateSet('Audit', 'Edit', 'Build', 'DebugPackage', 'Package', 'Install', 'Publish')]
     [string]$Mode = 'Audit',
     [string]$TargetId,
     [string]$ArtifactPath,
@@ -135,7 +135,10 @@ function Assert-SharedPolicyIfPresent {
     param([string]$CommonDirectory)
     if ($Mode -eq 'Audit' -or -not $isWindows) { return }
     $key = Get-Item -LiteralPath $sharedPolicyKey -ErrorAction SilentlyContinue
-    if ($null -eq $key) { return }
+    if ($null -eq $key) {
+        Assert-True ($Mode -ne 'DebugPackage') 'Protected shared v3 policy is required for development APK packaging.'
+        return
+    }
     foreach ($registryPath in @(
         'Registry::HKEY_LOCAL_MACHINE',
         'Registry::HKEY_LOCAL_MACHINE\SOFTWARE',
@@ -147,7 +150,7 @@ function Assert-SharedPolicyIfPresent {
     $minimum = $key.GetValue('MinimumSchemaVersion', $null)
     if ($null -ne $minimum) {
         Assert-True ($key.GetValueKind('MinimumSchemaVersion') -eq [Microsoft.Win32.RegistryValueKind]::DWord -and
-            $minimum -is [int] -and $minimum -ge 1 -and $minimum -le 2) 'Protected minimum schema marker is invalid.'
+            $minimum -is [int] -and $minimum -ge 1 -and $minimum -le 3) 'Protected minimum schema marker is invalid.'
     }
     $policyValue = $key.GetValue('PolicyJson', $null)
     if ($null -ne $policyValue) {
@@ -155,12 +158,16 @@ function Assert-SharedPolicyIfPresent {
     }
     $raw = [string]$policyValue
     if ([string]::IsNullOrWhiteSpace($raw)) {
+        Assert-True ($Mode -ne 'DebugPackage') 'Protected shared v3 policy is required for development APK packaging.'
         Assert-True ($null -eq $minimum -or $minimum -lt 2) 'Shared v2 policy is required by the protected minimum schema marker.'
         return
     }
     $shared = $raw | ConvertFrom-Json
     $minimumVersion = if ($null -eq $minimum) { 1 } else { [int]$minimum }
     $format = Resolve-PTVMobilePolicyFormat -Policy $shared -MinimumSchemaVersion $minimumVersion
+    if ($Mode -eq 'DebugPackage') {
+        Assert-True ($format -ceq 'SharedV3') 'Protected shared v3 policy is required for development APK packaging.'
+    }
     if ($format -ceq 'LegacyWebOS') { return }
     $null = Resolve-PTVMobileSharedPolicy -Policy $shared -Root $repoRoot -CommonDirectory $CommonDirectory `
         -Remote $approvedRemote -ApplicationId $approvedAppId -VersionSource 'gradle.properties:piggietv.version' `
@@ -224,6 +231,15 @@ try {
     }
 
     Assert-SharedPolicyIfPresent -CommonDirectory $commonDirectory
+
+    if ($Mode -eq 'DebugPackage') {
+        $tasks = @($GradleTaskList -split '\|' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        Assert-PTVMobileDevelopmentDebugTasks -GradleTasks $tasks
+        Assert-True (-not [string]::IsNullOrWhiteSpace($JavaHome) -and (Test-Path -LiteralPath $JavaHome -PathType Container)) 'Debug package Java home is unavailable.'
+        Assert-True (-not [string]::IsNullOrWhiteSpace($AndroidSdkRoot) -and (Test-Path -LiteralPath $AndroidSdkRoot -PathType Container)) 'Debug package Android SDK is unavailable.'
+        Assert-NoReparseAncestor $JavaHome
+        Assert-NoReparseAncestor $AndroidSdkRoot
+    }
 
     if ($Mode -in @('Package', 'Install', 'Publish')) {
         Assert-True ($status.Count -eq 0) 'Release packaging and external actions require clean committed source.'

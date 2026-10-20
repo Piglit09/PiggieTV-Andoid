@@ -25,7 +25,7 @@ function Invoke-GradleCase {
 }
 
 Invoke-GradleCase 'ordinary local diagnostic build guarded' @('help') 0 'PTV_MOBILE_PREFLIGHT=PASS MODE=Build'
-Invoke-GradleCase 'debug APK task denied without exact protected approval' @(':app:assembleLibreDebug','--dry-run') 1 'PTV Mobile workspace preflight rejected Package'
+Invoke-GradleCase 'debug APK task denied until protected development policy is installed' @(':app:assembleLibreDebug','--dry-run') 1 'PTV Mobile workspace preflight rejected DebugPackage'
 Invoke-GradleCase 'explicit configuration cache denied' @('help','--configuration-cache') 1 'configuration cache is disabled'
 Invoke-GradleCase 'configuration cache retry remains denied' @('help','--configuration-cache') 1 'configuration cache is disabled'
 Invoke-GradleCase 'debug package version override denied' @(':app:assembleLibreDebug','--dry-run','-Ppiggietv.version=9.9.9') 1 'Unapproved Gradle package arguments'

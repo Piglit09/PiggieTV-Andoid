@@ -17,6 +17,9 @@ val ptvMode = when {
         it.startsWith("install", true) || it.startsWith("uninstall", true) ||
             it.startsWith("connected", true) || it.startsWith("device", true)
     } -> "Install"
+    gradle.startParameter.taskNames.size == 1 && gradle.startParameter.taskNames[0] in listOf(
+        ":app:assembleLibreDebug", ":app:assembleProprietaryDebug"
+    ) -> "DebugPackage"
     ptvTasks.any {
         it.equals("build", true) || it.startsWith("assemble", true) ||
             it.contains("Release", true) || it.startsWith("bundle", true) || it.startsWith("package", true) ||
@@ -33,7 +36,7 @@ val ptvBootstrapSystemProperties = mapOf(
     "user.language" to "en",
     "user.variant" to "",
 )
-if (ptvMode == "Package" && (
+if (ptvMode in listOf("Package", "DebugPackage") && (
         gradle.startParameter.projectProperties.isNotEmpty() ||
             gradle.startParameter.systemPropertiesArgs != ptvBootstrapSystemProperties ||
             gradle.startParameter.allInitScripts.isNotEmpty() ||
@@ -41,7 +44,7 @@ if (ptvMode == "Package" && (
     )) {
     throw GradleException("Unapproved Gradle package arguments: project/system overrides, init scripts, and task exclusions are denied.")
 }
-if (ptvMode == "Package") {
+if (ptvMode in listOf("Package", "DebugPackage")) {
     val sourceProperties = java.util.Properties()
     file("gradle.properties").inputStream().use { sourceProperties.load(it) }
     val sourceVersion = sourceProperties.getProperty("piggietv.version")?.trim()
@@ -59,7 +62,7 @@ val ptvPreflightArgs = mutableListOf(
     ptvPowerShell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
     "-File", ptvPreflight.absolutePath, "-Mode", ptvMode,
 )
-if (ptvMode == "Package") {
+if (ptvMode in listOf("Package", "DebugPackage")) {
     val sdkProperties = java.util.Properties()
     val localProperties = file("local.properties")
     if (localProperties.isFile) {

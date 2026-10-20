@@ -27,8 +27,8 @@ $projects = @(
 $base = [pscustomobject]@{ schemaVersion=2; policyId='fixture-v2'; issuedUtc='2026-10-19T00:00:00Z'; expiresUtc='2099-10-19T00:00:00Z'; projects=$projects; approvals=@() }
 function Copy-Policy { return (($base | ConvertTo-Json -Depth 20 -Compress) | ConvertFrom-Json) }
 function Resolve-Fixture {
-    param($Policy)
-    Resolve-PTVMobileSharedPolicy -Policy $Policy -Root $sourceRoot -CommonDirectory "$sourceRoot\.git" -Remote 'https://github.com/Piglit09/PiggieTV-Andoid.git' -ApplicationId 'com.piggietv.android' -VersionSource 'gradle.properties:piggietv.version' -ArtifactRoot $artifactRoot -Mode Build
+    param($Policy, [string]$Mode = 'Build')
+    Resolve-PTVMobileSharedPolicy -Policy $Policy -Root $sourceRoot -CommonDirectory "$sourceRoot\.git" -Remote 'https://github.com/Piglit09/PiggieTV-Andoid.git' -ApplicationId 'com.piggietv.android' -VersionSource 'gradle.properties:piggietv.version' -ArtifactRoot $artifactRoot -Mode $Mode
 }
 Assert-Case 'valid exact mobile build entry' { Resolve-Fixture (Copy-Policy) } $true
 Assert-Case 'cross-project entry cannot authorize mobile' {
@@ -56,6 +56,46 @@ Assert-Case 'package permission not inferred from build' {
     $p=Copy-Policy
     Resolve-PTVMobileSharedPolicy -Policy $p -Root $sourceRoot -CommonDirectory "$sourceRoot\.git" -Remote 'https://github.com/Piglit09/PiggieTV-Andoid.git' -ApplicationId 'com.piggietv.android' -VersionSource 'gradle.properties:piggietv.version' -ArtifactRoot $artifactRoot -Mode Package
 } $false
+$development=Copy-Policy
+$development.schemaVersion=3
+foreach ($entry in $development.projects) {
+    if ($entry.state -cne 'ACTIVE') { continue }
+    foreach ($name in @('allowedModes','packageEnabled','externalOperations')) { $entry.PSObject.Properties.Remove($name) }
+    $entry | Add-Member -NotePropertyName permissions -NotePropertyValue ([pscustomobject]@{
+        sourceEdit=$true; localBuild=$true
+        debugPackage=($entry.projectId -cne 'PTV_WEBOS')
+        testDeviceInstall=$false; testDeploy125=$false
+        githubPublish=$false; productionDeploy50=$false
+    })
+}
+function Copy-DevelopmentPolicy { return (($development | ConvertTo-Json -Depth 20 -Compress) | ConvertFrom-Json) }
+Assert-Case 'proposed v3 mobile debug packaging is project scoped' {
+    Resolve-Fixture (Copy-DevelopmentPolicy) 'DebugPackage'
+} $true
+Assert-Case 'proposed v3 denies release packaging' {
+    Resolve-Fixture (Copy-DevelopmentPolicy) 'Package'
+} $false
+Assert-Case 'v3 mobile debug packaging denied when its permission is false' {
+    $p=Copy-DevelopmentPolicy; $p.projects[-1].permissions.debugPackage=$false; Resolve-Fixture $p 'DebugPackage'
+} $false
+Assert-Case 'v3 mobile debug packaging denied by webOS permission substitution' {
+    $p=Copy-DevelopmentPolicy; $p.projects[-1].permissions=$p.projects[2].permissions; Resolve-Fixture $p 'DebugPackage'
+} $false
+Assert-Case 'v3 production permission is not accepted for Mobile development' {
+    $p=Copy-DevelopmentPolicy; $p.projects[-1].permissions.productionDeploy50=$true; Resolve-Fixture $p 'DebugPackage'
+} $false
+Assert-Case 'v3 permission values must be booleans' {
+    $p=Copy-DevelopmentPolicy; $p.projects[-1].permissions.debugPackage='true'; Resolve-Fixture $p 'DebugPackage'
+} $false
+Assert-Case 'v3 exact debug task accepted' {
+    Assert-PTVMobileDevelopmentDebugTasks -GradleTasks @(':app:assembleLibreDebug')
+} $true
+Assert-Case 'v3 release task cannot become a debug package' {
+    Assert-PTVMobileDevelopmentDebugTasks -GradleTasks @(':app:assembleLibreRelease')
+} $false
+Assert-Case 'v3 mixed debug tasks are denied' {
+    Assert-PTVMobileDevelopmentDebugTasks -GradleTasks @(':app:assembleLibreDebug', ':app:assembleProprietaryDebug')
+} $false
 $legacy=[pscustomobject]@{ projectId='PTV_WEBOS'; sourceRoot='C:\Users\Piggie\Documents\GitHub\PiggieTV-WebOS' }
 Assert-Case 'legacy webOS format recognized before operator v2 floor' {
     $format=Resolve-PTVMobilePolicyFormat -Policy $legacy -MinimumSchemaVersion 1
@@ -67,6 +107,10 @@ Assert-Case 'legacy format denied after protected v2 floor' {
 Assert-Case 'explicit v2 format selected after protected v2 floor' {
     $format=Resolve-PTVMobilePolicyFormat -Policy (Copy-Policy) -MinimumSchemaVersion 2
     if ($format -cne 'SharedV2') { throw 'Wrong policy format.' }
+} $true
+Assert-Case 'explicit v3 format selected after protected v2 floor' {
+    $format=Resolve-PTVMobilePolicyFormat -Policy (Copy-DevelopmentPolicy) -MinimumSchemaVersion 2
+    if ($format -cne 'SharedV3') { throw 'Wrong policy format.' }
 } $true
 Assert-Case 'partial v2 marker cannot fall back' {
     Resolve-PTVMobilePolicyFormat -Policy ([pscustomobject]@{ projects=@() }) -MinimumSchemaVersion 1
