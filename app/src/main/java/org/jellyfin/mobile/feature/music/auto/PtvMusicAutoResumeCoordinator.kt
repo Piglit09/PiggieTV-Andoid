@@ -14,10 +14,19 @@ class PtvMusicAutoResumeCoordinator(
 ) {
     private val restoreMutex = Mutex()
     private var restoreAttempted = false
+    private var restoreAttemptedOwner: PtvMusicAutoQueueOwner? = null
 
     suspend fun restoreQueueIfNeeded(): PtvMusicAutoRestoreResult = restoreMutex.withLock {
+        val currentOwner = resumeStore.currentLocalQueueOwner()
+        alignRestoreAttemptOwner(currentOwner)
         if (playbackController.state.value.hasCurrent) {
-            return@withLock PtvMusicAutoRestoreResult.AlreadyActive
+            if (playbackController.isCurrentQueueOwnedByAuthenticatedUser()) {
+                return@withLock PtvMusicAutoRestoreResult.AlreadyActive
+            }
+            playbackController.discardQueueIfOwnershipChanged()
+            if (playbackController.state.value.hasCurrent) {
+                return@withLock PtvMusicAutoRestoreResult.Failed
+            }
         }
         if (restoreAttempted) {
             return@withLock PtvMusicAutoRestoreResult.AlreadyAttempted
@@ -26,6 +35,12 @@ class PtvMusicAutoResumeCoordinator(
         if (savedState == null) {
             restoreAttempted = true
             return@withLock PtvMusicAutoRestoreResult.NoSavedState.also {
+                resumeStore.markRestoreStatus(it.message)
+            }
+        }
+        val expectedOwner = savedState.queueOwnerOrNull()
+        if (expectedOwner == null || resumeStore.currentLocalQueueOwner() != expectedOwner) {
+            return@withLock PtvMusicAutoRestoreResult.Failed.also {
                 resumeStore.markRestoreStatus(it.message)
             }
         }
@@ -40,34 +55,7 @@ class PtvMusicAutoResumeCoordinator(
         }
 
         runCatching {
-            val restoredItems = repository.loadItems(savedIds)
-                .filter(MusicItem::isPlayable)
-            val missingCount = savedIds.size - restoredItems.size
-            if (restoredItems.isEmpty()) {
-                resumeStore.clearPlaybackState()
-                PtvMusicAutoRestoreResult.NoPlayableItems
-            } else {
-                val restoredCurrentIndex = restoredItems.indexOfFirst { item ->
-                    item.id.toString() == savedState.currentItemId
-                }.takeIf { index -> index >= 0 }
-                    ?: savedState.currentIndex.coerceIn(0, restoredItems.lastIndex)
-
-                val restored = playbackController.restoreQueue(
-                    queue = restoredItems,
-                    currentIndex = restoredCurrentIndex,
-                    positionMs = savedState.positionMs,
-                    shuffleEnabled = savedState.shuffleEnabled,
-                    repeatMode = savedState.parsedRepeatMode,
-                )
-                if (restored) {
-                    PtvMusicAutoRestoreResult.Restored(
-                        restoredCount = restoredItems.size,
-                        missingCount = missingCount.coerceAtLeast(0),
-                    )
-                } else {
-                    PtvMusicAutoRestoreResult.Failed
-                }
-            }
+            restoreSavedItems(savedState, expectedOwner)
         }.fold(
             onSuccess = { result ->
                 restoreAttempted = result != PtvMusicAutoRestoreResult.Failed
@@ -83,6 +71,48 @@ class PtvMusicAutoResumeCoordinator(
                 }
             },
         )
+    }
+
+    private fun alignRestoreAttemptOwner(currentOwner: PtvMusicAutoQueueOwner?) {
+        if (restoreAttemptedOwner == currentOwner) return
+        restoreAttemptedOwner = currentOwner
+        restoreAttempted = false
+    }
+
+    private suspend fun restoreSavedItems(
+        savedState: PtvMusicAutoResumeState,
+        expectedOwner: PtvMusicAutoQueueOwner,
+    ): PtvMusicAutoRestoreResult {
+        val savedIds = savedState.queueUuids
+        val restoredItems = repository.loadItems(savedIds).filter(MusicItem::isPlayable)
+        val missingCount = savedIds.size - restoredItems.size
+        if (resumeStore.currentLocalQueueOwner() != expectedOwner) return PtvMusicAutoRestoreResult.Failed
+        if (restoredItems.isEmpty()) {
+            resumeStore.clearPlaybackState()
+            return PtvMusicAutoRestoreResult.NoPlayableItems
+        }
+
+        val restoredCurrentIndex = restoredItems.indexOfFirst { item ->
+            item.id.toString() == savedState.currentItemId
+        }.takeIf { index -> index >= 0 }
+            ?: savedState.currentIndex.coerceIn(0, restoredItems.lastIndex)
+
+        val restored = playbackController.restoreQueue(
+            queue = restoredItems,
+            currentIndex = restoredCurrentIndex,
+            positionMs = savedState.positionMs,
+            shuffleEnabled = savedState.shuffleEnabled,
+            repeatMode = savedState.parsedRepeatMode,
+            expectedOwner = expectedOwner,
+        )
+        return if (restored) {
+            PtvMusicAutoRestoreResult.Restored(
+                restoredCount = restoredItems.size,
+                missingCount = missingCount.coerceAtLeast(0),
+            )
+        } else {
+            PtvMusicAutoRestoreResult.Failed
+        }
     }
 }
 

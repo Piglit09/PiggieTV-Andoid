@@ -111,6 +111,11 @@ class SettingsFragment :
             titleRes = R.string.pref_android_auto_music_status_title
             summary = androidAutoStatusSummary()
         }
+        pref(PREF_ANDROID_AUTO_DIAGNOSTICS_EXPORT) {
+            titleRes = R.string.pref_android_auto_diagnostics_export_title
+            summaryRes = R.string.pref_android_auto_diagnostics_export_summary
+            defaultOnClick { shareAndroidAutoDiagnostics() }
+        }
         categoryHeader(PREF_CATEGORY_VIDEO_PLAYER) {
             titleRes = R.string.pref_category_video_player
         }
@@ -406,6 +411,30 @@ class SettingsFragment :
         return listOfNotNull(connection, queue, restore, error, runtime).joinToString("\n")
     }
 
+    private fun shareAndroidAutoDiagnostics() {
+        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(
+                Intent.EXTRA_TEXT,
+                autoResumeStore.diagnosticReport(Constants.APP_INFO_VERSION),
+            )
+        }
+        runCatching {
+            startActivity(
+                Intent.createChooser(
+                    shareIntent,
+                    getString(R.string.pref_android_auto_diagnostics_export_title),
+                ),
+            )
+        }.onFailure {
+            Toast.makeText(
+                requireContext(),
+                R.string.pref_android_auto_diagnostics_export_failed,
+                Toast.LENGTH_LONG,
+            ).show()
+        }
+    }
+
     private fun libraryUsernameSummary(): String =
         appPreferences.libraryUsername ?: getString(R.string.pref_library_not_set)
 
@@ -437,6 +466,7 @@ class SettingsFragment :
     }
 
     companion object {
+        private const val PREF_ANDROID_AUTO_DIAGNOSTICS_EXPORT = "pref_android_auto_diagnostics_export"
         const val PREF_CATEGORY_MUSIC_PLAYER = "pref_category_music"
         const val PREF_CATEGORY_VIDEO_PLAYER = "pref_category_video"
         const val PREF_CATEGORY_LIBRARY = "pref_category_library"

@@ -11,11 +11,13 @@ import io.mockk.mockk
 import io.mockk.verify
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
+import org.jellyfin.mobile.feature.music.auto.PtvMusicAutoQueueOwner
 import org.jellyfin.sdk.api.client.ApiClient
 import org.jellyfin.sdk.model.api.BaseItemKind
 import org.junit.jupiter.api.Test
 import java.io.IOException
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicReference
 
 class MusicSongActionsTest {
     @Test
@@ -154,6 +156,54 @@ class MusicSongActionsTest {
 
         result.queue shouldBe listOf(seed, visible)
         verify(exactly = 0) { playbackController.replaceQueueKeepingCurrent(any(), any()) }
+    }
+
+    @Test
+    fun `Auto favorite does not update resident playback after account changes during write`() = runBlocking<Unit> {
+        val seed = track(SELECTED_ID)
+        val ownerA = PtvMusicAutoQueueOwner(1, 2)
+        val owner = AtomicReference(ownerA)
+        val repository = mockk<MusicRepository>()
+        coEvery { repository.setFavorite(seed, true) } coAnswers {
+            owner.set(PtvMusicAutoQueueOwner(1, 3))
+            seed.copy(isFavorite = true)
+        }
+        val playbackController = mockk<MusicPlaybackController>(relaxed = true)
+        val handler = MusicSongActionHandler(repository, playbackController)
+
+        val error = runCatching {
+            handler.execute(
+                request = MusicSongActionRequest.forItem(MusicSongAction.TOGGLE_FAVORITE, seed, "androidAuto"),
+                item = seed,
+                queue = listOf(seed),
+                expectedOwner = ownerA,
+                ownerStillCurrent = { owner.get() == ownerA },
+            )
+        }.exceptionOrNull()
+
+        error.shouldBeInstanceOf<IllegalStateException>()
+        verify(exactly = 0) { playbackController.updateItem(any()) }
+    }
+
+    @Test
+    fun `Auto playlist action refuses to write after account changes before mutation`() = runBlocking<Unit> {
+        val seed = track(SELECTED_ID)
+        val repository = mockk<MusicRepository>()
+        val playbackController = mockk<MusicPlaybackController>(relaxed = true)
+        val handler = MusicSongActionHandler(repository, playbackController)
+
+        val error = runCatching {
+            handler.execute(
+                request = MusicSongActionRequest.forItem(MusicSongAction.ADD_TO_PLAYLIST, seed, "androidAuto"),
+                item = seed,
+                queue = listOf(seed),
+                expectedOwner = PtvMusicAutoQueueOwner(1, 2),
+                ownerStillCurrent = { false },
+            )
+        }.exceptionOrNull()
+
+        error.shouldBeInstanceOf<IllegalStateException>()
+        io.mockk.coVerify(exactly = 0) { repository.addToAutoPlaylist(any(), any(), any()) }
     }
 
     @Test

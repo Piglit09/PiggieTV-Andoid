@@ -168,19 +168,9 @@ internal data class PtvMusicAutoRootItem(
 
 internal val PTV_MUSIC_AUTO_ROOT_ITEMS: List<PtvMusicAutoRootItem> = listOf(
     PtvMusicAutoRootItem(
-        mediaId = PtvMusicAutoIds.RECOMMENDED_MIXES,
-        title = "Recommended Mixes",
-        subtitle = "Driving-safe PTV queues",
-    ),
-    PtvMusicAutoRootItem(
-        mediaId = PtvMusicAutoMix.LATEST.mediaId,
-        title = "Latest Music",
-        subtitle = "Newest tracks in your library",
-    ),
-    PtvMusicAutoRootItem(
-        mediaId = PtvMusicAutoCategory.FAVORITES.mediaId,
-        title = PtvMusicAutoCategory.FAVORITES.title,
-        subtitle = PtvMusicAutoCategory.FAVORITES.subtitle,
+        mediaId = PtvMusicAutoCategory.PLAYLISTS.mediaId,
+        title = PtvMusicAutoCategory.PLAYLISTS.title,
+        subtitle = PtvMusicAutoCategory.PLAYLISTS.subtitle,
     ),
     PtvMusicAutoRootItem(
         mediaId = PtvMusicAutoCategory.RECENTLY_PLAYED.mediaId,
@@ -188,9 +178,14 @@ internal val PTV_MUSIC_AUTO_ROOT_ITEMS: List<PtvMusicAutoRootItem> = listOf(
         subtitle = PtvMusicAutoCategory.RECENTLY_PLAYED.subtitle,
     ),
     PtvMusicAutoRootItem(
-        mediaId = PtvMusicAutoCategory.GENRES.mediaId,
-        title = PtvMusicAutoCategory.GENRES.title,
-        subtitle = PtvMusicAutoCategory.GENRES.subtitle,
+        mediaId = PtvMusicAutoCategory.FAVORITES.mediaId,
+        title = PtvMusicAutoCategory.FAVORITES.title,
+        subtitle = PtvMusicAutoCategory.FAVORITES.subtitle,
+    ),
+    PtvMusicAutoRootItem(
+        mediaId = PtvMusicAutoMix.LATEST.mediaId,
+        title = "Latest Music",
+        subtitle = "Newest tracks in your library",
     ),
     PtvMusicAutoRootItem(
         mediaId = PtvMusicAutoCategory.ALBUMS.mediaId,
@@ -203,9 +198,14 @@ internal val PTV_MUSIC_AUTO_ROOT_ITEMS: List<PtvMusicAutoRootItem> = listOf(
         subtitle = PtvMusicAutoCategory.ARTISTS.subtitle,
     ),
     PtvMusicAutoRootItem(
-        mediaId = PtvMusicAutoCategory.PLAYLISTS.mediaId,
-        title = PtvMusicAutoCategory.PLAYLISTS.title,
-        subtitle = PtvMusicAutoCategory.PLAYLISTS.subtitle,
+        mediaId = PtvMusicAutoCategory.GENRES.mediaId,
+        title = PtvMusicAutoCategory.GENRES.title,
+        subtitle = PtvMusicAutoCategory.GENRES.subtitle,
+    ),
+    PtvMusicAutoRootItem(
+        mediaId = PtvMusicAutoIds.RECOMMENDED_MIXES,
+        title = "Recommended Mixes",
+        subtitle = "Driving-safe PTV queues",
     ),
     PtvMusicAutoRootItem(
         mediaId = PtvMusicAutoIds.AUTO_PICKS,

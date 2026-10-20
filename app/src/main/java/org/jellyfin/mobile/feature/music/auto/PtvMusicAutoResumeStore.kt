@@ -18,6 +18,12 @@ class PtvMusicAutoResumeStore(context: Context, private val appPreferences: AppP
     private val sharedPreferences: SharedPreferences =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
+    internal fun currentLocalQueueOwner(): PtvMusicAutoQueueOwner? {
+        val serverId = appPreferences.currentServerId ?: return null
+        val userId = appPreferences.currentUserId ?: return null
+        return PtvMusicAutoQueueOwner(serverId, userId)
+    }
+
     @Suppress("FunctionExpressionBody")
     fun loadPlaybackState(): PtvMusicAutoResumeState? {
         val state = sharedPreferences.getString(KEY_PLAYBACK_STATE, null)
@@ -32,44 +38,68 @@ class PtvMusicAutoResumeStore(context: Context, private val appPreferences: AppP
         return state
     }
 
-    fun savePlaybackState(state: PtvMusicAutoResumeState) {
-        val serverId = appPreferences.currentServerId
-        val userId = appPreferences.currentUserId
-        if (serverId == null || userId == null) {
-            clearPlaybackState()
-            return
-        }
+    fun savePlaybackState(state: PtvMusicAutoResumeState, expectedOwner: PtvMusicAutoQueueOwner): Boolean {
+        if (currentLocalQueueOwner() != expectedOwner) return false
         sharedPreferences.edit {
             putString(
                 KEY_PLAYBACK_STATE,
-                PtvMusicAutoResumeStateSerializer.encode(state.withOwner(serverId, userId).trimmed()),
+                PtvMusicAutoResumeStateSerializer.encode(
+                    state.withOwner(expectedOwner.serverId, expectedOwner.userId).trimmed(),
+                ),
             )
         }
+        return true
     }
 
-    fun savePlaybackState(playbackState: MusicPlaybackState, nowMs: Long = System.currentTimeMillis()) {
-        PtvMusicAutoResumeState.fromPlaybackState(playbackState, nowMs)?.let(::savePlaybackState)
-    }
+    fun savePlaybackState(
+        playbackState: MusicPlaybackState,
+        expectedOwner: PtvMusicAutoQueueOwner,
+        nowMs: Long = System.currentTimeMillis(),
+    ): Boolean = PtvMusicAutoResumeState.fromPlaybackState(playbackState, nowMs)
+        ?.let { state -> savePlaybackState(state, expectedOwner) }
+        ?: false
 
     fun clearPlaybackState() {
         sharedPreferences.edit { remove(KEY_PLAYBACK_STATE) }
     }
 
     fun markAutoConnection(nowMs: Long = System.currentTimeMillis()) {
+        val previouslyConnected = sharedPreferences.getLong(KEY_LAST_CONNECTION_MS, -1) > 0
         sharedPreferences.edit { putLong(KEY_LAST_CONNECTION_MS, nowMs) }
+        val eventType = if (previouslyConnected) {
+            PtvMusicAutoDiagnosticEventType.RECONNECTED
+        } else {
+            PtvMusicAutoDiagnosticEventType.CONNECTED
+        }
+        recordDiagnosticEvent(
+            eventType,
+            nowMs,
+        )
     }
 
     fun markRestoreStatus(message: String) {
         sharedPreferences.edit { putString(KEY_LAST_RESTORE_STATUS, message) }
+        recordDiagnosticEvent(
+            when {
+                message.startsWith("Restored ") -> PtvMusicAutoDiagnosticEventType.RESTORE_SUCCEEDED
+                message == "Android Auto queue restore failed." -> PtvMusicAutoDiagnosticEventType.RESTORE_FAILED
+                else -> PtvMusicAutoDiagnosticEventType.RESTORE_STATUS
+            },
+        )
     }
 
     fun markLastPlaybackError(message: String?) {
+        val hadError = !sharedPreferences.getString(KEY_LAST_PLAYBACK_ERROR, null).isNullOrBlank()
         sharedPreferences.edit {
             if (message.isNullOrBlank()) {
                 remove(KEY_LAST_PLAYBACK_ERROR)
             } else {
                 putString(KEY_LAST_PLAYBACK_ERROR, message)
             }
+        }
+        when {
+            !message.isNullOrBlank() -> recordDiagnosticEvent(PtvMusicAutoDiagnosticEventType.PLAYBACK_ERROR)
+            hadError -> recordDiagnosticEvent(PtvMusicAutoDiagnosticEventType.PLAYBACK_RECOVERED)
         }
     }
 
@@ -82,6 +112,7 @@ class PtvMusicAutoResumeStore(context: Context, private val appPreferences: AppP
         currentTrackId: String?,
         currentTrackTitle: String?,
     ) {
+        val oldQueueCount = sharedPreferences.getInt(KEY_ACTIVE_QUEUE_COUNT, 0)
         sharedPreferences.edit {
             putString(KEY_CONTROLLER_INSTANCE_ID, controllerInstanceId)
             putString(KEY_REPOSITORY_INSTANCE_ID, repositoryInstanceId)
@@ -103,6 +134,9 @@ class PtvMusicAutoResumeStore(context: Context, private val appPreferences: AppP
                 putString(KEY_CURRENT_TRACK_TITLE, currentTrackTitle)
             }
         }
+        if (activeQueueCount != oldQueueCount) {
+            recordDiagnosticEvent(PtvMusicAutoDiagnosticEventType.PLAYER_QUEUE_CHANGED)
+        }
     }
 
     fun markBrowseStatus(source: String, itemCount: Int) {
@@ -110,14 +144,68 @@ class PtvMusicAutoResumeStore(context: Context, private val appPreferences: AppP
             putString(KEY_LAST_BROWSE_SOURCE, source)
             putInt(KEY_LAST_BROWSE_ITEM_COUNT, itemCount)
         }
+        recordDiagnosticEvent(
+            when {
+                source.startsWith("cache-failure:") -> PtvMusicAutoDiagnosticEventType.BROWSE_ERROR
+
+                source.startsWith("cache-") || source.startsWith("fallback-") ->
+                    PtvMusicAutoDiagnosticEventType.BROWSE_CACHE
+
+                source.startsWith("fresh") -> PtvMusicAutoDiagnosticEventType.BROWSE_FRESH
+
+                else -> PtvMusicAutoDiagnosticEventType.BROWSE_EVENT
+            },
+        )
     }
 
     fun markSessionCommand(command: String) {
         sharedPreferences.edit { putString(KEY_LAST_SESSION_COMMAND, command) }
+        recordDiagnosticEvent(PtvMusicAutoDiagnosticEventType.SESSION_COMMAND)
     }
 
     fun markServiceLifecycle(event: String) {
         sharedPreferences.edit { putString(KEY_LAST_SERVICE_EVENT, event) }
+        recordDiagnosticEvent(
+            when {
+                event.startsWith("created ") -> PtvMusicAutoDiagnosticEventType.SERVICE_STARTED
+                event.startsWith("destroyed ") -> PtvMusicAutoDiagnosticEventType.SERVICE_STOPPED
+                else -> PtvMusicAutoDiagnosticEventType.SERVICE_EVENT
+            },
+        )
+    }
+
+    /** This report intentionally omits every stored free-form string and media/account identifier. */
+    fun diagnosticReport(appVersion: String, nowMs: Long = System.currentTimeMillis()): String =
+        PtvMusicAutoDiagnosticReport.render(
+            status = debugStatus(),
+            events = PtvMusicAutoDiagnosticEvents.decode(
+                sharedPreferences.getString(KEY_DIAGNOSTIC_EVENTS, null),
+            ),
+            appVersion = appVersion,
+            generatedAtMs = nowMs,
+        )
+
+    private fun recordDiagnosticEvent(
+        type: PtvMusicAutoDiagnosticEventType,
+        nowMs: Long = System.currentTimeMillis(),
+    ) {
+        runCatching {
+            synchronized(sharedPreferences) {
+                val current = PtvMusicAutoDiagnosticEvents.decode(
+                    sharedPreferences.getString(KEY_DIAGNOSTIC_EVENTS, null),
+                )
+                val updated = PtvMusicAutoDiagnosticEvents.append(
+                    current,
+                    PtvMusicAutoDiagnosticEvent(nowMs, type),
+                )
+                sharedPreferences.edit {
+                    putString(KEY_DIAGNOSTIC_EVENTS, PtvMusicAutoDiagnosticEvents.encode(updated))
+                }
+            }
+        }.onFailure {
+            // Diagnostics must never interrupt media playback, and exception text may contain private data.
+            Timber.w("PTV Music Auto could not store a diagnostic event")
+        }
     }
 
     fun debugStatus(): PtvMusicAutoDebugStatus {
@@ -164,7 +252,13 @@ class PtvMusicAutoResumeStore(context: Context, private val appPreferences: AppP
         const val KEY_LAST_BROWSE_ITEM_COUNT = "last_browse_item_count"
         const val KEY_LAST_SESSION_COMMAND = "last_session_command"
         const val KEY_LAST_SERVICE_EVENT = "last_service_event"
+        const val KEY_DIAGNOSTIC_EVENTS = "diagnostic_events"
     }
+}
+
+/** Local account row identities only. Never log or export their raw values. */
+data class PtvMusicAutoQueueOwner(val serverId: Long, val userId: Long) {
+    override fun toString(): String = "PtvMusicAutoQueueOwner([REDACTED])"
 }
 
 @Serializable
@@ -198,6 +292,9 @@ data class PtvMusicAutoResumeState(
     )
 
     fun belongsTo(serverId: Long, userId: Long): Boolean = ownerServerId == serverId && ownerUserId == userId
+
+    internal fun queueOwnerOrNull(): PtvMusicAutoQueueOwner? =
+        ownerServerId?.let { serverId -> ownerUserId?.let { userId -> PtvMusicAutoQueueOwner(serverId, userId) } }
 
     fun withOwner(serverId: Long, userId: Long): PtvMusicAutoResumeState = copy(
         ownerServerId = serverId,
@@ -258,6 +355,76 @@ data class PtvMusicAutoDebugStatus(
     val lastSessionCommand: String?,
     val lastServiceEvent: String?,
 )
+
+@Serializable
+internal data class PtvMusicAutoDiagnosticEvent(val timestampMs: Long, val type: PtvMusicAutoDiagnosticEventType)
+
+/** Only fixed categories are persisted. Caller-supplied messages, media IDs and URLs never enter this log. */
+internal enum class PtvMusicAutoDiagnosticEventType {
+    CONNECTED,
+    RECONNECTED,
+    RESTORE_STATUS,
+    RESTORE_SUCCEEDED,
+    RESTORE_FAILED,
+    PLAYBACK_ERROR,
+    PLAYBACK_RECOVERED,
+    PLAYER_QUEUE_CHANGED,
+    BROWSE_EVENT,
+    BROWSE_FRESH,
+    BROWSE_CACHE,
+    BROWSE_ERROR,
+    SESSION_COMMAND,
+    SERVICE_STARTED,
+    SERVICE_STOPPED,
+    SERVICE_EVENT,
+}
+
+internal object PtvMusicAutoDiagnosticEvents {
+    const val MAX_EVENTS = 32
+
+    private val json = Json { ignoreUnknownKeys = true }
+
+    fun append(
+        current: List<PtvMusicAutoDiagnosticEvent>,
+        event: PtvMusicAutoDiagnosticEvent,
+    ): List<PtvMusicAutoDiagnosticEvent> = (current + event).takeLast(MAX_EVENTS)
+
+    fun encode(events: List<PtvMusicAutoDiagnosticEvent>): String = json.encodeToString(events.takeLast(MAX_EVENTS))
+
+    fun decode(value: String?): List<PtvMusicAutoDiagnosticEvent> = value?.let { stored ->
+        runCatching { json.decodeFromString<List<PtvMusicAutoDiagnosticEvent>>(stored) }
+            .getOrNull()
+            ?.takeLast(MAX_EVENTS)
+    }.orEmpty()
+}
+
+internal object PtvMusicAutoDiagnosticReport {
+    fun render(
+        status: PtvMusicAutoDebugStatus,
+        events: List<PtvMusicAutoDiagnosticEvent>,
+        appVersion: String,
+        generatedAtMs: Long,
+    ): String = buildString {
+        val safeVersion = appVersion.take(32).filter { character ->
+            character.isDigit() || character == '.' || character == '-' || character.isLetter()
+        }
+        appendLine("PiggieTV Android Auto diagnostics")
+        appendLine("Generated (epoch ms): $generatedAtMs")
+        appendLine("App version: $safeVersion")
+        appendLine("Service registered: ${status.serviceRegistered}")
+        appendLine("Last connection (epoch ms): ${status.lastConnectionTimestampMs ?: "none"}")
+        appendLine("Saved queue size: ${status.savedQueueSize}")
+        appendLine("Active queue size: ${status.activeQueueCount}")
+        appendLine("Last browse result count: ${status.lastBrowseItemCount ?: "none"}")
+        appendLine("Restore status present: ${!status.lastRestoreStatus.isNullOrBlank()}")
+        appendLine("Playback error present: ${!status.lastPlaybackError.isNullOrBlank()}")
+        appendLine("Recent events (oldest first, maximum ${PtvMusicAutoDiagnosticEvents.MAX_EVENTS}):")
+        events.takeLast(PtvMusicAutoDiagnosticEvents.MAX_EVENTS).forEach { event ->
+            appendLine("${event.timestampMs} ${event.type.name}")
+        }
+        appendLine("Raw errors, account and server details, media identity, and URLs are excluded.")
+    }
+}
 
 internal object PtvMusicAutoResumeStateSerializer {
     private val json = Json {
