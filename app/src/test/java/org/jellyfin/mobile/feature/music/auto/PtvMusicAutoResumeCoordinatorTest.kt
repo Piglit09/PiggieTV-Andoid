@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
 import org.jellyfin.mobile.feature.music.MusicItem
 import org.jellyfin.mobile.feature.music.MusicPlaybackController
+import org.jellyfin.mobile.feature.music.MusicPlaybackQueueOrder
 import org.jellyfin.mobile.feature.music.MusicPlaybackState
 import org.jellyfin.mobile.feature.music.MusicRepeatMode
 import org.jellyfin.mobile.feature.music.MusicRepository
@@ -189,6 +190,204 @@ class PtvMusicAutoResumeCoordinatorTest {
         verify(exactly = 1) {
             playbackController.restoreQueue(listOf(first, first), 1, 12_000, false, MusicRepeatMode.NONE, owner)
         }
+    }
+
+    @Test
+    fun `playlist restore reloads the full authorized queue beyond the saved window`() = runBlocking<Unit> {
+        val playlistId = UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+        val playlist = playableItem(playlistId).copy(type = BaseItemKind.PLAYLIST, isPlayable = false, isFolder = true)
+        val tracks = (0 until 120).map { index ->
+            playableItem(UUID.fromString("00000000-0000-0000-0000-${index.toString().padStart(12, '0')}"))
+        }
+        val owner = PtvMusicAutoQueueOwner(1, 2)
+        val source = PtvMusicAutoQueueProvenance.playlist(playlistId, tracks, fullCurrentIndex = 110)
+        val saved = savedState().copy(
+            queueItemIds = tracks.drop(20).map { it.id.toString() },
+            currentIndex = 90,
+            fullQueueSha256 = source.queueSha256,
+            fullCurrentIndex = 110,
+            queueProvenance = source,
+        )
+        val repository = mockk<MusicRepository>()
+        val playbackController = mockk<MusicPlaybackController>()
+        val resumeStore = mockk<PtvMusicAutoResumeStore>(relaxed = true)
+        every { playbackController.state } returns MutableStateFlow(MusicPlaybackState())
+        every { resumeStore.currentLocalQueueOwner() } returns owner
+        every { resumeStore.loadPlaybackState() } returns saved
+        coEvery { repository.loadItem(playlistId) } returns playlist
+        coEvery { repository.loadPlaylistQueue(playlist) } returns tracks
+        every { playbackController.restoreQueue(any(), any(), any(), any(), any(), any()) } returns true
+
+        val result = PtvMusicAutoResumeCoordinator(repository, playbackController, resumeStore)
+            .restoreQueueIfNeeded().shouldBeInstanceOf<PtvMusicAutoRestoreResult.Restored>()
+
+        result.restoredCount shouldBe 120
+        verify(exactly = 1) {
+            playbackController.restoreQueue(tracks, 110, 12_000, false, MusicRepeatMode.NONE, owner)
+        }
+        coVerify(exactly = 0) { repository.loadItems(any()) }
+    }
+
+    @Test
+    fun `shuffled playlist cold restore retains full queue and selected repeated occurrence`() = runBlocking<Unit> {
+        val playlistId = UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+        val playlist = playableItem(playlistId).copy(type = BaseItemKind.PLAYLIST, isPlayable = false, isFolder = true)
+        val authored = (0 until 120).map { index ->
+            playableItem(UUID.fromString("00000000-0000-0000-0000-${index.toString().padStart(12, '0')}"))
+        }.toMutableList().apply { this[5] = this[110] }
+        val selected = authored[110]
+        val shuffled = listOf(selected) + authored.take(110) + authored.drop(111)
+        val source = PtvMusicAutoQueueProvenance.playlist(playlistId, authored, fullCurrentIndex = 110)
+            .forQueue(shuffled, 0, authored, 110)
+        val saved = savedState().copy(
+            queueItemIds = shuffled.take(100).map { it.id.toString() },
+            currentIndex = 0,
+            shuffleEnabled = true,
+            fullQueueSha256 = source.queueSha256,
+            fullCurrentIndex = 0,
+            queueProvenance = source,
+        )
+        val owner = PtvMusicAutoQueueOwner(1, 2)
+        val repository = mockk<MusicRepository>()
+        val playbackController = mockk<MusicPlaybackController>()
+        val resumeStore = mockk<PtvMusicAutoResumeStore>(relaxed = true)
+        every { playbackController.state } returns MutableStateFlow(MusicPlaybackState())
+        every { resumeStore.currentLocalQueueOwner() } returns owner
+        every { resumeStore.loadPlaybackState() } returns saved
+        coEvery { repository.loadItem(playlistId) } returns playlist
+        coEvery { repository.loadPlaylistQueue(playlist) } returns authored
+        every { playbackController.restoreShuffledPlaylistQueue(any(), any(), any(), any(), any(), any()) } answers {
+            val authenticatedQueue = firstArg<List<MusicItem>>()
+            val order = secondArg<MusicPlaybackQueueOrder>()
+            val restoredSource = arg<PtvMusicAutoQueueProvenance>(5)
+            authenticatedQueue == authored && order.queue.size == 120 &&
+                order.originalIndices.sorted() == authored.indices.toList() &&
+                order.originalIndices[order.currentIndex] == 110 &&
+                order.queue[order.currentIndex].id == selected.id &&
+                order.queue.count { it.id == selected.id } == 2 &&
+                restoredSource.selectedAuthoredIndex == 110
+        }
+
+        val result = PtvMusicAutoResumeCoordinator(repository, playbackController, resumeStore).restoreQueueIfNeeded()
+
+        result.shouldBeInstanceOf<PtvMusicAutoRestoreResult.Restored>().restoredCount shouldBe authored.size
+        verify(exactly = 1) {
+            playbackController.restoreShuffledPlaylistQueue(
+                authored,
+                any(),
+                12_000,
+                MusicRepeatMode.NONE,
+                owner,
+                source,
+            )
+        }
+        verify(exactly = 0) { playbackController.restoreQueue(any(), any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.loadItems(any()) }
+    }
+
+    @Test
+    fun `failed shuffled playlist restore does not fall back to the saved queue window`() = runBlocking<Unit> {
+        val playlistId = UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+        val playlist = playableItem(playlistId).copy(type = BaseItemKind.PLAYLIST, isPlayable = false, isFolder = true)
+        val authored = listOf(playableItem(UUID.fromString(ITEM_ID)))
+        val source = PtvMusicAutoQueueProvenance.playlist(playlistId, authored, 0)
+        val saved = savedState().copy(
+            shuffleEnabled = true,
+            fullQueueSha256 = source.queueSha256,
+            fullCurrentIndex = 0,
+            queueProvenance = source,
+        )
+        val owner = PtvMusicAutoQueueOwner(1, 2)
+        val repository = mockk<MusicRepository>()
+        val playbackController = mockk<MusicPlaybackController>()
+        val resumeStore = mockk<PtvMusicAutoResumeStore>(relaxed = true)
+        every { playbackController.state } returns MutableStateFlow(MusicPlaybackState())
+        every { resumeStore.currentLocalQueueOwner() } returns owner
+        every { resumeStore.loadPlaybackState() } returns saved
+        coEvery { repository.loadItem(playlistId) } returns playlist
+        coEvery { repository.loadPlaylistQueue(playlist) } returns authored
+        every {
+            playbackController.restoreShuffledPlaylistQueue(
+                any(),
+                any(),
+                any(),
+                any(),
+                any(),
+                any(),
+            )
+        } returns false
+
+        PtvMusicAutoResumeCoordinator(repository, playbackController, resumeStore)
+            .restoreQueueIfNeeded() shouldBe PtvMusicAutoRestoreResult.Failed
+
+        verify(exactly = 1) {
+            playbackController.restoreShuffledPlaylistQueue(
+                authored,
+                any(),
+                12_000,
+                MusicRepeatMode.NONE,
+                owner,
+                source,
+            )
+        }
+        verify(exactly = 0) { playbackController.restoreQueue(any(), any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.loadItems(any()) }
+    }
+
+    @Test
+    fun `changed playlist window cannot restore a misleading partial queue`() = runBlocking<Unit> {
+        val playlistId = UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+        val playlist = playableItem(playlistId).copy(type = BaseItemKind.PLAYLIST, isPlayable = false, isFolder = true)
+        val tracks = (0 until 120).map { index ->
+            playableItem(UUID.fromString("00000000-0000-0000-0000-${index.toString().padStart(12, '0')}"))
+        }
+        val source = PtvMusicAutoQueueProvenance.playlist(playlistId, tracks, fullCurrentIndex = 110)
+        val saved = savedState().copy(
+            queueItemIds = tracks.drop(20).map { it.id.toString() },
+            currentIndex = 90,
+            fullQueueSha256 = source.queueSha256,
+            fullCurrentIndex = 110,
+            queueProvenance = source,
+        )
+        val repository = mockk<MusicRepository>()
+        val playbackController = mockk<MusicPlaybackController>()
+        val resumeStore = mockk<PtvMusicAutoResumeStore>(relaxed = true)
+        every { playbackController.state } returns MutableStateFlow(MusicPlaybackState())
+        every { resumeStore.currentLocalQueueOwner() } returns PtvMusicAutoQueueOwner(1, 2)
+        every { resumeStore.loadPlaybackState() } returns saved
+        coEvery { repository.loadItem(playlistId) } returns playlist
+        coEvery { repository.loadPlaylistQueue(playlist) } returns tracks.drop(1)
+
+        PtvMusicAutoResumeCoordinator(repository, playbackController, resumeStore)
+            .restoreQueueIfNeeded() shouldBe PtvMusicAutoRestoreResult.Failed
+        verify(exactly = 0) { playbackController.restoreQueue(any(), any(), any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.loadItems(any()) }
+    }
+
+    @Test
+    fun `playlist restore rejects provenance inconsistent with the saved full queue`() = runBlocking<Unit> {
+        val playlistId = UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+        val playlist = playableItem(playlistId).copy(type = BaseItemKind.PLAYLIST, isPlayable = false, isFolder = true)
+        val track = playableItem(UUID.fromString(ITEM_ID))
+        val source = PtvMusicAutoQueueProvenance.playlist(playlistId, listOf(track), fullCurrentIndex = 0)
+        val saved = savedState().copy(
+            fullQueueSha256 = "unrelated-queue",
+            fullCurrentIndex = 0,
+            queueProvenance = source,
+        )
+        val repository = mockk<MusicRepository>()
+        val playbackController = mockk<MusicPlaybackController>()
+        val resumeStore = mockk<PtvMusicAutoResumeStore>(relaxed = true)
+        every { playbackController.state } returns MutableStateFlow(MusicPlaybackState())
+        every { resumeStore.currentLocalQueueOwner() } returns PtvMusicAutoQueueOwner(1, 2)
+        every { resumeStore.loadPlaybackState() } returns saved
+        coEvery { repository.loadItem(playlistId) } returns playlist
+        coEvery { repository.loadPlaylistQueue(playlist) } returns listOf(track)
+        every { playbackController.restoreQueue(any(), any(), any(), any(), any(), any()) } returns true
+
+        PtvMusicAutoResumeCoordinator(repository, playbackController, resumeStore)
+            .restoreQueueIfNeeded() shouldBe PtvMusicAutoRestoreResult.Failed
+        verify(exactly = 0) { playbackController.restoreQueue(any(), any(), any(), any(), any(), any()) }
     }
 
     private fun savedState(ownerUserId: Long = 2) = PtvMusicAutoResumeState(

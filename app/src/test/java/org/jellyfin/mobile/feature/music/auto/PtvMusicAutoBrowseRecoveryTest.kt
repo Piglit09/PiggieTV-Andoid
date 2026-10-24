@@ -369,7 +369,7 @@ class PtvMusicAutoBrowseRecoveryTest : PtvMusicAutoBrowseFixture() {
         every { controller.transitionEvents } returns MutableSharedFlow()
         every { controller.isCurrentQueueOwnedByAuthenticatedUser() } returns true
         val playbackCalls = AtomicInteger()
-        every { controller.play(any(), any(), any(), any(), any(), any()) } answers {
+        every { controller.play(any(), any(), any(), any(), any(), any(), any()) } answers {
             if (playbackCalls.incrementAndGet() == 2) throw IOException("could not start replacement queue")
         }
         val context = MusicRecommendationSessionContext.start(
@@ -1185,6 +1185,203 @@ class PtvMusicAutoBrowseRefillCancellationTest : PtvMusicAutoBrowseFixture() {
 
 class PtvMusicAutoBrowseAccountRecoveryTest : PtvMusicAutoBrowseFixture() {
     @Test
+    @Suppress("LongMethod")
+    fun `playback resumption returns before recommendation hydration then reactivates without autoplay`() =
+        runBlocking<Unit> {
+            val owner = PtvMusicAutoQueueOwner(1, 2)
+            val seed = track().copy(id = UUID(7L, 1L))
+            val current = track().copy(id = UUID(7L, 2L))
+            val queue = listOf(seed, current)
+            val snapshot = PtvMusicAutoRecommendationSnapshot(
+                sourceMediaId = PtvMusicAutoIds.AUTO_PICKS,
+                selectedMode = MusicListeningMode.BALANCED_DISCOVERY.name,
+                seedId = seed.id.toString(),
+                recentPlayedIds = emptyList(),
+                skippedIds = emptyList(),
+                recommendedIds = queue.map { it.id.toString() },
+                catalogOffset = 25,
+                catalogExhausted = false,
+                revision = 1,
+            )
+            val saved = PtvMusicAutoResumeState.fromPlaybackState(
+                MusicPlaybackState(queue = queue, currentItem = current, currentIndex = 1),
+                nowMs = 7,
+            )?.copy(
+                ownerServerId = 1,
+                ownerUserId = 2,
+                queueProvenance = PtvMusicAutoQueueProvenance.recommendation(queue, snapshot),
+            )
+            val resumeStore = mockk<PtvMusicAutoResumeStore>(relaxed = true)
+            every { resumeStore.currentLocalQueueOwner() } returns owner
+            every { resumeStore.loadPlaybackState() } returns saved
+            val state = MutableStateFlow(
+                MusicPlaybackState(
+                    queue = queue,
+                    currentItem = current,
+                    currentIndex = 1,
+                    queueOwner = owner,
+                    isPlaying = false,
+                ),
+            )
+            val playbackController = mockk<MusicPlaybackController>(relaxed = true)
+            every { playbackController.state } returns state
+            every { playbackController.transitionEvents } returns MutableSharedFlow()
+            every { playbackController.isCurrentQueueOwnedByAuthenticatedUser() } returns true
+            val resumeCoordinator = mockk<PtvMusicAutoResumeCoordinator>()
+            coEvery { resumeCoordinator.restoreQueueIfNeeded() } returns PtvMusicAutoRestoreResult.AlreadyActive
+            val loadStarted = CompletableDeferred<Unit>()
+            val finishLoad = CompletableDeferred<Unit>()
+            val repository = mockk<MusicRepository>()
+            coEvery { repository.loadItems(listOf(seed.id)) } coAnswers {
+                loadStarted.complete(Unit)
+                finishLoad.await()
+                listOf(seed)
+            }
+            val replenished = CompletableDeferred<MusicRecommendationSessionContext>()
+            coEvery { repository.replenishAutoRecommendations(any(), current, any()) } coAnswers {
+                val context = firstArg<MusicRecommendationSessionContext>()
+                replenished.complete(context)
+                MusicRecommendationBatch(emptyList(), context)
+            }
+            val callback = callback(
+                MutableStateFlow(recommendationAuthenticated()),
+                repository,
+                playbackController,
+                resumeStore = resumeStore,
+                resumeCoordinator = resumeCoordinator,
+            )
+
+            val response = callback.onPlaybackResumption(mockk<MediaSession>(), mockk<MediaSession.ControllerInfo>())
+            try {
+                response.get(2, TimeUnit.SECONDS).mediaItems.map(MediaItem::mediaId) shouldBe
+                    queue.map { PtvMusicAutoIds.track(it.id) }
+                withTimeout(5_000) { loadStarted.await() }
+            } finally {
+                finishLoad.complete(Unit)
+            }
+            state.value = state.value.copy(isPlaying = true)
+            withTimeout(5_000) { replenished.await() }.selectedMode shouldBe MusicListeningMode.BALANCED_DISCOVERY
+            verify(exactly = 0) { playbackController.play(any(), any(), any(), any(), any(), any(), any()) }
+        }
+
+    @Test
+    @Suppress("LongMethod") // The authenticated restore fixture verifies the full recommendation session.
+    fun `saved recommendation profile reactivates after authenticated cold restore without autoplay`() =
+        runBlocking<Unit> {
+            val owner = PtvMusicAutoQueueOwner(1, 2)
+            val seed = track().copy(id = UUID(6L, 1L), genres = listOf("Metal"))
+            val current = track().copy(id = UUID(6L, 2L), genres = listOf("Metal"))
+            val played = track().copy(id = UUID(6L, 3L), genres = listOf("Metal"))
+            val skipped = UUID(6L, 4L)
+            val queue = listOf(seed, current)
+            val snapshot = PtvMusicAutoRecommendationSnapshot(
+                sourceMediaId = PtvMusicAutoIds.AUTO_PICKS,
+                selectedMode = MusicListeningMode.STAY_IN_THE_VIBE.name,
+                seedId = seed.id.toString(),
+                recentPlayedIds = listOf(played.id.toString()),
+                skippedIds = listOf(skipped.toString()),
+                recommendedIds = listOf(seed.id.toString(), current.id.toString()),
+                catalogOffset = 75,
+                catalogExhausted = false,
+                revision = 4,
+            )
+            val savedState = PtvMusicAutoResumeState.fromPlaybackState(
+                MusicPlaybackState(queue = queue, currentItem = current, currentIndex = 1),
+                nowMs = 7,
+            )?.copy(
+                ownerServerId = 1,
+                ownerUserId = 2,
+                queueProvenance = PtvMusicAutoQueueProvenance.recommendation(queue, snapshot),
+            )
+            val resumeStore = mockk<PtvMusicAutoResumeStore>(relaxed = true)
+            every { resumeStore.currentLocalQueueOwner() } returns owner
+            every { resumeStore.loadPlaybackState() } returns savedState
+            val state = MutableStateFlow(
+                MusicPlaybackState(
+                    queue = queue,
+                    currentItem = current,
+                    currentIndex = 1,
+                    queueOwner = owner,
+                    isPlaying = false,
+                ),
+            )
+            val playbackController = mockk<MusicPlaybackController>(relaxed = true)
+            every { playbackController.state } returns state
+            every { playbackController.transitionEvents } returns MutableSharedFlow()
+            every { playbackController.isCurrentQueueOwnedByAuthenticatedUser() } returns true
+            val repository = mockk<MusicRepository>()
+            coEvery { repository.loadItems(listOf(seed.id, played.id)) } returns listOf(seed, played)
+            val capturedContext = CompletableDeferred<MusicRecommendationSessionContext>()
+            coEvery { repository.replenishAutoRecommendations(any(), current, any()) } coAnswers {
+                val context = firstArg<MusicRecommendationSessionContext>()
+                capturedContext.complete(context)
+                MusicRecommendationBatch(emptyList(), context)
+            }
+            val callback = callback(
+                MutableStateFlow(recommendationAuthenticated()),
+                repository,
+                playbackController,
+                resumeStore = resumeStore,
+            )
+
+            callback.restoreSavedRecommendationSession()
+            state.value = state.value.copy(isPlaying = true)
+            val resumed = withTimeout(5_000) { capturedContext.await() }
+
+            resumed.selectedMode shouldBe MusicListeningMode.STAY_IN_THE_VIBE
+            resumed.seed.id shouldBe seed.id
+            resumed.recentPlayedIds shouldBe listOf(played.id)
+            resumed.skippedIds shouldBe listOf(skipped)
+            resumed.catalogOffset shouldBe 75
+            resumed.revision shouldBe 4
+            coVerify(exactly = 0) { repository.beginAutoRecommendationSession(any(), any(), any()) }
+        }
+
+    @Test
+    fun `playback resumption retains verified playlist identity and repeated occurrence`() {
+        val first = track()
+        val second = track().copy(id = UUID.fromString("22222222-2222-2222-2222-222222222222"))
+        val queue = listOf(first, second, first)
+        val playlistId = UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+        val owner = PtvMusicAutoQueueOwner(1, 2)
+        val resumeStore = mockk<PtvMusicAutoResumeStore>(relaxed = true)
+        every { resumeStore.currentLocalQueueOwner() } returns owner
+        every { resumeStore.loadPlaybackState() } returns PtvMusicAutoResumeState.fromPlaybackState(
+            MusicPlaybackState(queue = queue, currentItem = first, currentIndex = 2),
+            nowMs = 7,
+        )?.copy(
+            ownerServerId = 1,
+            ownerUserId = 2,
+            queueProvenance = PtvMusicAutoQueueProvenance.playlist(playlistId, queue, 2),
+        )
+        val playbackController = mockk<MusicPlaybackController>()
+        every { playbackController.state } returns MutableStateFlow(
+            MusicPlaybackState(queue = queue, currentItem = first, currentIndex = 2, queueOwner = owner),
+        )
+        every { playbackController.isCurrentQueueOwnedByAuthenticatedUser() } returns true
+        val resumeCoordinator = mockk<PtvMusicAutoResumeCoordinator>()
+        coEvery { resumeCoordinator.restoreQueueIfNeeded() } returns PtvMusicAutoRestoreResult.AlreadyActive
+        val callback = callback(
+            authState = MutableStateFlow(authenticated("server-1", "user-1")),
+            playbackController = playbackController,
+            resumeStore = resumeStore,
+            resumeCoordinator = resumeCoordinator,
+        )
+
+        val resumed = callback.onPlaybackResumption(
+            mockk<MediaSession>(),
+            mockk<MediaSession.ControllerInfo>(),
+        ).get(5, TimeUnit.SECONDS)
+
+        resumed.startIndex shouldBe 2
+        resumed.mediaItems.map(MediaItem::mediaId) shouldBe listOf(
+            "ptv:auto:playlist-track:$playlistId:0:${first.id}",
+            "ptv:auto:playlist-track:$playlistId:1:${second.id}",
+            "ptv:auto:playlist-track:$playlistId:2:${first.id}",
+        )
+    }
+
+    @Test
     fun `playback resumption restores queue on the player dispatcher`() {
         val dispatcher = Executors.newSingleThreadExecutor { task ->
             Thread(task, "ptv-auto-player-test")
@@ -1442,7 +1639,17 @@ class PtvMusicAutoBrowseAccountRecoveryTest : PtvMusicAutoBrowseFixture() {
         started.mediaItems[100].mediaId shouldBe selectedMediaItem.mediaId
         (started.mediaItems[0].mediaId == started.mediaItems[100].mediaId) shouldBe false
         coVerify(exactly = 1) { repository.loadPlaylistQueue(playlist) }
-        verify(exactly = 1) { playbackController.play(selected, tracks, any(), any(), owner, 100) }
+        verify(exactly = 1) {
+            playbackController.play(
+                selected,
+                tracks,
+                any(),
+                any(),
+                owner,
+                100,
+                match { it.playlistId == playlist.id.toString() },
+            )
+        }
     }
 
     @Test
@@ -1472,7 +1679,17 @@ class PtvMusicAutoBrowseAccountRecoveryTest : PtvMusicAutoBrowseFixture() {
         started.mediaItems.size shouldBe 101
         started.startIndex shouldBe 0
         coVerify(exactly = 1) { repository.loadPlaylistQueue(playlist) }
-        verify(exactly = 1) { playbackController.play(tracks.first(), tracks, any(), any(), owner, 0) }
+        verify(exactly = 1) {
+            playbackController.play(
+                tracks.first(),
+                tracks,
+                any(),
+                any(),
+                owner,
+                0,
+                match { it.playlistId == playlist.id.toString() },
+            )
+        }
     }
 
     @Test

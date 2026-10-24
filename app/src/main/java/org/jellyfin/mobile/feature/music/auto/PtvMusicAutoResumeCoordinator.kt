@@ -5,6 +5,8 @@ import kotlinx.coroutines.sync.withLock
 import org.jellyfin.mobile.feature.music.MusicItem
 import org.jellyfin.mobile.feature.music.MusicPlaybackController
 import org.jellyfin.mobile.feature.music.MusicRepository
+import org.jellyfin.mobile.feature.music.reorderMusicPlaybackQueue
+import org.jellyfin.sdk.model.api.BaseItemKind
 import org.jellyfin.sdk.model.serializer.toUUIDOrNull
 import timber.log.Timber
 
@@ -80,10 +82,18 @@ class PtvMusicAutoResumeCoordinator(
         restoreAttempted = false
     }
 
+    @Suppress("ReturnCount") // Security checks fail closed at each restore boundary.
     private suspend fun restoreSavedItems(
         savedState: PtvMusicAutoResumeState,
         expectedOwner: PtvMusicAutoQueueOwner,
     ): PtvMusicAutoRestoreResult {
+        val source = savedState.queueProvenance
+        if (source != null && source.kind == PtvMusicAutoQueueProvenance.PLAYLIST) {
+            return restoreSavedPlaylist(savedState, source, expectedOwner)
+        }
+        if (source != null && source.kind != PtvMusicAutoQueueProvenance.RECOMMENDATION) {
+            return PtvMusicAutoRestoreResult.Failed
+        }
         val savedEntries = savedState.queueItemIds.mapIndexedNotNull { index, rawId ->
             rawId.toUUIDOrNull()?.let { id -> index to id }
         }
@@ -121,6 +131,99 @@ class PtvMusicAutoResumeCoordinator(
                 restoredCount = restoredItems.size,
                 missingCount = missingCount.coerceAtLeast(0),
             )
+        } else {
+            PtvMusicAutoRestoreResult.Failed
+        }
+    }
+
+    @Suppress("CyclomaticComplexMethod", "ReturnCount") // Fail closed at each playlist identity check.
+    private suspend fun restoreSavedPlaylist(
+        savedState: PtvMusicAutoResumeState,
+        source: PtvMusicAutoQueueProvenance,
+        expectedOwner: PtvMusicAutoQueueOwner,
+    ): PtvMusicAutoRestoreResult {
+        val playlistId = source.playlistId?.toUUIDOrNull() ?: return PtvMusicAutoRestoreResult.Failed
+        val fullIndex = source.fullCurrentIndex ?: return PtvMusicAutoRestoreResult.Failed
+        if (savedState.fullQueueSha256 != source.queueSha256 || savedState.fullCurrentIndex != fullIndex) {
+            return PtvMusicAutoRestoreResult.Failed
+        }
+        val playlist = repository.loadItem(playlistId)
+            ?.takeIf { it.type == BaseItemKind.PLAYLIST } ?: return PtvMusicAutoRestoreResult.Failed
+        val fullQueue = repository.loadPlaylistQueue(playlist)
+        val queueIsValid = fullQueue.isNotEmpty() && fullQueue.all(MusicItem::isPlayable)
+        if (resumeStore.currentLocalQueueOwner() != expectedOwner || !queueIsValid) {
+            return PtvMusicAutoRestoreResult.Failed
+        }
+        if (savedState.shuffleEnabled) {
+            return restoreShuffledPlaylist(savedState, source, fullQueue, expectedOwner)
+        }
+        val selectionIsValid = fullIndex in fullQueue.indices && source.matchesQueue(fullQueue)
+        if (!selectionIsValid) {
+            return PtvMusicAutoRestoreResult.Failed
+        }
+        val windowStart = fullIndex - savedState.currentIndex
+        val savedWindow = savedState.queueItemIds
+        val restoredWindow = if (windowStart >= 0) {
+            fullQueue.drop(windowStart).take(savedWindow.size).map { item -> item.id.toString() }
+        } else {
+            emptyList()
+        }
+        val windowIsValid = windowStart >= 0 && restoredWindow == savedWindow &&
+            fullQueue[fullIndex].id.toString() == savedState.currentItemId
+        if (!windowIsValid) {
+            return PtvMusicAutoRestoreResult.Failed
+        }
+
+        val restored = playbackController.restoreQueue(
+            queue = fullQueue,
+            currentIndex = fullIndex,
+            positionMs = savedState.positionMs,
+            shuffleEnabled = savedState.shuffleEnabled,
+            repeatMode = savedState.parsedRepeatMode,
+            expectedOwner = expectedOwner,
+        )
+        return if (restored) {
+            PtvMusicAutoRestoreResult.Restored(fullQueue.size, 0)
+        } else {
+            PtvMusicAutoRestoreResult.Failed
+        }
+    }
+
+    @Suppress("ReturnCount") // Each persisted identity must be verified before restoring a shuffled queue.
+    private fun restoreShuffledPlaylist(
+        savedState: PtvMusicAutoResumeState,
+        source: PtvMusicAutoQueueProvenance,
+        authoredQueue: List<MusicItem>,
+        expectedOwner: PtvMusicAutoQueueOwner,
+    ): PtvMusicAutoRestoreResult {
+        val selectedAuthoredIndex = source.selectedAuthoredIndex ?: return PtvMusicAutoRestoreResult.Failed
+        if (!source.matchesAuthoredQueue(authoredQueue) || selectedAuthoredIndex !in authoredQueue.indices) {
+            return PtvMusicAutoRestoreResult.Failed
+        }
+        if (authoredQueue[selectedAuthoredIndex].id.toString() != savedState.currentItemId) {
+            return PtvMusicAutoRestoreResult.Failed
+        }
+        val authorizedCounts = authoredQueue.groupingBy { item -> item.id.toString() }.eachCount()
+        val savedCounts = savedState.queueItemIds.groupingBy(String::toString).eachCount()
+        if (savedCounts.any { (id, count) -> count > authorizedCounts.getOrDefault(id, 0) }) {
+            return PtvMusicAutoRestoreResult.Failed
+        }
+        val order = reorderMusicPlaybackQueue(
+            authoredQueue,
+            authoredQueue.indices.toList(),
+            selectedAuthoredIndex,
+            shuffleEnabled = true,
+        ) ?: return PtvMusicAutoRestoreResult.Failed
+        val restored = playbackController.restoreShuffledPlaylistQueue(
+            authoredQueue = authoredQueue,
+            order = order,
+            positionMs = savedState.positionMs,
+            repeatMode = savedState.parsedRepeatMode,
+            expectedOwner = expectedOwner,
+            provenance = source,
+        )
+        return if (restored) {
+            PtvMusicAutoRestoreResult.Restored(authoredQueue.size, 0)
         } else {
             PtvMusicAutoRestoreResult.Failed
         }

@@ -8,11 +8,13 @@ import kotlinx.serialization.SerializationException
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.jellyfin.mobile.app.AppPreferences
+import org.jellyfin.mobile.feature.music.MusicItem
 import org.jellyfin.mobile.feature.music.MusicPlaybackState
 import org.jellyfin.mobile.feature.music.MusicRepeatMode
 import org.jellyfin.sdk.model.UUID
 import org.jellyfin.sdk.model.serializer.toUUIDOrNull
 import timber.log.Timber
+import java.security.MessageDigest
 
 class PtvMusicAutoResumeStore(context: Context, private val appPreferences: AppPreferences) {
     private val sharedPreferences: SharedPreferences =
@@ -41,13 +43,94 @@ class PtvMusicAutoResumeStore(context: Context, private val appPreferences: AppP
         return state
     }
 
-    fun savePlaybackState(state: PtvMusicAutoResumeState, expectedOwner: PtvMusicAutoQueueOwner): Boolean {
+    fun savePlaybackState(
+        state: PtvMusicAutoResumeState,
+        expectedOwner: PtvMusicAutoQueueOwner,
+        retainQueueProvenance: Boolean = true,
+        selectedAuthoredIndex: Int? = null,
+    ): Boolean {
         if (currentLocalQueueOwner() != expectedOwner) return false
+        val previous = loadPlaybackState()
+        val retainedSource = previous?.queueProvenance
+            ?.takeIf { source -> retainQueueProvenance && source.queueSha256 == state.fullQueueSha256 }
+            ?.let { source ->
+                source.copy(
+                    fullCurrentIndex = state.fullCurrentIndex,
+                    selectedAuthoredIndex = if (source.kind == PtvMusicAutoQueueProvenance.PLAYLIST) {
+                        selectedAuthoredIndex ?: source.selectedAuthoredIndex
+                    } else {
+                        null
+                    },
+                )
+            }
         sharedPreferences.edit {
             putString(
                 KEY_PLAYBACK_STATE,
                 PtvMusicAutoResumeStateSerializer.encode(
-                    state.withOwner(expectedOwner.serverId, expectedOwner.userId).trimmed(),
+                    state.withOwner(expectedOwner.serverId, expectedOwner.userId)
+                        .copy(queueProvenance = retainedSource).trimmed(),
+                ),
+            )
+        }
+        return true
+    }
+
+    fun attachQueueProvenance(
+        provenance: PtvMusicAutoQueueProvenance,
+        playbackState: MusicPlaybackState,
+        expectedOwner: PtvMusicAutoQueueOwner,
+    ): Boolean {
+        if (currentLocalQueueOwner() != expectedOwner || playbackState.queueOwner != expectedOwner) return false
+        val saved = loadPlaybackState() ?: return false
+        val snapshot = PtvMusicAutoResumeState.fromPlaybackState(playbackState) ?: return false
+        val queueIdentityMatches = provenance.queueSha256 == snapshot.fullQueueSha256 &&
+            saved.fullQueueSha256 == snapshot.fullQueueSha256
+        val savedWindowMatches = saved.queueItemIds == snapshot.queueItemIds &&
+            saved.currentIndex == snapshot.currentIndex
+        if (!queueIdentityMatches || !savedWindowMatches) {
+            return false
+        }
+        sharedPreferences.edit {
+            putString(
+                KEY_PLAYBACK_STATE,
+                PtvMusicAutoResumeStateSerializer.encode(
+                    saved.copy(queueProvenance = provenance.copy(fullCurrentIndex = snapshot.fullCurrentIndex)),
+                ),
+            )
+        }
+        return true
+    }
+
+    /** Writes a playlist queue reorder and its source proof in one preference update. */
+    @Suppress("CyclomaticComplexMethod") // The transition requires every owner, source, and queue check.
+    fun savePlaylistQueueTransition(
+        playbackState: MusicPlaybackState,
+        expectedOwner: PtvMusicAutoQueueOwner,
+        previousSource: PtvMusicAutoQueueProvenance,
+        updatedSource: PtvMusicAutoQueueProvenance,
+        nowMs: Long = System.currentTimeMillis(),
+    ): Boolean {
+        if (currentLocalQueueOwner() != expectedOwner || playbackState.queueOwner != expectedOwner) return false
+        val previous = loadPlaybackState() ?: return false
+        val snapshot = PtvMusicAutoResumeState.fromPlaybackState(playbackState, nowMs) ?: return false
+        val sourceIdentityMatches = previous.queueProvenance == previousSource &&
+            previous.fullQueueSha256 == previousSource.queueSha256 &&
+            previousSource.kind == PtvMusicAutoQueueProvenance.PLAYLIST &&
+            !previousSource.playlistId.isNullOrBlank() &&
+            !previousSource.authoredQueueSha256.isNullOrBlank() &&
+            updatedSource.kind == PtvMusicAutoQueueProvenance.PLAYLIST &&
+            updatedSource.playlistId == previousSource.playlistId &&
+            updatedSource.authoredQueueSha256 == previousSource.authoredQueueSha256
+        val updatedQueueMatches = updatedSource.queueSha256 == snapshot.fullQueueSha256 &&
+            updatedSource.fullCurrentIndex == snapshot.fullCurrentIndex &&
+            updatedSource.selectedAuthoredIndex != null
+        if (!sourceIdentityMatches || !updatedQueueMatches) return false
+        sharedPreferences.edit {
+            putString(
+                KEY_PLAYBACK_STATE,
+                PtvMusicAutoResumeStateSerializer.encode(
+                    snapshot.withOwner(expectedOwner.serverId, expectedOwner.userId)
+                        .copy(queueProvenance = updatedSource).trimmed(),
                 ),
             )
         }
@@ -58,8 +141,10 @@ class PtvMusicAutoResumeStore(context: Context, private val appPreferences: AppP
         playbackState: MusicPlaybackState,
         expectedOwner: PtvMusicAutoQueueOwner,
         nowMs: Long = System.currentTimeMillis(),
+        retainQueueProvenance: Boolean = true,
+        selectedAuthoredIndex: Int? = null,
     ): Boolean = PtvMusicAutoResumeState.fromPlaybackState(playbackState, nowMs)
-        ?.let { state -> savePlaybackState(state, expectedOwner) }
+        ?.let { state -> savePlaybackState(state, expectedOwner, retainQueueProvenance, selectedAuthoredIndex) }
         ?: false
 
     fun clearPlaybackState() {
@@ -274,6 +359,9 @@ data class PtvMusicAutoResumeState(
     val lastPlayedTimestampMs: Long,
     val ownerServerId: Long? = null,
     val ownerUserId: Long? = null,
+    val fullQueueSha256: String? = null,
+    val fullCurrentIndex: Int? = null,
+    val queueProvenance: PtvMusicAutoQueueProvenance? = null,
 ) {
     val currentItemId: String?
         get() = queueItemIds.getOrNull(currentIndex)
@@ -336,6 +424,8 @@ data class PtvMusicAutoResumeState(
                 shuffleEnabled = playbackState.shuffleEnabled,
                 repeatMode = playbackState.repeatMode.name,
                 lastPlayedTimestampMs = nowMs,
+                fullQueueSha256 = queueSha256(completeQueue),
+                fullCurrentIndex = selectedIndex ?: 0,
             )
         }
     }
@@ -383,6 +473,86 @@ internal enum class PtvMusicAutoDiagnosticEventType {
     SERVICE_STOPPED,
     SERVICE_EVENT,
 }
+
+@Serializable
+data class PtvMusicAutoRecommendationSnapshot(
+    val sourceMediaId: String,
+    val selectedMode: String,
+    val seedId: String,
+    val recentPlayedIds: List<String>,
+    val skippedIds: List<String>,
+    val recommendedIds: List<String>,
+    val catalogOffset: Int,
+    val catalogExhausted: Boolean,
+    val revision: Long,
+)
+
+@Serializable
+data class PtvMusicAutoQueueProvenance(
+    val kind: String,
+    val queueSha256: String,
+    val fullCurrentIndex: Int? = null,
+    val playlistId: String? = null,
+    val authoredQueueSha256: String? = null,
+    val selectedAuthoredIndex: Int? = null,
+    val recommendation: PtvMusicAutoRecommendationSnapshot? = null,
+) {
+    fun matchesQueue(queue: List<MusicItem>): Boolean = queueSha256 == queueSha256(queue.map { it.id.toString() })
+
+    fun matchesAuthoredQueue(queue: List<MusicItem>): Boolean =
+        authoredQueueSha256 != null && authoredQueueSha256 == queueSha256(queue.map { it.id.toString() })
+
+    fun forQueue(
+        queue: List<MusicItem>,
+        currentIndex: Int,
+        authoredQueue: List<MusicItem>? = null,
+        authoredIndex: Int? = null,
+    ): PtvMusicAutoQueueProvenance = copy(
+        queueSha256 = queueSha256(queue.map { it.id.toString() }),
+        fullCurrentIndex = currentIndex,
+        authoredQueueSha256 = if (kind == PLAYLIST && authoredQueue != null) {
+            queueSha256(authoredQueue.map { it.id.toString() })
+        } else {
+            authoredQueueSha256
+        },
+        selectedAuthoredIndex = if (kind == PLAYLIST) authoredIndex ?: selectedAuthoredIndex else null,
+    )
+
+    companion object {
+        const val PLAYLIST = "playlist"
+        const val RECOMMENDATION = "recommendation"
+
+        fun playlist(playlistId: UUID, queue: List<MusicItem>, fullCurrentIndex: Int): PtvMusicAutoQueueProvenance =
+            PtvMusicAutoQueueProvenance(
+                kind = PLAYLIST,
+                queueSha256 = queueSha256(queue.map { it.id.toString() }),
+                fullCurrentIndex = fullCurrentIndex,
+                playlistId = playlistId.toString(),
+                authoredQueueSha256 = queueSha256(queue.map { it.id.toString() }),
+                selectedAuthoredIndex = fullCurrentIndex,
+            )
+
+        fun recommendation(
+            queue: List<MusicItem>,
+            snapshot: PtvMusicAutoRecommendationSnapshot,
+        ): PtvMusicAutoQueueProvenance = PtvMusicAutoQueueProvenance(
+            kind = RECOMMENDATION,
+            queueSha256 = queueSha256(queue.map { it.id.toString() }),
+            recommendation = snapshot,
+        )
+    }
+}
+
+private fun queueSha256(ids: List<String>): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    ids.forEach { id ->
+        digest.update(id.toByteArray(Charsets.UTF_8))
+        digest.update(0)
+    }
+    return digest.digest().joinToString("") { byte -> "%02x".format(byte.toInt() and UNSIGNED_BYTE_MASK) }
+}
+
+private const val UNSIGNED_BYTE_MASK = 0xff
 
 internal object PtvMusicAutoDiagnosticEvents {
     const val MAX_EVENTS = 32

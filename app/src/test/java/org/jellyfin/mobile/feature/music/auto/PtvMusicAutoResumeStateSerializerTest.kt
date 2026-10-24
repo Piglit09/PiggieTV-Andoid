@@ -174,6 +174,38 @@ class PtvMusicAutoResumeStateSerializerTest {
         resumeState.lastPlayedTimestampMs shouldBe 77
     }
 
+    @Test
+    fun `recommendation provenance survives serialization without storing an unbounded queue`() {
+        val queue = (0 until 120).map { index ->
+            musicItem(UUID.fromString("00000000-0000-0000-0000-${index.toString().padStart(12, '0')}"))
+        }
+        val source = PtvMusicAutoQueueProvenance.recommendation(
+            queue = queue,
+            snapshot = PtvMusicAutoRecommendationSnapshot(
+                sourceMediaId = PtvMusicAutoIds.AUTO_PICKS,
+                selectedMode = "BALANCED_DISCOVERY",
+                seedId = queue.first().id.toString(),
+                recentPlayedIds = listOf(queue[1].id.toString()),
+                skippedIds = listOf(queue[2].id.toString()),
+                recommendedIds = queue.map { it.id.toString() },
+                catalogOffset = 25,
+                catalogExhausted = false,
+                revision = 3,
+            ),
+        )
+        val state = PtvMusicAutoResumeState.fromPlaybackState(
+            MusicPlaybackState(queue = queue, currentItem = queue[110], currentIndex = 110),
+            nowMs = 7,
+        ).shouldNotBeNull().copy(ownerServerId = 1, ownerUserId = 2, queueProvenance = source)
+
+        val decoded = PtvMusicAutoResumeStateSerializer.decode(PtvMusicAutoResumeStateSerializer.encode(state))
+
+        decoded.shouldNotBeNull()
+        decoded.queueItemIds shouldHaveSize 100
+        decoded.queueProvenance shouldBe source
+        decoded.queueProvenance?.recommendation?.selectedMode shouldBe "BALANCED_DISCOVERY"
+    }
+
     private fun musicItem(id: UUID) = MusicItem(
         id = id,
         title = "Track",

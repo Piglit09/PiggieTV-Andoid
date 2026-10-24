@@ -35,6 +35,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import org.jellyfin.mobile.feature.music.auto.PtvMusicAutoQueueOwner
+import org.jellyfin.mobile.feature.music.auto.PtvMusicAutoQueueProvenance
 import org.jellyfin.mobile.feature.music.auto.PtvMusicAutoResumeStore
 import org.jellyfin.mobile.feature.music.auto.PtvMusicService
 import org.jellyfin.mobile.feature.music.auto.PtvMusicSessionInvalidator
@@ -177,6 +178,7 @@ class MusicPlaybackController(
         shuffle: Boolean = false,
         expectedOwner: PtvMusicAutoQueueOwner? = null,
         authoredQueueIndex: Int? = null,
+        queueProvenance: PtvMusicAutoQueueProvenance? = null,
     ) {
         if (!item.isPlayable || released) return
         val requestedOwner = autoResumeStore.currentLocalQueueOwner() ?: return
@@ -203,9 +205,37 @@ class MusicPlaybackController(
             val selectedItem = configurePlaybackQueue(item, queue, authoredSelection, shuffleEnabled)
 
             _state.update { it.copy(shuffleEnabled = shuffleEnabled) }
-            publishPendingItemState(item = selectedItem, startPositionMs = startPositionMs, queueOwner = requestedOwner)
+            publishPendingItemState(
+                item = selectedItem,
+                startPositionMs = startPositionMs,
+                queueOwner = requestedOwner,
+                retainQueueProvenance = false,
+            )
+            if (!attachSelectedQueueProvenance(queueProvenance, requestedOwner)) return@launch
             beginLoadCurrent(startPositionMs = startPositionMs, playWhenReady = true)
         }
+    }
+
+    private fun attachSelectedQueueProvenance(
+        source: PtvMusicAutoQueueProvenance?,
+        owner: PtvMusicAutoQueueOwner,
+    ): Boolean {
+        if (source == null) return true
+        val attached = autoResumeStore.attachQueueProvenance(
+            source.forQueue(
+                queue = state.value.queue,
+                currentIndex = state.value.currentIndex,
+                authoredQueue = originalQueue,
+                authoredIndex = playbackQueueOriginalIndices.getOrNull(currentIndex),
+            ),
+            state.value,
+            owner,
+        )
+        if (!attached) {
+            clearResidentPlayback(dispatchStopReport = false)
+            if (autoResumeStore.currentLocalQueueOwner() == owner) autoResumeStore.clearPlaybackState()
+        }
+        return attached
     }
 
     private fun configurePlaybackQueue(
@@ -751,6 +781,16 @@ class MusicPlaybackController(
         shuffleEnabled: Boolean,
         repeatMode: MusicRepeatMode,
         expectedOwner: PtvMusicAutoQueueOwner,
+    ): Boolean = restoreQueueInternal(queue, currentIndex, positionMs, shuffleEnabled, repeatMode, expectedOwner, true)
+
+    private fun restoreQueueInternal(
+        queue: List<MusicItem>,
+        currentIndex: Int,
+        positionMs: Long,
+        shuffleEnabled: Boolean,
+        repeatMode: MusicRepeatMode,
+        expectedOwner: PtvMusicAutoQueueOwner,
+        persistRestoredState: Boolean,
     ): Boolean {
         if (released || autoResumeStore.currentLocalQueueOwner() != expectedOwner) return false
         val selection = selectRestoredMusicPlaybackQueue(queue, currentIndex) ?: return false
@@ -793,8 +833,55 @@ class MusicPlaybackController(
                 queueOwner = expectedOwner,
             )
         }
-        persistPlaybackState(force = true)
+        if (persistRestoredState) persistPlaybackState(force = true)
         return true
+    }
+
+    /** Restores a full, newly shuffled playlist while retaining its authenticated authored order. */
+    internal fun restoreShuffledPlaylistQueue(
+        authoredQueue: List<MusicItem>,
+        order: MusicPlaybackQueueOrder,
+        positionMs: Long,
+        repeatMode: MusicRepeatMode,
+        expectedOwner: PtvMusicAutoQueueOwner,
+        provenance: PtvMusicAutoQueueProvenance,
+    ): Boolean {
+        if (order.originalIndices.sorted() != authoredQueue.indices.toList() ||
+            order.queue.map(MusicItem::id) != order.originalIndices.map { authoredQueue[it].id }
+        ) {
+            return false
+        }
+        if (!restoreQueueInternal(
+                order.queue,
+                order.currentIndex,
+                positionMs,
+                true,
+                repeatMode,
+                expectedOwner,
+                false,
+            )
+        ) {
+            return false
+        }
+        originalQueue = authoredQueue.toList()
+        playbackQueueOriginalIndices = order.originalIndices.toList()
+        val restoredState = state.value
+        val persisted = autoResumeStore.savePlaylistQueueTransition(
+            playbackState = restoredState,
+            expectedOwner = expectedOwner,
+            previousSource = provenance,
+            updatedSource = provenance.forQueue(
+                queue = restoredState.queue,
+                currentIndex = restoredState.currentIndex,
+                authoredQueue = authoredQueue,
+                authoredIndex = order.originalIndices[restoredState.currentIndex],
+            ),
+        )
+        if (!persisted) {
+            clearResidentPlayback(dispatchStopReport = false)
+            if (autoResumeStore.currentLocalQueueOwner() == expectedOwner) autoResumeStore.clearPlaybackState()
+        }
+        return persisted
     }
 
     override fun onStart(owner: LifecycleOwner) {
@@ -1331,9 +1418,15 @@ class MusicPlaybackController(
         )
 
     private fun setShuffleEnabledInternal(enabled: Boolean, source: String) {
-        val oldEnabled = state.value.shuffleEnabled
+        val priorState = state.value
+        val oldEnabled = priorState.shuffleEnabled
         val oldIndex = currentIndex
-        val currentItem = state.value.currentItem
+        val currentItem = priorState.currentItem
+        val savedPlaylistSource = autoResumeStore.loadPlaybackState()?.queueProvenance
+            ?.takeIf { it.kind == PtvMusicAutoQueueProvenance.PLAYLIST }
+        val playlistSource = savedPlaylistSource?.takeIf { saved ->
+            saved.matchesQueue(priorState.queue) && saved.matchesAuthoredQueue(originalQueue)
+        }
         if (currentItem != null) {
             val order = reorderMusicPlaybackQueue(
                 originalQueue,
@@ -1358,7 +1451,33 @@ class MusicPlaybackController(
                 "old=$oldEnabled updated=$enabled queueSize=${playbackQueue.size} " +
                 "currentIndexBefore=$oldIndex currentIndexAfter=$currentIndex",
         )
-        persistPlaybackState(force = true)
+        if (savedPlaylistSource != null) {
+            val currentOwner = autoResumeStore.currentLocalQueueOwner()
+            val persisted = if (playlistSource != null && currentOwner != null) {
+                autoResumeStore.savePlaylistQueueTransition(
+                    playbackState = state.value,
+                    expectedOwner = currentOwner,
+                    previousSource = playlistSource,
+                    updatedSource = playlistSource.forQueue(
+                        queue = state.value.queue,
+                        currentIndex = state.value.currentIndex,
+                        authoredQueue = originalQueue,
+                        authoredIndex = playbackQueueOriginalIndices.getOrNull(currentIndex),
+                    ),
+                )
+            } else {
+                false
+            }
+            if (!persisted) {
+                clearResidentPlayback(dispatchStopReport = false)
+                if (currentOwner != null && currentOwner == priorState.queueOwner) {
+                    autoResumeStore.clearPlaybackState()
+                }
+                return
+            }
+        } else {
+            persistPlaybackState(force = true)
+        }
         prefetchNextItem()
     }
 
@@ -1431,6 +1550,7 @@ class MusicPlaybackController(
         item: MusicItem,
         startPositionMs: Long,
         queueOwner: PtvMusicAutoQueueOwner? = state.value.queueOwner,
+        retainQueueProvenance: Boolean = true,
     ) {
         pendingItemId = item.id
         _state.update {
@@ -1452,7 +1572,7 @@ class MusicPlaybackController(
                 canRetry = false,
             )
         }
-        persistPlaybackState()
+        persistPlaybackState(force = !retainQueueProvenance, retainQueueProvenance = retainQueueProvenance)
     }
 
     private fun nextRetryAttempt(item: MusicItem): Int? = recoveryState.nextRetryAttempt(item.id)
@@ -1834,7 +1954,7 @@ class MusicPlaybackController(
         else -> this
     }
 
-    private fun persistPlaybackState(force: Boolean = false) {
+    private fun persistPlaybackState(force: Boolean = false, retainQueueProvenance: Boolean = true) {
         val playbackState = state.value
         val currentOwner = autoResumeStore.currentLocalQueueOwner()
         if (!isMusicPlaybackQueueOwnedBy(playbackState, currentOwner)) return
@@ -1853,6 +1973,8 @@ class MusicPlaybackController(
             playbackState = playbackState,
             expectedOwner = queueOwner,
             nowMs = nowMs,
+            retainQueueProvenance = retainQueueProvenance,
+            selectedAuthoredIndex = playbackQueueOriginalIndices.getOrNull(currentIndex),
         )
         if (!persisted) return
         lastPersistedAtMs = nowMs

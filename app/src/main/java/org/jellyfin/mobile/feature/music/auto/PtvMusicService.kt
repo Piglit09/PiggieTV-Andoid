@@ -191,6 +191,7 @@ class PtvMusicService : MediaLibraryService() {
                 observer = restoreObserver,
             ) { result ->
                 Timber.i("PTV Music Auto authenticated queue restore: ${result.message}")
+                serviceScope.launch { libraryCallback.restoreSavedRecommendationSession() }
                 publishSessionPlaybackState(
                     playbackController.state.value,
                     reason = "authenticatedRestore",

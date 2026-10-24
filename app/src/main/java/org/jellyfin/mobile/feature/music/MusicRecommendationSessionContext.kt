@@ -58,6 +58,41 @@ internal class MusicRecommendationSessionContext private constructor(
     )
 
     companion object {
+        internal fun restore(
+            owner: MusicRecommendationSessionOwner,
+            seed: MusicItem,
+            mode: MusicListeningMode,
+            recentPlayedItems: List<MusicItem>,
+            skippedIds: List<UUID>,
+            recommendedIds: List<UUID>,
+            catalogOffset: Int,
+            catalogExhausted: Boolean,
+            revision: Long,
+        ): MusicRecommendationSessionContext {
+            require(owner.serverUrl.isNotBlank() && seed.isPlayable && recentPlayedItems.all(MusicItem::isPlayable))
+            require(
+                recentPlayedItems.size <= MAX_RECENT_PLAYED && skippedIds.size <= MAX_SKIPPED &&
+                    recommendedIds.isNotEmpty() && recommendedIds.size <= MAX_RECOMMENDED,
+            )
+            require(recentPlayedItems.map(MusicItem::id).distinct().size == recentPlayedItems.size)
+            require(
+                skippedIds.distinct().size == skippedIds.size &&
+                    recommendedIds.distinct().size == recommendedIds.size,
+            )
+            require(catalogOffset >= 0 && revision >= 0)
+            return MusicRecommendationSessionContext(
+                owner = owner,
+                seed = seed,
+                selectedMode = mode,
+                recentPlayedItems = recentPlayedItems,
+                skippedIds = skippedIds,
+                recommendedIds = recommendedIds,
+                catalogOffset = catalogOffset,
+                catalogExhausted = catalogExhausted,
+                revision = revision,
+            )
+        }
+
         internal fun start(
             owner: MusicRecommendationSessionOwner,
             seed: MusicItem,

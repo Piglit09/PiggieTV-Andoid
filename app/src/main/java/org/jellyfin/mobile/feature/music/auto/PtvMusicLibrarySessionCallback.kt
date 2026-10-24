@@ -50,6 +50,7 @@ import org.jellyfin.mobile.feature.music.MusicPlaybackTransitionEvent
 import org.jellyfin.mobile.feature.music.MusicPlaybackTransitionReason
 import org.jellyfin.mobile.feature.music.MusicRecommendationBatch
 import org.jellyfin.mobile.feature.music.MusicRecommendationSessionContext
+import org.jellyfin.mobile.feature.music.MusicRecommendationSessionOwner
 import org.jellyfin.mobile.feature.music.MusicRepeatMode
 import org.jellyfin.mobile.feature.music.MusicRepository
 import org.jellyfin.mobile.feature.music.MusicSongAction
@@ -106,6 +107,7 @@ internal class PtvMusicLibrarySessionCallback(
     private class ActiveRecommendationSession(
         val identity: AutoSelectionIdentity,
         val generation: Long,
+        val sourceMediaId: String,
         var context: MusicRecommendationSessionContext,
         val expectedItemIds: MutableSet<UUID>,
         var activated: Boolean = false,
@@ -131,6 +133,88 @@ internal class PtvMusicLibrarySessionCallback(
     fun onServiceDestroyed() {
         synchronized(browseScopeLock) { clearRecommendationSessionLocked() }
         ioScope.cancel()
+    }
+
+    /** Rebuilds only the recommendation profile proven to belong to the restored authenticated queue. */
+    @Suppress("CyclomaticComplexMethod", "LongMethod", "ReturnCount")
+    suspend fun restoreSavedRecommendationSession(): Boolean {
+        val scope = syncBrowseScope() ?: return false
+        val identity = runCatching { captureSelectionIdentity(scope) }.getOrNull() ?: return false
+        val state = playbackController.state.value
+        val saved = resumeStore.loadPlaybackState() ?: return false
+        val source = saved.queueProvenance ?: return false
+        val snapshot = source.recommendation ?: return false
+        val sourceMatchesQueue = source.kind == PtvMusicAutoQueueProvenance.RECOMMENDATION &&
+            source.queueSha256 == saved.fullQueueSha256 && source.matchesQueue(state.queue)
+        val queueOwnerMatches = saved.queueOwnerOrNull() == identity.localOwner &&
+            state.queueOwner == identity.localOwner && playbackController.isCurrentQueueOwnedByAuthenticatedUser()
+        val sourceIsSupported = snapshot.sourceMediaId in
+            setOf(PtvMusicAutoIds.AUTO_PICKS, PtvMusicAutoIds.MORE_LIKE_THIS)
+        if (!sourceMatchesQueue || !queueOwnerMatches || !sourceIsSupported) {
+            return false
+        }
+        val mode = MusicListeningMode.entries.firstOrNull { it.name == snapshot.selectedMode } ?: return false
+        val seedId = snapshot.seedId.toUUIDOrNull() ?: return false
+        val recentIds = snapshot.recentPlayedIds.map(String::toUUIDOrNull)
+        val skippedIds = snapshot.skippedIds.map(String::toUUIDOrNull)
+        val recommendedIds = snapshot.recommendedIds.map(String::toUUIDOrNull)
+        if (recentIds.any { it == null } || skippedIds.any { it == null } || recommendedIds.any { it == null }) {
+            return false
+        }
+        val hydratedIds = (listOf(seedId) + recentIds.filterNotNull()).distinct()
+        val hydrated = runCatching { repository.loadItems(hydratedIds) }
+            .getOrNull()?.filter(MusicItem::isPlayable)?.associateBy(MusicItem::id) ?: return false
+        val seed = hydrated[seedId] ?: return false
+        val recent = recentIds.map { id -> hydrated[id] ?: return false }
+        val serverUrl = serverUrlForLocalId(identity.localOwner.serverId)?.trimEnd('/') ?: return false
+        val userId = identity.scope.userId.toUUIDOrNull() ?: return false
+        val restored = runCatching {
+            MusicRecommendationSessionContext.restore(
+                owner = MusicRecommendationSessionOwner(serverUrl, userId),
+                seed = seed,
+                mode = mode,
+                recentPlayedItems = recent,
+                skippedIds = skippedIds.filterNotNull(),
+                recommendedIds = recommendedIds.filterNotNull(),
+                catalogOffset = snapshot.catalogOffset,
+                catalogExhausted = snapshot.catalogExhausted,
+                revision = snapshot.revision,
+            )
+        }.getOrNull() ?: return false
+        if (!recommendationOwnerMatchesIdentity(restored, identity) ||
+            !restored.recommendedIds.containsAll(state.queue.map(MusicItem::id))
+        ) {
+            return false
+        }
+
+        return synchronized(browseScopeLock) {
+            val current = playbackController.state.value
+            val selectionIsCurrent = isSelectionIdentityCurrent(identity) &&
+                playbackController.isCurrentQueueOwnedByAuthenticatedUser() && current.queueOwner == identity.localOwner
+            val savedQueueIsCurrent = source.matchesQueue(current.queue) &&
+                resumeStore.loadPlaybackState()?.queueProvenance == source
+            if (!selectionIsCurrent || !savedQueueIsCurrent) {
+                return@synchronized false
+            }
+            if (recommendationSession != null) return@synchronized true
+            clearRecommendationSessionLocked()
+            selectedListeningMode = scope to mode
+            recommendationSession = ActiveRecommendationSession(
+                identity = identity,
+                generation = recommendationGeneration,
+                sourceMediaId = snapshot.sourceMediaId,
+                context = restored,
+                expectedItemIds = current.queue.map(MusicItem::id).toMutableSet(),
+                activated = true,
+            )
+            recommendationStateJob = ioScope.launch {
+                playbackController.state.collect(::observeRecommendationPlaybackState)
+            }
+            recommendationTransitionJob = ioScope.launch {
+                playbackController.transitionEvents.collect(::recordVerifiedRecommendationTransition)
+            }
+            true
+        }
     }
 
     override fun onConnect(
@@ -676,14 +760,14 @@ internal class PtvMusicLibrarySessionCallback(
         requireCurrentSelectionIdentity(identity)
         if (mediaId == PtvMusicAutoIds.AUTO_PICKS) {
             val context = repository.beginAutoRecommendationSession(firstItem, queue, listeningMode)
-            activateRecommendationSession(identity, selectionGeneration, context, queue) {
-                playbackController.play(
-                    item = firstItem,
-                    queue = queue,
-                    startPositionMs = startPosition,
-                    expectedOwner = identity.localOwner,
-                )
-            }
+            startGeneratedRecommendationPlayback(
+                firstItem,
+                queue,
+                startPosition,
+                identity,
+                selectionGeneration,
+                context,
+            )
         } else {
             commitReplacementSelection(identity, selectionGeneration) {
                 playbackController.play(
@@ -709,6 +793,31 @@ internal class PtvMusicLibrarySessionCallback(
             0,
             startPosition,
         )
+    }
+
+    private fun startGeneratedRecommendationPlayback(
+        firstItem: MusicItem,
+        queue: List<MusicItem>,
+        startPosition: Long,
+        identity: AutoSelectionIdentity,
+        selectionGeneration: Long,
+        context: MusicRecommendationSessionContext,
+    ) {
+        activateRecommendationSession(
+            identity,
+            selectionGeneration,
+            PtvMusicAutoIds.AUTO_PICKS,
+            context,
+            queue,
+        ) { source ->
+            playbackController.play(
+                item = firstItem,
+                queue = queue,
+                startPositionMs = startPosition,
+                expectedOwner = identity.localOwner,
+                queueProvenance = source,
+            )
+        }
     }
 
     override fun onCustomCommand(
@@ -759,11 +868,32 @@ internal class PtvMusicLibrarySessionCallback(
             val queue = state.queue.ifEmpty { listOf(currentItem) }
             val index = state.currentIndex.takeIf { it in queue.indices }
                 ?: queue.indexOfFirst { item -> item.id == currentItem.id }.coerceAtLeast(0)
-            MediaItemsWithStartPosition(
-                queue.map { item -> item.toAutoMediaItem() },
+            val savedSource = resumeStore.loadPlaybackState()?.queueProvenance
+            val playlistId = savedSource
+                ?.takeIf { source -> source.kind == PtvMusicAutoQueueProvenance.PLAYLIST && source.matchesQueue(queue) }
+                ?.playlistId?.toUUIDOrNull()
+            val response = MediaItemsWithStartPosition(
+                queue.mapIndexed { itemIndex, item ->
+                    if (playlistId == null) {
+                        item.toAutoMediaItem()
+                    } else {
+                        item.toAutoMediaItem(playlistTrackMediaId(playlistId, itemIndex, item.id))
+                    }
+                },
                 index,
                 state.positionMs,
             ).takeIf { isTrustedPlaybackScope(scope) } ?: emptyMediaItemsWithStartPosition()
+            if (savedSource?.kind == PtvMusicAutoQueueProvenance.RECOMMENDATION &&
+                response.mediaItems.isNotEmpty()
+            ) {
+                // Media3 needs the queue promptly. Hydrate the persisted recommendation profile
+                // separately; that path rechecks the account and queue before activation.
+                ioScope.launch {
+                    runCatching { restoreSavedRecommendationSession() }
+                        .onFailure { Timber.w(it, "PTV Music Auto recommendation profile restore unavailable") }
+                }
+            }
+            response
         }.getOrElse { error ->
             Timber.w(error, "PTV Music Auto playback resumption unavailable")
             emptyMediaItemsWithStartPosition()
@@ -948,6 +1078,7 @@ internal class PtvMusicLibrarySessionCallback(
             )
         ) {
             requireCurrentSelectionGeneration(identity, selectionGeneration)
+            attachActivePlaylistProvenance(mediaContext.playlist, identity)
             Timber.i(
                 "PTV Music Auto reused active queue for current item selectedMediaId=${selectedMediaItem.mediaId} " +
                     "queueSize=${playbackQueue.size} currentIndex=$playbackIndex position=${startPosition}ms",
@@ -960,19 +1091,46 @@ internal class PtvMusicLibrarySessionCallback(
                     startPositionMs = startPosition,
                     expectedOwner = identity.localOwner,
                     authoredQueueIndex = playbackIndex.takeIf { mediaContext.playlist != null },
+                    queueProvenance = playlistProvenance(mediaContext.playlist, playbackQueue, playbackIndex),
                 )
             }
         }
-        resumeStore.markLastPlaybackError(null)
-        resumeStore.markSessionCommand(
-            "play ${itemToPlay.id} playlist=${mediaContext.playlist?.id} " +
-                "activeQueue=${mediaContext.activeQueueContainsSelection} current=${mediaContext.selectedItemIsCurrent}",
-        )
+        recordResolvedSelection(itemToPlay, mediaContext)
 
         return MediaItemsWithStartPosition(
             resolvedMediaItems(playbackQueue, mediaContext.playlist),
             playbackIndex,
             startPosition,
+        )
+    }
+
+    private fun attachActivePlaylistProvenance(playlist: MusicItem?, identity: AutoSelectionIdentity) {
+        val playlistId = playlist?.id ?: return
+        val active = playbackController.state.value
+        val source = resumeStore.loadPlaybackState()?.queueProvenance?.takeIf { saved ->
+            saved.kind == PtvMusicAutoQueueProvenance.PLAYLIST &&
+                saved.playlistId == playlistId.toString() && saved.matchesQueue(active.queue)
+        } ?: return
+        resumeStore.attachQueueProvenance(
+            source.forQueue(active.queue, active.currentIndex),
+            active,
+            identity.localOwner,
+        )
+    }
+
+    private fun playlistProvenance(
+        playlist: MusicItem?,
+        playbackQueue: List<MusicItem>,
+        playbackIndex: Int,
+    ): PtvMusicAutoQueueProvenance? = playlist?.let { source ->
+        PtvMusicAutoQueueProvenance.playlist(source.id, playbackQueue, playbackIndex)
+    }
+
+    private fun recordResolvedSelection(itemToPlay: MusicItem, mediaContext: ResolvedMediaContext) {
+        resumeStore.markLastPlaybackError(null)
+        resumeStore.markSessionCommand(
+            "play ${itemToPlay.id} playlist=${mediaContext.playlist?.id} " +
+                "activeQueue=${mediaContext.activeQueueContainsSelection} current=${mediaContext.selectedItemIsCurrent}",
         )
     }
 
@@ -1082,12 +1240,19 @@ internal class PtvMusicLibrarySessionCallback(
             "PTV Music Auto listening mode changed while selecting music."
         }
         val context = repository.beginAutoRecommendationSession(currentItem, generatedQueue, listeningMode)
-        activateRecommendationSession(identity, selectionGeneration, context, generatedQueue) {
+        activateRecommendationSession(
+            identity,
+            selectionGeneration,
+            PtvMusicAutoIds.MORE_LIKE_THIS,
+            context,
+            generatedQueue,
+        ) { source ->
             playbackController.play(
                 item = firstItem,
                 queue = generatedQueue,
                 startPositionMs = startPosition,
                 expectedOwner = identity.localOwner,
+                queueProvenance = source,
             )
         }
         resumeStore.markLastPlaybackError(null)
@@ -1805,9 +1970,10 @@ internal class PtvMusicLibrarySessionCallback(
     private fun activateRecommendationSession(
         identity: AutoSelectionIdentity,
         selectionGeneration: Long,
+        sourceMediaId: String,
         context: MusicRecommendationSessionContext,
         queue: List<MusicItem>,
-        startPlayback: () -> Unit,
+        startPlayback: (PtvMusicAutoQueueProvenance) -> Unit,
     ) {
         synchronized(browseScopeLock) {
             requireCurrentSelectionIdentity(identity)
@@ -1824,9 +1990,15 @@ internal class PtvMusicLibrarySessionCallback(
             check(itemIds.isNotEmpty() && context.recommendedIds.containsAll(itemIds)) {
                 "PTV Music Auto recommendation session did not authorize the selected queue."
             }
-            startPlayback()
+            startPlayback(recommendationProvenance(sourceMediaId, context, queue))
             clearRecommendationSessionLocked()
-            recommendationSession = ActiveRecommendationSession(identity, recommendationGeneration, context, itemIds)
+            recommendationSession = ActiveRecommendationSession(
+                identity = identity,
+                generation = recommendationGeneration,
+                sourceMediaId = sourceMediaId,
+                context = context,
+                expectedItemIds = itemIds,
+            )
             recommendationStateJob = ioScope.launch {
                 playbackController.state.collect(::observeRecommendationPlaybackState)
             }
@@ -1835,6 +2007,25 @@ internal class PtvMusicLibrarySessionCallback(
             }
         }
     }
+
+    private fun recommendationProvenance(
+        sourceMediaId: String,
+        context: MusicRecommendationSessionContext,
+        queue: List<MusicItem>,
+    ): PtvMusicAutoQueueProvenance = PtvMusicAutoQueueProvenance.recommendation(
+        queue,
+        PtvMusicAutoRecommendationSnapshot(
+            sourceMediaId = sourceMediaId,
+            selectedMode = context.selectedMode.name,
+            seedId = context.seed.id.toString(),
+            recentPlayedIds = context.recentPlayedIds.map(UUID::toString),
+            skippedIds = context.skippedIds.map(UUID::toString),
+            recommendedIds = context.recommendedIds.map(UUID::toString),
+            catalogOffset = context.catalogOffset,
+            catalogExhausted = context.catalogExhausted,
+            revision = context.revision,
+        ),
+    )
 
     private fun recommendationOwnerMatchesIdentity(
         context: MusicRecommendationSessionContext,
@@ -2069,6 +2260,7 @@ internal class PtvMusicLibrarySessionCallback(
         session.expectedItemIds.clear()
         session.expectedItemIds.addAll(residentIds)
         session.context = batch.context
+        persistRecommendationSession(session, playbackController.state.value)
         rememberItems(residentQueue, session.identity.scope)
     }
 
@@ -2084,6 +2276,7 @@ internal class PtvMusicLibrarySessionCallback(
                 MusicPlaybackTransitionReason.EXPLICIT_SKIP ->
                     session.context.recordSkipped(event.previousItemId)
             }
+            persistRecommendationSession(session, state)
             session.lastRefillItemId = null
             session.refillFailureItemId = null
             session.refillFailureCount = 0
@@ -2093,6 +2286,20 @@ internal class PtvMusicLibrarySessionCallback(
             recommendationRefillJob = null
         }
         observeRecommendationPlaybackState(state)
+    }
+
+    private fun persistRecommendationSession(session: ActiveRecommendationSession, state: MusicPlaybackState) {
+        if (state.queueOwner != session.identity.localOwner ||
+            !recommendationQueueMatches(state, session) ||
+            !isSelectionIdentityCurrent(session.identity)
+        ) {
+            return
+        }
+        resumeStore.attachQueueProvenance(
+            recommendationProvenance(session.sourceMediaId, session.context, state.queue),
+            state,
+            session.identity.localOwner,
+        )
     }
 
     private fun isVerifiedRecommendationTransition(
