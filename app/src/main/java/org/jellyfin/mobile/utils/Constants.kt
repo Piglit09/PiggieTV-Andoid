@@ -155,12 +155,7 @@ object Constants {
 
     // Video player intent extras
     const val EXTRA_MEDIA_PLAY_OPTIONS = "org.jellyfin.mobile.MEDIA_PLAY_OPTIONS"
-    const val EXTRA_LIBRARY_READER_URI = "org.jellyfin.mobile.LIBRARY_READER_URI"
-    const val EXTRA_LIBRARY_READER_TITLE = "org.jellyfin.mobile.LIBRARY_READER_TITLE"
-    const val EXTRA_LIBRARY_READER_FILENAME = "org.jellyfin.mobile.LIBRARY_READER_FILENAME"
-    const val EXTRA_LIBRARY_READER_MIME_TYPE = "org.jellyfin.mobile.LIBRARY_READER_MIME_TYPE"
-    const val EXTRA_LIBRARY_READER_KEY = "org.jellyfin.mobile.LIBRARY_READER_KEY"
-    const val EXTRA_LIBRARY_READER_ITEM_ID = "org.jellyfin.mobile.LIBRARY_READER_ITEM_ID"
+    const val EXTRA_LIBRARY_READER_REQUEST_ID = "org.jellyfin.mobile.LIBRARY_READER_REQUEST_ID"
 
     // External player result actions
     const val MPV_PLAYER_RESULT_ACTION = "is.xyz.mpv.MPVActivity.result"

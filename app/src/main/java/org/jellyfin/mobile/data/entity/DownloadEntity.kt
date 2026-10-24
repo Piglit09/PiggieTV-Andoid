@@ -9,6 +9,7 @@ import androidx.room.TypeConverter
 import androidx.room.TypeConverters
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.Json.Default.decodeFromString
+import org.jellyfin.mobile.data.DownloadCredentialSanitizer
 import org.jellyfin.mobile.data.entity.DownloadEntity.Key.ITEM_ID
 import org.jellyfin.mobile.data.entity.DownloadEntity.Key.TABLE_NAME
 import org.jellyfin.mobile.player.source.LocalJellyfinMediaSource
@@ -75,5 +76,10 @@ class LocalJellyfinMediaSourceConverter {
     fun toLocalJellyfinMediaSource(value: String): LocalJellyfinMediaSource = decodeFromString(value)
 
     @TypeConverter
-    fun fromLocalJellyfinMediaSource(value: LocalJellyfinMediaSource): String = Json.encodeToString(value)
+    fun fromLocalJellyfinMediaSource(value: LocalJellyfinMediaSource): String {
+        val serialized = Json.encodeToString(value)
+        return requireNotNull(DownloadCredentialSanitizer.sanitizeSerializedMediaSource(serialized)) {
+            "Download media source could not be persisted safely."
+        }
+    }
 }

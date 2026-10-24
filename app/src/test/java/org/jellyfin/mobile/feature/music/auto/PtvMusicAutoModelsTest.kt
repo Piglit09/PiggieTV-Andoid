@@ -29,20 +29,27 @@ class PtvMusicAutoModelsTest {
 
     @Test
     fun `root items expose driver safe music rows`() {
+        PTV_MUSIC_AUTO_ROOT_ITEMS.map(PtvMusicAutoRootItem::mediaId).toSet().size shouldBe
+            PTV_MUSIC_AUTO_ROOT_ITEMS.size
+        PTV_MUSIC_AUTO_ROOT_ITEMS.any { item -> item.mediaId == PtvMusicAutoCategory.SONGS.mediaId }
+            .shouldBeFalse()
+    }
+
+    @Test
+    fun `root prioritizes playlist collections while retaining existing destinations`() {
         PTV_MUSIC_AUTO_ROOT_ITEMS.map(PtvMusicAutoRootItem::mediaId) shouldBe listOf(
-            PtvMusicAutoIds.RECOMMENDED_MIXES,
-            PtvMusicAutoMix.LATEST.mediaId,
-            PtvMusicAutoCategory.FAVORITES.mediaId,
+            PtvMusicAutoCategory.PLAYLISTS.mediaId,
             PtvMusicAutoCategory.RECENTLY_PLAYED.mediaId,
-            PtvMusicAutoCategory.GENRES.mediaId,
+            PtvMusicAutoCategory.FAVORITES.mediaId,
+            PtvMusicAutoMix.LATEST.mediaId,
             PtvMusicAutoCategory.ALBUMS.mediaId,
             PtvMusicAutoCategory.ARTISTS.mediaId,
-            PtvMusicAutoCategory.PLAYLISTS.mediaId,
+            PtvMusicAutoCategory.GENRES.mediaId,
+            PtvMusicAutoIds.RECOMMENDED_MIXES,
+            PtvMusicAutoIds.LISTENING_MODES,
             PtvMusicAutoIds.AUTO_PICKS,
             PtvMusicAutoIds.MORE,
         )
-        PTV_MUSIC_AUTO_ROOT_ITEMS.any { item -> item.mediaId == PtvMusicAutoCategory.SONGS.mediaId }
-            .shouldBeFalse()
     }
 
     @Test

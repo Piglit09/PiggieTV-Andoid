@@ -6,6 +6,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+if ([string]::IsNullOrWhiteSpace($Serial) -or [string]::IsNullOrWhiteSpace($ApkPath)) {
+    throw 'An exact approved device serial and APK path are required.'
+}
+
 function Get-RepoRoot {
     return (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 }
@@ -110,39 +114,48 @@ function Get-AuthorizedDevices {
 }
 
 $repoRoot = Get-RepoRoot
-$resolvedAdbPath = Resolve-AdbPath -ExplicitAdbPath $AdbPath
 $resolvedApkPath = Resolve-ApkPath -RepoRoot $repoRoot -ExplicitApkPath $ApkPath
-$deviceResult = Get-AuthorizedDevices -ResolvedAdbPath $resolvedAdbPath
-$authorizedDevices = @($deviceResult.Devices)
-
-Write-Host "adb: $resolvedAdbPath"
-Write-Host "APK: $resolvedApkPath"
-
-if ($authorizedDevices.Count -eq 0) {
-    Write-Host ""
-    Write-Host "adb devices -l:"
-    $deviceResult.Raw | ForEach-Object { Write-Host $_ }
-    throw "No authorized adb device is attached. Connect a phone, enable USB debugging, and accept the authorization prompt."
-}
-
-if ($Serial) {
-    $matchingDevice = $authorizedDevices | Where-Object { $_.Serial -eq $Serial } | Select-Object -First 1
-    if (-not $matchingDevice) {
-        throw "Requested adb device '$Serial' is not authorized or not attached."
+$apkLock = [IO.File]::Open($resolvedApkPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+try {
+    & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot '..\..\scripts\ptv-mobile-workspace-preflight.ps1') -Mode Install -TargetId $Serial -ArtifactPath $resolvedApkPath
+    if ($LASTEXITCODE -ne 0) {
+        throw 'PTV Mobile device-install preflight denied the operation.'
     }
-} elseif ($authorizedDevices.Count -gt 1) {
-    Write-Host ""
-    Write-Host "Authorized devices:"
-    $authorizedDevices | ForEach-Object { Write-Host "  $($_.Detail)" }
-    throw "More than one authorized device is attached. Re-run with -Serial <device-serial>."
-} else {
-    $Serial = $authorizedDevices[0].Serial
-}
+    $resolvedAdbPath = Resolve-AdbPath -ExplicitAdbPath $AdbPath
+    $deviceResult = Get-AuthorizedDevices -ResolvedAdbPath $resolvedAdbPath
+    $authorizedDevices = @($deviceResult.Devices)
 
-Write-Host "Installing to device: $Serial"
-& $resolvedAdbPath -s $Serial install -r $resolvedApkPath
-if ($LASTEXITCODE -ne 0) {
-    throw "adb install failed with exit code $LASTEXITCODE"
-}
+    Write-Host "adb: $resolvedAdbPath"
+    Write-Host "APK: $resolvedApkPath"
 
-Write-Host "Install complete."
+    if ($authorizedDevices.Count -eq 0) {
+        Write-Host ""
+        Write-Host "adb devices -l:"
+        $deviceResult.Raw | ForEach-Object { Write-Host $_ }
+        throw "No authorized adb device is attached. Connect a phone, enable USB debugging, and accept the authorization prompt."
+    }
+
+    if ($Serial) {
+        $matchingDevice = $authorizedDevices | Where-Object { $_.Serial -eq $Serial } | Select-Object -First 1
+        if (-not $matchingDevice) {
+            throw "Requested adb device '$Serial' is not authorized or not attached."
+        }
+    } elseif ($authorizedDevices.Count -gt 1) {
+        Write-Host ""
+        Write-Host "Authorized devices:"
+        $authorizedDevices | ForEach-Object { Write-Host "  $($_.Detail)" }
+        throw "More than one authorized device is attached. Re-run with -Serial <device-serial>."
+    } else {
+        $Serial = $authorizedDevices[0].Serial
+    }
+
+    Write-Host "Installing to device: $Serial"
+    & $resolvedAdbPath -s $Serial install -r $resolvedApkPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "adb install failed with exit code $LASTEXITCODE"
+    }
+
+    Write-Host "Install complete."
+} finally {
+    $apkLock.Dispose()
+}

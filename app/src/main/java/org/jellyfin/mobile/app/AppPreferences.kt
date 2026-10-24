@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import android.os.Environment
 import android.view.WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
 import androidx.core.content.edit
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import org.jellyfin.mobile.feature.library.OpdsAuthConfig
 import org.jellyfin.mobile.player.mediasegments.MediaSegmentAction
 import org.jellyfin.mobile.player.mediasegments.toMediaSegmentActionsString
@@ -19,6 +20,10 @@ class AppPreferences(context: Context) {
         context.getSharedPreferences("${context.packageName}_preferences", Context.MODE_PRIVATE)
     private val secureLibraryCredentials = SecureLibraryCredentials(context)
 
+    init {
+        readAndCleanLibraryServerBaseUrl()
+    }
+
     var currentServerId: Long?
         get() = sharedPreferences.getLong(Constants.PREF_SERVER_ID, -1).takeIf { it >= 0 }
         set(value) {
@@ -27,6 +32,15 @@ class AppPreferences(context: Context) {
             }
         }
 
+    /** Synchronous, verified server-pointer update used when auth ownership changes. */
+    fun commitCurrentServerId(value: Long?): Boolean {
+        val committed = sharedPreferences.edit().run {
+            if (value != null) putLong(Constants.PREF_SERVER_ID, value) else remove(Constants.PREF_SERVER_ID)
+            commit()
+        }
+        return committed && currentServerId == value
+    }
+
     var currentUserId: Long?
         get() = sharedPreferences.getLong(Constants.PREF_USER_ID, -1).takeIf { it >= 0 }
         set(value) {
@@ -34,6 +48,15 @@ class AppPreferences(context: Context) {
                 if (value != null) putLong(Constants.PREF_USER_ID, value) else remove(Constants.PREF_USER_ID)
             }
         }
+
+    /** Synchronous, verified auth-pointer update used by secure commit, migration, and logout. */
+    fun commitCurrentUserId(value: Long?): Boolean {
+        val committed = sharedPreferences.edit().run {
+            if (value != null) putLong(Constants.PREF_USER_ID, value) else remove(Constants.PREF_USER_ID)
+            commit()
+        }
+        return committed && currentUserId == value
+    }
 
     var ignoreBatteryOptimizations: Boolean
         get() = sharedPreferences.getBoolean(Constants.PREF_IGNORE_BATTERY_OPTIMIZATIONS, false)
@@ -119,12 +142,10 @@ class AppPreferences(context: Context) {
         set(value) = sharedPreferences.edit { putString(Constants.PREF_MEDIA_SEGMENT_ACTIONS, value) }
 
     var libraryServerBaseUrl: String
-        get() = sharedPreferences.getString(
-            Constants.PREF_LIBRARY_SERVER_BASE_URL,
-            Constants.PIGGIETV_LIBRARY_DEFAULT_URL,
-        )!!.trimEnd('/')
-        set(value) = sharedPreferences.edit {
-            putString(Constants.PREF_LIBRARY_SERVER_BASE_URL, value.trim().trimEnd('/'))
+        get() = readAndCleanLibraryServerBaseUrl()
+        set(value) {
+            val normalized = normalizeLibraryServerBaseUrl(value)
+            commitLibraryServerBaseUrl(normalized?.takeIf(String::isNotEmpty))
         }
 
     var libraryUsername: String?
@@ -151,6 +172,34 @@ class AppPreferences(context: Context) {
             password = libraryPassword,
             bearerToken = libraryBearerToken,
         )
+
+    private fun readAndCleanLibraryServerBaseUrl(): String {
+        val stored = sharedPreferences.getString(
+            Constants.PREF_LIBRARY_SERVER_BASE_URL,
+            Constants.PIGGIETV_LIBRARY_DEFAULT_URL,
+        ).orEmpty()
+        val normalized = normalizeLibraryServerBaseUrl(stored)
+        if (normalized != null && normalized == stored) return normalized
+
+        commitLibraryServerBaseUrl(normalized?.takeIf(String::isNotEmpty))
+        return normalized ?: Constants.PIGGIETV_LIBRARY_DEFAULT_URL
+    }
+
+    private fun commitLibraryServerBaseUrl(value: String?) {
+        val editor = sharedPreferences.edit()
+        if (value == null) {
+            editor.remove(Constants.PREF_LIBRARY_SERVER_BASE_URL)
+        } else {
+            editor.putString(Constants.PREF_LIBRARY_SERVER_BASE_URL, value)
+        }
+        val committed = editor.commit()
+        val verified = if (value == null) {
+            !sharedPreferences.contains(Constants.PREF_LIBRARY_SERVER_BASE_URL)
+        } else {
+            sharedPreferences.getString(Constants.PREF_LIBRARY_SERVER_BASE_URL, null) == value
+        }
+        check(committed && verified) { "Library server settings could not be safely updated." }
+    }
 
     val musicNotificationAlwaysDismissible: Boolean
         get() = sharedPreferences.getBoolean(Constants.PREF_MUSIC_NOTIFICATION_ALWAYS_DISMISSIBLE, false)
@@ -192,4 +241,15 @@ class AppPreferences(context: Context) {
     var externalPlayerApp: String
         get() = sharedPreferences.getString(Constants.PREF_EXTERNAL_PLAYER_APP, ExternalPlayerPackage.SYSTEM_DEFAULT)!!
         set(value) = sharedPreferences.edit { putString(Constants.PREF_EXTERNAL_PLAYER_APP, value) }
+}
+
+@Suppress("ReturnCount")
+internal fun normalizeLibraryServerBaseUrl(value: String): String? {
+    val trimmed = value.trim()
+    if (trimmed.isEmpty()) return ""
+    val parsed = trimmed.toHttpUrlOrNull() ?: return null
+    if (parsed.scheme !in setOf("http", "https")) return null
+    if (parsed.username.isNotEmpty() || parsed.password.isNotEmpty()) return null
+    if (parsed.query != null || parsed.fragment != null) return null
+    return parsed.toString().trimEnd('/')
 }

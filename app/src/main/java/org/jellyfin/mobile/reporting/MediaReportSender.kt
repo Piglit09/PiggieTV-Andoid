@@ -11,21 +11,29 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.RequestBody
+import okio.BufferedSink
+import org.jellyfin.mobile.auth.transport.AuthTransportRealm
+import org.jellyfin.mobile.auth.transport.AuthTransportSession
+import org.jellyfin.mobile.auth.transport.INTERNAL_AUTH_EPOCH_HEADER
+import org.jellyfin.mobile.auth.transport.authTransportRealm
+import org.jellyfin.mobile.auth.transport.hasSameOrigin
 import org.jellyfin.sdk.api.client.ApiClient
-import org.jellyfin.sdk.api.client.util.AuthorizationHeaderBuilder
 import timber.log.Timber
 import java.io.IOException
+import java.io.InterruptedIOException
 import java.util.concurrent.TimeUnit
 
-class MediaReportSender(
+class MediaReportSender internal constructor(
     private val okHttpClient: OkHttpClient,
     private val apiClient: ApiClient,
+    private val authTransportSession: AuthTransportSession,
     private val ioDispatcher: CoroutineDispatcher,
 ) {
     private val reportClient = okHttpClient.newBuilder()
         .followRedirects(false)
         .followSslRedirects(false)
+        .retryOnConnectionFailure(false)
         .callTimeout(REPORT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
         .build()
 
@@ -34,22 +42,22 @@ class MediaReportSender(
         reason: MediaReportReason,
         details: String?,
     ): MediaReportDeliveryResult = withContext(ioDispatcher) {
-        val endpoint = buildMediaReportEndpoint(apiClient.baseUrl)
-            ?: return@withContext MediaReportDeliveryResult.UNAVAILABLE
-        val accessToken = apiClient.accessToken?.takeIf(String::isNotBlank)
-            ?: return@withContext MediaReportDeliveryResult.UNAVAILABLE
-        val authorizationHeader = AuthorizationHeaderBuilder.buildHeader(
-            clientName = apiClient.clientInfo.name,
-            clientVersion = apiClient.clientInfo.version,
-            deviceId = apiClient.deviceInfo.id,
-            deviceName = apiClient.deviceInfo.name,
-            accessToken = accessToken,
-        )
+        val route = authTransportSession.withCurrentSnapshot { snapshot ->
+            val endpoint = buildMediaReportEndpoint(apiClient.baseUrl)
+                ?: return@withCurrentSnapshot null
+            snapshot
+                ?.takeIf { candidate ->
+                    candidate.serverOrigin?.hasSameOrigin(endpoint) == true &&
+                        candidate.matchesAccessToken(apiClient.accessToken)
+                }
+                ?.let { MediaReportRoute(endpoint, it) }
+        } ?: return@withContext MediaReportDeliveryResult.UNAVAILABLE
         val request = Request.Builder()
-            .url(endpoint)
-            .header("Authorization", authorizationHeader)
+            .url(route.endpoint)
+            .header(INTERNAL_AUTH_EPOCH_HEADER, route.snapshot.epoch.toString())
             .header("Accept", "application/json")
-            .post(buildMediaReportPayload(target, reason, details).toString().toRequestBody(JSON_MEDIA_TYPE))
+            .post(buildMediaReportPayload(target, reason, details).toString().toOneShotReportBody())
+            .authTransportRealm(AuthTransportRealm.JELLYFIN)
             .build()
 
         try {
@@ -58,12 +66,29 @@ class MediaReportSender(
             }
         } catch (error: CancellationException) {
             throw error
+        } catch (error: InterruptedIOException) {
+            if (
+                error.message == AUTH_OPERATION_SUPERSEDED ||
+                authTransportSession.currentSnapshot() !== route.snapshot
+            ) {
+                throw CancellationException(AUTH_OPERATION_SUPERSEDED).also { it.initCause(error) }
+            }
+            Timber.w("Could not deliver PiggieTV media report: NETWORK_UNAVAILABLE")
+            MediaReportDeliveryResult.FAILED
         } catch (error: IOException) {
-            Timber.w(error, "Could not deliver PiggieTV media report")
+            if (authTransportSession.currentSnapshot() !== route.snapshot) {
+                throw CancellationException(AUTH_OPERATION_SUPERSEDED).also { it.initCause(error) }
+            }
+            Timber.w("Could not deliver PiggieTV media report: NETWORK_UNAVAILABLE")
             MediaReportDeliveryResult.FAILED
         }
     }
 }
+
+private data class MediaReportRoute(
+    val endpoint: HttpUrl,
+    val snapshot: org.jellyfin.mobile.auth.transport.AuthTransportSnapshot,
+)
 
 enum class MediaReportDeliveryResult {
     SENT,
@@ -91,11 +116,9 @@ internal fun buildMediaReportPayload(
 ): JsonObject = buildJsonObject {
     put("schemaVersion", MEDIA_REPORT_SCHEMA_VERSION)
     put("itemId", target.itemId.trim().limit(ITEM_ID_LIMIT))
-    put("title", target.title.trim().ifBlank { "Unknown" }.limit(TITLE_LIMIT))
     put("source", target.source.wireName)
     put("reason", reason.wireName)
 
-    target.subtitle?.trim()?.takeIf(String::isNotBlank)?.let { put("subtitle", it.limit(TITLE_LIMIT)) }
     target.type?.trim()?.takeIf(String::isNotBlank)?.let { put("itemType", it.limit(TYPE_LIMIT)) }
     target.playbackPositionMs?.coerceAtLeast(0)?.let { put("playbackPositionMs", it) }
     target.mediaSourceId?.trim()?.takeIf(String::isNotBlank)?.let { put("mediaSourceId", it.limit(ITEM_ID_LIMIT)) }
@@ -112,13 +135,28 @@ internal fun classifyMediaReportResponse(statusCode: Int): MediaReportDeliveryRe
 
 private fun String.limit(maxLength: Int): String = if (length <= maxLength) this else take(maxLength)
 
+private fun String.toOneShotReportBody(): RequestBody {
+    val bytes = toByteArray(Charsets.UTF_8)
+    return object : RequestBody() {
+        override fun contentType() = JSON_MEDIA_TYPE
+
+        override fun contentLength(): Long = bytes.size.toLong()
+
+        override fun isOneShot(): Boolean = true
+
+        override fun writeTo(sink: BufferedSink) {
+            sink.write(bytes)
+        }
+    }
+}
+
 private const val MEDIA_REPORT_ROUTE = "Ptv/v1/reports/media"
 private const val MEDIA_REPORT_SCHEMA_VERSION = 1
 private const val ITEM_ID_LIMIT = 128
-private const val TITLE_LIMIT = 256
 private const val TYPE_LIMIT = 64
-private const val DETAILS_LIMIT = 2_000
+private const val DETAILS_LIMIT = 1_024
 private const val REPORT_TIMEOUT_SECONDS = 15L
+private const val AUTH_OPERATION_SUPERSEDED = "AUTH_OPERATION_SUPERSEDED"
 private const val HTTP_SUCCESS_MIN = 200
 private const val HTTP_SUCCESS_MAX = 299
 private const val HTTP_NOT_FOUND = 404

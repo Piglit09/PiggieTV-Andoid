@@ -23,11 +23,13 @@ import coil3.ImageLoader
 import coil3.request.ImageRequest
 import coil3.toBitmap
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -35,6 +37,9 @@ import kotlinx.coroutines.withContext
 import org.jellyfin.mobile.MainActivity
 import org.jellyfin.mobile.R
 import org.jellyfin.mobile.app.ApiClientController
+import org.jellyfin.mobile.auth.MobileAuthState
+import org.jellyfin.mobile.data.dao.ServerDao
+import org.jellyfin.mobile.data.dao.UserDao
 import org.jellyfin.mobile.feature.music.MusicPlaybackController
 import org.jellyfin.mobile.feature.music.MusicPlaybackState
 import org.jellyfin.mobile.feature.music.MusicRepeatMode
@@ -47,6 +52,7 @@ import org.koin.android.ext.android.inject
 import timber.log.Timber
 
 @UnstableApi
+@Suppress("LargeClass") // Media3 requires lifecycle, session, and notification ownership in this service.
 class PtvMusicService : MediaLibraryService() {
     private val apiClientController: ApiClientController by inject()
     private val musicRepository: MusicRepository by inject()
@@ -54,11 +60,14 @@ class PtvMusicService : MediaLibraryService() {
     private val songActionHandler: MusicSongActionHandler by inject()
     private val resumeStore: PtvMusicAutoResumeStore by inject()
     private val resumeCoordinator: PtvMusicAutoResumeCoordinator by inject()
+    private val serverDao: ServerDao by inject()
+    private val userDao: UserDao by inject()
     private val imageLoader: ImageLoader by inject()
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val notificationManager: NotificationManager by lazy { getSystemService()!! }
 
     private var mediaLibrarySession: MediaLibrarySession? = null
+    private var libraryCallback: PtvMusicLibrarySessionCallback? = null
     private var sessionPlayer: PtvMusicSessionPlayer? = null
     private var foregroundStartRequested = false
     private var media3ForegroundRequired = false
@@ -68,6 +77,11 @@ class PtvMusicService : MediaLibraryService() {
     private var notificationArtworkTrackId: String? = null
     private var notificationArtwork: Bitmap? = null
     private var notificationArtworkJob: Job? = null
+
+    @Volatile
+    private var queueAuthenticationProof: PtvMusicQueueAuthenticationProof? = null
+    private var pendingQueueAuthentication: PtvMusicQueueAuthenticationProof? = null
+    private var queueAuthenticationJob: Job? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -89,30 +103,49 @@ class PtvMusicService : MediaLibraryService() {
             Timber.i("PTV Music Auto restoring saved Jellyfin session")
             runCatching {
                 apiClientController.loadSavedServerUser()
-            }.onSuccess {
-                Timber.i("PTV Music Auto saved Jellyfin session restore finished")
+            }.onSuccess { userId ->
+                if (userId == null) {
+                    Timber.w("PTV Music Auto saved Jellyfin session requires phone sign-in or reconnection")
+                } else {
+                    Timber.i("PTV Music Auto saved Jellyfin session restore finished authenticated=true")
+                }
             }.onFailure { error ->
                 Timber.w(error, "PTV Music Auto could not restore the saved Jellyfin session")
-            }
-            Unit
+            }.getOrNull()
         }
 
         resumeStore.markAutoConnection()
-        sessionPlayer = PtvMusicSessionPlayer(playbackController)
+        sessionPlayer = PtvMusicSessionPlayer(
+            playbackController,
+            ::isCurrentSessionQueueAuthenticated,
+            pendingQueueAuthenticationProof = {
+                // Media3 may send Play before the state collector starts account proof for a
+                // restored queue. Start that proof here without exposing the queue prematurely.
+                val state = playbackController.state.value
+                refreshQueueAuthenticationProof(state)
+                pendingQueueAuthentication?.takeIf { proof ->
+                    proof.authentication == apiClientController.authState.value && state.queueOwner == proof.owner
+                }
+            },
+        )
         val initialPlaybackState = playbackController.state.value
-        val initialButtons = PtvMusicAutoCommand.buttonsFor(initialPlaybackState)
+        val initialButtons = PtvMusicAutoCommand.buttonsFor(visibleSessionPlaybackState(initialPlaybackState))
+        val libraryCallback = PtvMusicLibrarySessionCallback(
+            context = this,
+            repository = musicRepository,
+            playbackController = playbackController,
+            songActionHandler = songActionHandler,
+            resumeStore = resumeStore,
+            resumeCoordinator = resumeCoordinator,
+            savedSessionReady = sessionReady,
+            authState = apiClientController.authState,
+            serverUrlForLocalId = { id -> serverDao.getServer(id)?.hostname?.trimEnd('/') },
+        )
+        this.libraryCallback = libraryCallback
         mediaLibrarySession = MediaLibrarySession.Builder(
             this,
             requireNotNull(sessionPlayer),
-            PtvMusicLibrarySessionCallback(
-                context = this,
-                repository = musicRepository,
-                playbackController = playbackController,
-                songActionHandler = songActionHandler,
-                resumeStore = resumeStore,
-                resumeCoordinator = resumeCoordinator,
-                savedSessionReady = sessionReady,
-            ),
+            libraryCallback,
         )
             .setId(SESSION_ID)
             .setSessionActivity(buildSessionActivityPendingIntent())
@@ -123,9 +156,53 @@ class PtvMusicService : MediaLibraryService() {
         publishRuntimeStatus()
 
         serviceScope.launch {
-            sessionReady.await()
-            val result = resumeCoordinator.restoreQueueIfNeeded()
-            Timber.i("PTV Music Auto restore on service create: ${result.message}")
+            apiClientController.authState.collect { authState ->
+                playbackController.discardQueueIfOwnershipChanged()
+                publishSessionPlaybackState(
+                    playbackController.state.value,
+                    reason = "authenticationChanged",
+                    force = true,
+                )
+                libraryCallback.onAuthenticationChanged()
+                mediaLibrarySession?.notifyChildrenChanged(
+                    PtvMusicAutoIds.ROOT,
+                    ptvMusicAutoRootItemsFor(authState).size,
+                    null,
+                )
+            }
+        }
+
+        serviceScope.launch {
+            val restoreObserver = PtvMusicAuthenticatedRestoreObserver(
+                currentAuthentication = { apiClientController.authState.value },
+                currentLocalOwner = resumeStore::currentLocalQueueOwner,
+                loadSavedState = resumeStore::loadPlaybackState,
+                resolveExternalUserId = { owner ->
+                    withContext(Dispatchers.IO) {
+                        runCatching { userDao.getServerUser(owner.serverId, owner.userId)?.user?.userId?.toString() }
+                            .getOrNull()
+                    }
+                },
+                restoreQueue = resumeCoordinator::restoreQueueIfNeeded,
+            )
+            observePtvMusicAuthenticatedQueueRestoration(
+                savedSessionReady = sessionReady,
+                authenticationStates = apiClientController.authState,
+                observer = restoreObserver,
+            ) { result ->
+                Timber.i("PTV Music Auto authenticated queue restore: ${result.message}")
+                serviceScope.launch { libraryCallback.restoreSavedRecommendationSession() }
+                publishSessionPlaybackState(
+                    playbackController.state.value,
+                    reason = "authenticatedRestore",
+                    force = true,
+                )
+                mediaLibrarySession?.notifyChildrenChanged(
+                    PtvMusicAutoIds.ROOT,
+                    ptvMusicAutoRootItemsFor(apiClientController.authState.value).size,
+                    null,
+                )
+            }
         }
         serviceScope.launch {
             playbackController.state
@@ -190,10 +267,17 @@ class PtvMusicService : MediaLibraryService() {
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        val playbackState = playbackController.state.value
-        if (foregroundStartRequested) {
+        val playbackState = visibleSessionPlaybackState(playbackController.state.value)
+        if (
+            shouldKeepPtvMusicServiceOnTaskRemoved(
+                foregroundStartRequested,
+                playbackState,
+                playbackController.mediaSessionPlayer.playWhenReady,
+                sessionPlayer?.hasPendingPlayFor(pendingQueueAuthentication) == true,
+            )
+        ) {
             Timber.i(
-                "PTV Music task removed during foreground playback; keeping service alive " +
+                "PTV Music task removed during active or foreground playback; keeping service alive " +
                     "playing=${playbackState.isPlaying} buffering=${playbackState.isBuffering} " +
                     "queue=${playbackState.queue.size} currentTrack=${playbackState.currentItem?.id}",
             )
@@ -206,7 +290,7 @@ class PtvMusicService : MediaLibraryService() {
 
     override fun onUpdateNotification(session: MediaSession, startInForegroundRequired: Boolean) {
         media3ForegroundRequired = startInForegroundRequired
-        val playbackState = playbackController.state.value
+        val playbackState = visibleSessionPlaybackState(playbackController.state.value)
         when {
             startInForegroundRequired && !foregroundStartRequested -> {
                 Timber.i(
@@ -235,7 +319,11 @@ class PtvMusicService : MediaLibraryService() {
             playbackState = playbackState,
             reason = "media3Update",
             force = true,
-            foregroundRequired = requiresPtvMusicForeground(startInForegroundRequired, playbackState),
+            foregroundRequired = requiresPtvMusicForeground(
+                startInForegroundRequired,
+                playbackState,
+                playbackController.mediaSessionPlayer.playWhenReady,
+            ),
         )
     }
 
@@ -249,6 +337,8 @@ class PtvMusicService : MediaLibraryService() {
         resumeStore.markServiceLifecycle("destroyed serviceId=${runtimeInstanceId(this)}")
         stopMediaNotification(reason = "destroy", remove = true)
         isRunning = false
+        libraryCallback?.onServiceDestroyed()
+        libraryCallback = null
         serviceScope.cancel()
         if (mediaSessionPlaybackActive) {
             Timber.i("PTV Music media session inactive reason=destroy")
@@ -281,32 +371,99 @@ class PtvMusicService : MediaLibraryService() {
         )
     }
 
+    private fun isCurrentSessionQueueAuthenticated(): Boolean {
+        val playbackState = playbackController.state.value
+        return playbackController.isCurrentQueueOwnedByAuthenticatedUser() &&
+            isPtvMusicQueueAuthenticationCurrent(
+                playbackState,
+                apiClientController.authState.value,
+                queueAuthenticationProof,
+            )
+    }
+
+    private fun visibleSessionPlaybackState(playbackState: MusicPlaybackState): MusicPlaybackState =
+        if (playbackController.state.value === playbackState && isCurrentSessionQueueAuthenticated()) {
+            playbackState
+        } else {
+            MusicPlaybackState()
+        }
+
+    private fun refreshQueueAuthenticationProof(playbackState: MusicPlaybackState) {
+        val owner = playbackState.queueOwner
+        val authentication = apiClientController.authState.value as? MobileAuthState.Authenticated
+        if (!playbackState.hasCurrent || owner == null || authentication == null) {
+            queueAuthenticationProof = null
+            pendingQueueAuthentication = null
+            queueAuthenticationJob?.cancel()
+            sessionPlayer?.cancelPendingPlay()
+            return
+        }
+        if (isPtvMusicQueueAuthenticationCurrent(playbackState, authentication, queueAuthenticationProof)) return
+
+        val requestedProof = PtvMusicQueueAuthenticationProof(owner, authentication)
+        if (pendingQueueAuthentication == requestedProof) return
+        queueAuthenticationProof = null
+        pendingQueueAuthentication = requestedProof
+        queueAuthenticationJob?.cancel()
+        queueAuthenticationJob = serviceScope.launch {
+            val resolvedUserId = withContext(Dispatchers.IO) {
+                runCatching { userDao.getServerUser(owner.serverId, owner.userId)?.user?.userId?.toString() }
+                    .getOrNull()
+            }
+            if (pendingQueueAuthentication != requestedProof) return@launch
+            pendingQueueAuthentication = null
+            val currentState = playbackController.state.value
+            if (currentState.queueOwner != owner || apiClientController.authState.value != authentication) return@launch
+
+            val verifiedProof = verifiedPtvMusicQueueAuthenticationProof(
+                currentState,
+                authentication,
+                resolvedUserId,
+            )
+            if (verifiedProof != null && playbackController.isCurrentQueueOwnedByAuthenticatedUser()) {
+                queueAuthenticationProof = verifiedProof
+                sessionPlayer?.onQueueAuthenticationVerified(requestedProof, verifiedProof)
+                publishSessionPlaybackState(currentState, reason = "authenticationVerified", force = true)
+            } else {
+                sessionPlayer?.cancelPendingPlay()
+                playbackController.stop(source = "authenticationMismatch")
+                publishSessionPlaybackState(
+                    playbackController.state.value,
+                    reason = "authenticationMismatch",
+                    force = true,
+                )
+            }
+        }
+    }
+
     private fun publishSessionPlaybackState(
         playbackState: MusicPlaybackState,
         reason: String,
         force: Boolean = false,
     ) {
-        val shouldBeActive = playbackState.hasCurrent || playbackState.queue.isNotEmpty()
+        refreshQueueAuthenticationProof(playbackState)
+        val visibleState = visibleSessionPlaybackState(playbackState)
+        val shouldBeActive = visibleState.hasCurrent || visibleState.queue.isNotEmpty()
         if (force || shouldBeActive != mediaSessionPlaybackActive) {
             Timber.i(
                 "PTV Music media session ${if (shouldBeActive) "active" else "inactive"} " +
-                    "reason=$reason currentTrack=${playbackState.currentItem?.id ?: "<none>"} " +
-                    "queue=${playbackState.queue.size} playing=${playbackState.isPlaying} " +
-                    "buffering=${playbackState.isBuffering}",
+                    "reason=$reason currentTrack=${visibleState.currentItem?.id ?: "<none>"} " +
+                    "queue=${visibleState.queue.size} playing=${visibleState.isPlaying} " +
+                    "buffering=${visibleState.isBuffering}",
             )
         }
         mediaSessionPlaybackActive = shouldBeActive
 
-        sessionPlayer?.notifyControllerStateChanged(playbackState, force = force)
-        val buttons = PtvMusicAutoCommand.buttonsFor(playbackState)
+        sessionPlayer?.notifyControllerStateChanged(visibleState, force = force)
+        val buttons = PtvMusicAutoCommand.buttonsFor(visibleState)
         mediaLibrarySession?.setCustomLayout(buttons)
         mediaLibrarySession?.setMediaButtonPreferences(buttons)
         mediaLibrarySession?.notifyChildrenChanged(
             PtvMusicAutoCategory.RECOMMENDATIONS.mediaId,
-            playbackState.queue.size,
+            visibleState.queue.size,
             null,
         )
-        refreshMediaNotification(playbackState, reason = reason, force = force)
+        refreshMediaNotification(visibleState, reason = reason, force = force)
     }
 
     private fun refreshMediaNotification(playbackState: MusicPlaybackState, reason: String, force: Boolean) {
@@ -322,7 +479,11 @@ class PtvMusicService : MediaLibraryService() {
             return
         }
 
-        val foregroundRequired = playbackState.isPlaying || playbackState.isBuffering
+        val foregroundRequired = requiresPtvMusicForeground(
+            media3Required = false,
+            playbackState = playbackState,
+            playbackRequested = playbackController.mediaSessionPlayer.playWhenReady,
+        )
         val snapshot = PtvMusicNotificationRefreshSnapshot(
             currentTrackId = playbackState.currentItem?.id?.toString(),
             queueSize = playbackState.queue.size,
@@ -344,34 +505,30 @@ class PtvMusicService : MediaLibraryService() {
             playbackState = playbackState,
             reason = reason,
             force = force,
-            foregroundRequired = requiresPtvMusicForeground(media3ForegroundRequired, playbackState),
+            foregroundRequired = requiresPtvMusicForeground(
+                media3ForegroundRequired,
+                playbackState,
+                playbackController.mediaSessionPlayer.playWhenReady,
+            ),
         )
     }
 
     private fun handleNotificationAction(action: String?): Boolean {
         when (action) {
-            ACTION_NOTIFICATION_PLAY -> {
-                Timber.i("PTV Music notification action play")
-                playbackController.playCurrent()
+            ACTION_NOTIFICATION_PLAY, ACTION_NOTIFICATION_PREVIOUS, ACTION_NOTIFICATION_NEXT -> {
+                Timber.i("PTV Music notification transport action=$action")
+                dispatchNotificationTransportAction(action, sessionPlayer)
             }
 
             ACTION_NOTIFICATION_PAUSE -> {
                 Timber.i("PTV Music notification action pause")
+                sessionPlayer?.cancelPendingPlay()
                 playbackController.pause()
-            }
-
-            ACTION_NOTIFICATION_PREVIOUS -> {
-                Timber.i("PTV Music notification action previous")
-                playbackController.previous()
-            }
-
-            ACTION_NOTIFICATION_NEXT -> {
-                Timber.i("PTV Music notification action next")
-                playbackController.next()
             }
 
             ACTION_NOTIFICATION_STOP -> {
                 Timber.i("PTV Music notification action stop")
+                sessionPlayer?.cancelPendingPlay()
                 playbackController.stop(source = "notification")
                 stopMediaNotification(reason = "notificationStop", remove = true)
                 stopSelf()
@@ -389,12 +546,12 @@ class PtvMusicService : MediaLibraryService() {
         foregroundRequired: Boolean,
     ) {
         if (foregroundPromotionFailed) return
+        if (!isCurrentSessionQueueAuthenticated()) return stopMediaNotification(reason = reason, remove = true)
         val session = mediaLibrarySession ?: run {
             Timber.w("PTV Music foreground notification skipped; media session is not ready reason=$reason")
             return
         }
-        val shouldShowNotification = playbackState.hasCurrent || playbackState.queue.isNotEmpty()
-        if (!shouldShowNotification) {
+        if (!playbackState.hasCurrent && playbackState.queue.isEmpty()) {
             stopMediaNotification(reason = reason, remove = true)
             return
         }
@@ -546,6 +703,7 @@ class PtvMusicService : MediaLibraryService() {
     }
 
     private fun refreshNotificationArtwork(playbackState: MusicPlaybackState, reason: String) {
+        if (!isCurrentSessionQueueAuthenticated()) return
         val item = playbackState.currentItem ?: return
         val trackId = item.id.toString()
         val posterUrl = item.posterUrl
@@ -575,7 +733,8 @@ class PtvMusicService : MediaLibraryService() {
                             Timber.w(error, "PTV Music notification artwork load failed track=$trackId")
                         }.getOrNull()
                     }
-                    val stillCurrent = playbackController.state.value.currentItem?.id?.toString() == trackId
+                    val stillCurrent = playbackController.state.value.currentItem?.id?.toString() == trackId &&
+                        isCurrentSessionQueueAuthenticated()
                     if (bitmap != null && stillCurrent) {
                         notificationArtwork = bitmap
                         Timber.i("PTV Music notification artwork loaded track=$trackId")
@@ -586,6 +745,7 @@ class PtvMusicService : MediaLibraryService() {
                             foregroundRequired = requiresPtvMusicForeground(
                                 media3ForegroundRequired,
                                 playbackController.state.value,
+                                playbackController.mediaSessionPlayer.playWhenReady,
                             ),
                         )
                     }
@@ -644,6 +804,30 @@ class PtvMusicService : MediaLibraryService() {
         private const val ACTION_NOTIFICATION_PREVIOUS = "org.piggietv.music.notification.PREVIOUS"
         private const val ACTION_NOTIFICATION_NEXT = "org.piggietv.music.notification.NEXT"
         private const val ACTION_NOTIFICATION_STOP = "org.piggietv.music.notification.STOP"
+
+        /** Notification transport commands use the same proof-gated player as Media3 commands. */
+        internal fun dispatchNotificationTransportAction(
+            action: String?,
+            sessionPlayer: PtvMusicSessionPlayer?,
+        ): Boolean = when (action) {
+            ACTION_NOTIFICATION_PLAY -> {
+                sessionPlayer?.play()
+                true
+            }
+
+            ACTION_NOTIFICATION_PREVIOUS -> {
+                sessionPlayer?.seekToPreviousMediaItem()
+                true
+            }
+
+            ACTION_NOTIFICATION_NEXT -> {
+                sessionPlayer?.seekToNextMediaItem()
+                true
+            }
+
+            else -> false
+        }
+
         private const val SESSION_ACTIVITY_REQUEST_CODE = 4102
         private const val NOTIFICATION_ACTION_PLAY_REQUEST_CODE = 4201
         private const val NOTIFICATION_ACTION_PAUSE_REQUEST_CODE = 4202
@@ -654,7 +838,7 @@ class PtvMusicService : MediaLibraryService() {
     }
 
     private fun publishRuntimeStatus() {
-        val playbackState = playbackController.state.value
+        val playbackState = visibleSessionPlaybackState(playbackController.state.value)
         resumeStore.markRuntimeStatus(
             controllerInstanceId = playbackController.instanceId,
             repositoryInstanceId = musicRepository.instanceId,
@@ -693,16 +877,114 @@ private class PtvMusicNotificationProvider(private val appContext: Context) :
     }
 }
 
-private data class PtvMusicAutoRuntimeSnapshot(
+internal data class PtvMusicAutoRuntimeSnapshot(
     val currentTrackId: String?,
+    val currentTrack: PtvMusicAutoMediaItemSnapshot?,
     val currentIndex: Int,
-    val queueSize: Int,
+    val queue: List<PtvMusicAutoMediaItemSnapshot>,
     val isPlaying: Boolean,
     val isBuffering: Boolean,
     val repeatMode: MusicRepeatMode,
     val shuffleEnabled: Boolean,
     val currentTrackFavorite: Boolean,
-)
+) {
+    val queueSize: Int get() = queue.size
+}
+
+/** Restores only a saved queue whose local and Jellyfin identities match the active session. */
+internal class PtvMusicAuthenticatedRestoreObserver(
+    private val currentAuthentication: () -> MobileAuthState,
+    private val currentLocalOwner: () -> PtvMusicAutoQueueOwner?,
+    private val loadSavedState: () -> PtvMusicAutoResumeState?,
+    private val resolveExternalUserId: suspend (PtvMusicAutoQueueOwner) -> String?,
+    private val restoreQueue: suspend () -> PtvMusicAutoRestoreResult,
+) {
+    private var lastAttemptedProof: PtvMusicQueueAuthenticationProof? = null
+
+    suspend fun onAuthenticationChanged(authenticationState: MobileAuthState): PtvMusicAutoRestoreResult? {
+        val proof = eligibleSavedQueueProof(authenticationState) ?: return null
+        val authentication = proof.authentication
+        val owner = proof.owner
+
+        val resolvedUserId = resolveExternalUserId(owner)
+        if (resolvedUserId != authentication.userId || !isSavedQueueIdentityCurrent(proof)) return null
+
+        lastAttemptedProof = proof
+        val result = restoreQueue()
+        if (result == PtvMusicAutoRestoreResult.Failed) lastAttemptedProof = null
+        return result.takeIf {
+            currentAuthentication() == authentication && currentLocalOwner() == owner
+        }
+    }
+
+    private fun eligibleSavedQueueProof(authenticationState: MobileAuthState): PtvMusicQueueAuthenticationProof? {
+        val authentication = authenticationState as? MobileAuthState.Authenticated
+        val owner = if (authentication != null) currentLocalOwner() else null
+        if (authentication == null || owner == null) {
+            lastAttemptedProof = null
+            return null
+        }
+        val proof = PtvMusicQueueAuthenticationProof(owner, authentication)
+        if (lastAttemptedProof != null && lastAttemptedProof != proof) lastAttemptedProof = null
+        return proof.takeIf {
+            authentication.serverId == owner.serverId.toString() &&
+                loadSavedState()?.queueOwnerOrNull() == owner &&
+                lastAttemptedProof != proof
+        }
+    }
+
+    private fun isSavedQueueIdentityCurrent(proof: PtvMusicQueueAuthenticationProof): Boolean =
+        currentAuthentication() == proof.authentication &&
+            currentLocalOwner() == proof.owner &&
+            loadSavedState()?.queueOwnerOrNull() == proof.owner
+}
+
+/** A failed initial saved-session lookup must not prevent a later authenticated restore. */
+internal suspend fun observePtvMusicAuthenticatedQueueRestoration(
+    savedSessionReady: Deferred<*>,
+    authenticationStates: StateFlow<MobileAuthState>,
+    observer: PtvMusicAuthenticatedRestoreObserver,
+    onRestored: (PtvMusicAutoRestoreResult.Restored) -> Unit,
+) {
+    savedSessionReady.await()
+    authenticationStates.collect { authentication ->
+        val result = observer.onAuthenticationChanged(authentication)
+        if (result is PtvMusicAutoRestoreResult.Restored) onRestored(result)
+    }
+}
+
+internal data class PtvMusicQueueAuthenticationProof(
+    val owner: PtvMusicAutoQueueOwner,
+    val authentication: MobileAuthState.Authenticated,
+) {
+    override fun toString(): String = "PtvMusicQueueAuthenticationProof([REDACTED])"
+}
+
+internal fun verifiedPtvMusicQueueAuthenticationProof(
+    playbackState: MusicPlaybackState,
+    authenticationState: MobileAuthState,
+    resolvedQueueUserId: String?,
+): PtvMusicQueueAuthenticationProof? {
+    val authentication = authenticationState as? MobileAuthState.Authenticated ?: return null
+    val owner = playbackState.queueOwner ?: return null
+    if (!playbackState.hasCurrent || playbackState.queue.isEmpty()) return null
+    if (authentication.serverId != owner.serverId.toString() || authentication.userId != resolvedQueueUserId) {
+        return null
+    }
+    return PtvMusicQueueAuthenticationProof(owner, authentication)
+}
+
+internal fun isPtvMusicQueueAuthenticationCurrent(
+    playbackState: MusicPlaybackState,
+    authenticationState: MobileAuthState,
+    proof: PtvMusicQueueAuthenticationProof?,
+): Boolean {
+    val authentication = authenticationState as? MobileAuthState.Authenticated ?: return false
+    return proof != null && playbackState.hasCurrent && playbackState.queue.isNotEmpty() &&
+        playbackState.queueOwner == proof.owner &&
+        authentication.serverId == proof.authentication.serverId &&
+        authentication.userId == proof.authentication.userId
+}
 
 private data class PtvMusicNotificationRefreshSnapshot(
     val currentTrackId: String?,
@@ -713,10 +995,11 @@ private data class PtvMusicNotificationRefreshSnapshot(
     val notificationPermissionGranted: Boolean,
 )
 
-private fun MusicPlaybackState.toAutoRuntimeSnapshot(): PtvMusicAutoRuntimeSnapshot = PtvMusicAutoRuntimeSnapshot(
+internal fun MusicPlaybackState.toAutoRuntimeSnapshot(): PtvMusicAutoRuntimeSnapshot = PtvMusicAutoRuntimeSnapshot(
     currentTrackId = currentItem?.id?.toString(),
+    currentTrack = currentItem?.toAutoMediaItemSnapshot(),
     currentIndex = currentIndex,
-    queueSize = queue.size,
+    queue = queue.map { it.toAutoMediaItemSnapshot() },
     isPlaying = isPlaying,
     isBuffering = isBuffering,
     repeatMode = repeatMode,
@@ -726,8 +1009,20 @@ private fun MusicPlaybackState.toAutoRuntimeSnapshot(): PtvMusicAutoRuntimeSnaps
 
 private fun runtimeInstanceId(value: Any): String = System.identityHashCode(value).toString(16)
 
-internal fun requiresPtvMusicForeground(media3Required: Boolean, playbackState: MusicPlaybackState): Boolean =
-    media3Required || playbackState.isPlaying || playbackState.isBuffering
+internal fun requiresPtvMusicForeground(
+    media3Required: Boolean,
+    playbackState: MusicPlaybackState,
+    playbackRequested: Boolean = false,
+): Boolean = media3Required || playbackState.isPlaying || playbackState.isBuffering ||
+    (playbackRequested && playbackState.hasCurrent)
+
+internal fun shouldKeepPtvMusicServiceOnTaskRemoved(
+    foregroundStartRequested: Boolean,
+    playbackState: MusicPlaybackState,
+    playbackRequested: Boolean = false,
+    pendingPlayAwaitingProof: Boolean = false,
+): Boolean = pendingPlayAwaitingProof ||
+    requiresPtvMusicForeground(foregroundStartRequested, playbackState, playbackRequested)
 
 internal fun clearPtvMusicForegroundNotificationFlags(flags: Int): Int = flags and (
     Notification.FLAG_ONGOING_EVENT or

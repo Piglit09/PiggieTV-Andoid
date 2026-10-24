@@ -38,7 +38,7 @@ class LibraryViewModel(
             }.onFailure { error ->
                 _uiState.value = when (error) {
                     is LibraryLoginRequiredException -> LibraryUiState.LoginRequired
-                    else -> LibraryUiState.Error(error.message ?: "Could not reach the Library server.")
+                    else -> LibraryUiState.Error(LIBRARY_LOAD_ERROR)
                 }
             }
         }
@@ -138,6 +138,8 @@ class LibraryViewModel(
             favorite = isFavorite || readerStore.isFavorite(readerKey),
         )
 }
+
+private const val LIBRARY_LOAD_ERROR = "Could not reach the Library server. Check the server settings and try again."
 
 sealed interface LibraryUiState {
     data object Loading : LibraryUiState

@@ -44,7 +44,7 @@ class LibraryReaderModelsTest {
         val decoded = LibraryReaderResumeStateSerializer.decode(
             LibraryReaderResumeStateSerializer.encode(
                 LibraryReaderResumeState(
-                    readerKey = "book",
+                    readerKey = "jellyfin:book",
                     title = "Book",
                     pageIndex = 20,
                     pageCount = 10,
@@ -62,7 +62,7 @@ class LibraryReaderModelsTest {
         decoded.progress shouldBe 1.0f
         decoded.updatedAtMs shouldBe 42
         decoded.chapterIndex shouldBe 3
-        decoded.chapterTitle shouldBe "Chapter"
+        decoded.chapterTitle shouldBe null
         decoded.chapterPageIndex shouldBe 99
     }
 
@@ -100,6 +100,7 @@ class LibraryReaderModelsTest {
 
     @Test
     fun `book detail mapping exposes reader key and progress`() {
+        val readerIdentity = opdsReaderIdentity("id")
         val book = LibraryBook(
             id = "id",
             title = "Book",
@@ -125,7 +126,7 @@ class LibraryReaderModelsTest {
             fileSizeBytes = 100,
         ).withReadingState(
             resumeState = LibraryReaderResumeState(
-                readerKey = "https://example.invalid/book.cbz",
+                readerKey = readerIdentity,
                 title = "Book",
                 pageIndex = 4,
                 pageCount = 10,
@@ -135,7 +136,7 @@ class LibraryReaderModelsTest {
             favorite = true,
         )
 
-        book.readerKey shouldBe "https://example.invalid/book.cbz"
+        book.readerKey shouldBe readerIdentity
         book.primaryReaderLink?.inferredFormat(book.title) shouldBe LibraryBookFormat.CBZ
         book.progress?.percent shouldBe 50
         book.isFavorite shouldBe true

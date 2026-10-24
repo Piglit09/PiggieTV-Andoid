@@ -7,6 +7,17 @@ if ([string]::IsNullOrWhiteSpace($PropertiesPath)) {
     $PropertiesPath = Join-Path $PSScriptRoot "..\gradle.properties"
 }
 
+$approvedProperties = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\gradle.properties'))
+$requestedProperties = [System.IO.Path]::GetFullPath($PropertiesPath)
+if (-not $requestedProperties.Equals($approvedProperties, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Version edits are limited to the approved Android Mobile gradle.properties.'
+}
+$preflight = Join-Path $PSScriptRoot 'ptv-mobile-workspace-preflight.ps1'
+& powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $preflight -Mode Edit
+if ($LASTEXITCODE -ne 0) {
+    throw 'PTV Mobile source-edit preflight denied the version change.'
+}
+
 $propertyName = "piggietv.version"
 $path = [System.IO.Path]::GetFullPath($PropertiesPath)
 $pattern = "^\s*$([regex]::Escape($propertyName))\s*=\s*v?(?<major>\d{1,2})\.(?<minor>\d{1,2})\.(?<patch>\d{1,2})\s*$"

@@ -330,6 +330,147 @@ class MusicRecommendationRankerTest {
         ranked.count { item -> item.id == seed.id } shouldBe 1
     }
 
+    @Test
+    fun `metal session modes keep verified seed matches ahead of unrelated favorites`() {
+        val slipknot = track("slipknot-seed", artistId = artistId("slipknot"), genres = listOf("Metal"))
+        val metalDiscovery = (1..8).map { index ->
+            track("metal-discovery-$index", genres = listOf("Metal"))
+        }
+        val unrelatedRock = track("favorite-rock", genres = listOf("Rock"), isFavorite = true)
+        val unrelatedPop = track("history-pop", genres = listOf("Pop"), playCount = 10)
+        val groups = listOf(
+            MusicRecommendationGroup(MusicRecommendationSource.FAVORITE, listOf(unrelatedRock)),
+            MusicRecommendationGroup(MusicRecommendationSource.LISTENING_HISTORY, listOf(unrelatedPop)),
+            MusicRecommendationGroup(MusicRecommendationSource.RECOMMENDATION, metalDiscovery),
+        )
+
+        listOf(MusicListeningMode.STAY_IN_THE_VIBE, MusicListeningMode.BALANCED_DISCOVERY).forEach { mode ->
+            val ranked = MusicRecommendationRanker.rank(
+                seed = slipknot,
+                groups = groups,
+                maxItems = 7,
+                surface = MusicRecommendationSurface.RADIO,
+                listeningMode = mode,
+            )
+
+            ranked.size shouldBe 7
+            ranked.first() shouldBe slipknot
+            ranked.drop(1).all { item -> "Metal" in item.genres } shouldBe true
+        }
+
+        val anythingGoes = MusicRecommendationRanker.rank(
+            seed = slipknot,
+            groups = groups,
+            maxItems = 7,
+            surface = MusicRecommendationSurface.RADIO,
+            listeningMode = MusicListeningMode.ANYTHING_GOES,
+        )
+
+        anythingGoes.first() shouldBe slipknot
+        anythingGoes.take(4).map(MusicItem::id) shouldContain unrelatedRock.id
+    }
+
+    @Test
+    fun `explicit modes use distinct familiar discovery mixes among matching metal songs`() {
+        val slipknot = track("mode-mix-seed", genres = listOf("Metal"))
+        val favorites = (1..8).map { index ->
+            track("mode-favorite-$index", genres = listOf("Metal"), isFavorite = true)
+        }
+        val history = (1..8).map { index ->
+            track("mode-history-$index", genres = listOf("Metal"), playCount = 4)
+        }
+        val discoveries = (1..20).map { index ->
+            track("mode-discovery-$index", genres = listOf("Metal"))
+        }
+        val familiarIds = (favorites + history + slipknot).mapTo(mutableSetOf(), MusicItem::id)
+        val groups = listOf(
+            MusicRecommendationGroup(MusicRecommendationSource.FAVORITE, favorites),
+            MusicRecommendationGroup(MusicRecommendationSource.LISTENING_HISTORY, history),
+            MusicRecommendationGroup(MusicRecommendationSource.DISCOVERY, discoveries),
+        )
+        val expectedFamiliar = mapOf(
+            MusicListeningMode.STAY_IN_THE_VIBE to 14,
+            MusicListeningMode.BALANCED_DISCOVERY to 8,
+            MusicListeningMode.ANYTHING_GOES to 5,
+        )
+
+        expectedFamiliar.forEach { (mode, expectedCount) ->
+            val ranked = MusicRecommendationRanker.rank(
+                seed = slipknot,
+                groups = groups,
+                maxItems = 20,
+                surface = MusicRecommendationSurface.RADIO,
+                listeningMode = mode,
+            )
+
+            ranked.size shouldBe 20
+            ranked.count { item -> item.id in familiarIds } shouldBe expectedCount
+            ranked.all { item -> "Metal" in item.genres } shouldBe true
+        }
+    }
+
+    @Test
+    fun `coherent modes fill sparse catalog after seed matches run out`() {
+        val slipknot = track("sparse-seed", genres = listOf("Metal"))
+        val otherMetal = track("sparse-metal", genres = listOf("Metal"))
+        val rock = track("sparse-rock", genres = listOf("Rock"), isFavorite = true)
+        val pop = track("sparse-pop", genres = listOf("Pop"), playCount = 6)
+        val unknownGenre = track("sparse-unknown", genres = emptyList())
+        val groups = listOf(
+            MusicRecommendationGroup(MusicRecommendationSource.FAVORITE, listOf(rock)),
+            MusicRecommendationGroup(MusicRecommendationSource.LISTENING_HISTORY, listOf(pop)),
+            MusicRecommendationGroup(MusicRecommendationSource.RECOMMENDATION, listOf(unknownGenre, otherMetal)),
+        )
+
+        listOf(MusicListeningMode.STAY_IN_THE_VIBE, MusicListeningMode.BALANCED_DISCOVERY).forEach { mode ->
+            val ranked = MusicRecommendationRanker.rank(
+                seed = slipknot,
+                groups = groups,
+                maxItems = 8,
+                surface = MusicRecommendationSurface.RADIO,
+                listeningMode = mode,
+            )
+
+            ranked.take(2).map(MusicItem::id) shouldBe listOf(slipknot.id, otherMetal.id)
+            ranked.map(MusicItem::id).toSet() shouldBe setOf(
+                slipknot.id,
+                otherMetal.id,
+                rock.id,
+                pop.id,
+                unknownGenre.id,
+            )
+        }
+    }
+
+    @Test
+    fun `metal session remains seed aligned through one hundred selections`() {
+        val slipknot = track("long-session-seed", genres = listOf("Metal"))
+        val metal = (1..110).map { index ->
+            track("long-session-metal-$index", genres = listOf("Metal"))
+        }
+        val unrelated = (1..30).map { index ->
+            track("long-session-pop-$index", genres = listOf("Pop"), isFavorite = true)
+        }
+        val groups = listOf(
+            MusicRecommendationGroup(MusicRecommendationSource.FAVORITE, unrelated),
+            MusicRecommendationGroup(MusicRecommendationSource.DISCOVERY, metal),
+        )
+
+        listOf(MusicListeningMode.STAY_IN_THE_VIBE, MusicListeningMode.BALANCED_DISCOVERY).forEach { mode ->
+            val ranked = MusicRecommendationRanker.rank(
+                seed = slipknot,
+                groups = groups,
+                maxItems = 100,
+                surface = MusicRecommendationSurface.RADIO,
+                listeningMode = mode,
+            )
+
+            ranked.size shouldBe 100
+            ranked.map(MusicItem::id).distinct().size shouldBe 100
+            ranked.all { item -> "Metal" in item.genres } shouldBe true
+        }
+    }
+
     private fun track(
         key: String,
         artistId: UUID = artistId(key),

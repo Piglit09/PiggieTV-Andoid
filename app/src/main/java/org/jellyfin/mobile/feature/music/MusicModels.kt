@@ -1,5 +1,6 @@
 package org.jellyfin.mobile.feature.music
 
+import org.jellyfin.mobile.feature.music.auto.PtvMusicAutoQueueOwner
 import org.jellyfin.sdk.model.UUID
 import org.jellyfin.sdk.model.api.BaseItemKind
 import org.jellyfin.sdk.model.api.CollectionType
@@ -177,6 +178,7 @@ data class MusicPlaybackState(
     val canRetry: Boolean = false,
     val isAppInForeground: Boolean = true,
     val isReleased: Boolean = false,
+    val queueOwner: PtvMusicAutoQueueOwner? = null,
 ) {
     val remainingMs: Long
         get() = (durationMs - positionMs).coerceAtLeast(0)

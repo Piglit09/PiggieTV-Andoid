@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
@@ -23,6 +24,10 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.jellyfin.mobile.R
 import org.jellyfin.mobile.app.ApiClientController
+import org.jellyfin.mobile.auth.AuthFailureCategory
+import org.jellyfin.mobile.auth.AuthMethod
+import org.jellyfin.mobile.auth.MobileAuthState
+import org.jellyfin.mobile.auth.MobileAuthenticationResult
 import org.jellyfin.mobile.data.entity.ServerEntity
 import org.jellyfin.mobile.player.interaction.PlayOptions
 import org.jellyfin.mobile.reporting.MediaReportDeliveryResult
@@ -31,8 +36,6 @@ import org.jellyfin.mobile.reporting.MediaReportSender
 import org.jellyfin.mobile.reporting.MediaReportSource
 import org.jellyfin.mobile.reporting.MediaReportTarget
 import org.jellyfin.sdk.api.client.ApiClient
-import org.jellyfin.sdk.api.client.exception.ApiClientException
-import org.jellyfin.sdk.api.client.extensions.authenticateUserByName
 import org.jellyfin.sdk.api.client.extensions.genresApi
 import org.jellyfin.sdk.api.client.extensions.get
 import org.jellyfin.sdk.api.client.extensions.imageApi
@@ -66,6 +69,7 @@ class NativeHomeViewModel(
 ) : AndroidViewModel(app) {
     private val _uiState = MutableStateFlow<NativeHomeUiState>(NativeHomeUiState.Loading)
     val uiState: StateFlow<NativeHomeUiState> get() = _uiState
+    val authState: StateFlow<MobileAuthState> = apiClientController.authState
     private val _mediaReportMessages = MutableSharedFlow<Int>(extraBufferCapacity = 1)
     val mediaReportMessages: SharedFlow<Int> = _mediaReportMessages.asSharedFlow()
 
@@ -75,28 +79,39 @@ class NativeHomeViewModel(
     private var movieSearchJob: Job? = null
     private var homeLoadVersion = 0
     private var movieSearchVersion = 0
+    private var authUiVersion = 0L
+    private var authenticatedUiSession = false
+    private var runtimeAuthLossPending = false
     private val genreIdsByUser = mutableMapOf<UUID, Map<String, UUID>>()
     private val studioIdsByUser = mutableMapOf<UUID, Map<String, UUID>>()
     private val searchCategoryCache = NativeSearchCategoryCache()
+
+    init {
+        observeAuthenticationState()
+    }
 
     fun load(server: ServerEntity, force: Boolean = false) {
         if (!force && currentServer?.id == server.id && uiState.value is NativeHomeUiState.Content) return
 
         currentServer = server
+        val version = nextAuthUiVersion()
         viewModelScope.launch {
             _uiState.value = NativeHomeUiState.Loading
-            apiClientController.loadSavedServerUser()
-
-            val user = runCatching {
-                withContext(Dispatchers.IO) { apiClient.userApi.getCurrentUser().content }
-            }.getOrNull()
-
-            if (user == null) {
-                showLogin(server)
-            } else {
-                currentUserId = user.id
-                loadHome(user)
+            val result = try {
+                apiClientController.restoreSession()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                if (isAuthUiCurrent(version, server)) {
+                    authenticatedUiSession = false
+                    _uiState.value = NativeHomeUiState.Error(
+                        message = "Could not restore your PiggieTV session.",
+                        canForgetSavedSession = true,
+                    )
+                }
+                return@launch
             }
+            handleAuthenticationResult(result, NativeAuthRequest.RESTORE, server, version)
         }
     }
 
@@ -104,28 +119,56 @@ class NativeHomeViewModel(
         val previous = uiState.value as? NativeHomeUiState.Login
         _uiState.value = (previous ?: NativeHomeUiState.Login(server.hostname)).copy(
             username = username,
-            isSigningIn = true,
             error = null,
         )
+        currentServer = server
+        val version = nextAuthUiVersion()
 
         viewModelScope.launch {
-            try {
-                val result = withContext(Dispatchers.IO) {
-                    apiClient.userApi.authenticateUserByName(username.trim(), password).content
+            val result = try {
+                apiClientController.authenticatePassword(server, username, password)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                if (isAuthUiCurrent(version, server)) {
+                    showLoginError(
+                        server = server,
+                        username = username,
+                        message = "Could not sign in to PiggieTV.",
+                    )
                 }
-                val user = requireNotNull(result.user) { "PiggieTV did not return a user for this login." }
-                val accessToken = requireNotNull(result.accessToken) { "PiggieTV did not return an access token." }
-                apiClientController.setupUser(server.id, user.id, accessToken)
-                currentUserId = user.id
-                loadHome(user)
-            } catch (e: Exception) {
-                _uiState.value = (previous ?: NativeHomeUiState.Login(server.hostname)).copy(
-                    username = username,
-                    isSigningIn = false,
-                    error = e.friendlyMessage("Could not sign in to PiggieTV."),
-                )
+                return@launch
             }
+            handleAuthenticationResult(result, NativeAuthRequest.PASSWORD, server, version, username)
         }
+    }
+
+    fun startQuickConnect(server: ServerEntity) {
+        if (authState.value.isQuickConnectInProgress()) return
+        val previous = uiState.value as? NativeHomeUiState.Login
+        _uiState.value = (previous ?: NativeHomeUiState.Login(server.hostname)).copy(error = null)
+        currentServer = server
+        val version = nextAuthUiVersion()
+
+        viewModelScope.launch {
+            val result = try {
+                apiClientController.authenticateWithQuickConnect(server)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                if (isAuthUiCurrent(version, server)) {
+                    showLoginError(server, message = "Could not start Quick Connect.")
+                }
+                return@launch
+            }
+            handleAuthenticationResult(result, NativeAuthRequest.QUICK_CONNECT, server, version)
+        }
+    }
+
+    fun cancelQuickConnect() {
+        if (!authState.value.isQuickConnectInProgress()) return
+        nextAuthUiVersion()
+        apiClientController.cancelQuickConnect()
     }
 
     fun openLibrary(library: NativeMediaItem) {
@@ -459,9 +502,7 @@ class NativeHomeViewModel(
             val startedAt = System.currentTimeMillis()
 
             try {
-                val userId = apiClientController.loadSavedServerUser()
-                    ?: error("Your PiggieTV session needs to be refreshed.")
-                currentUserId = userId
+                val userId = currentUserId ?: error("Your PiggieTV session needs to be refreshed.")
                 val requestBudgets = NativeCatalogSearch.requestBudgets(filter)
                 val deadlineNanos = System.nanoTime() + requestBudgets.overallMs * NANOS_PER_MILLISECOND
                 val includesCategories = NativeCatalogSearch.includesVideoGenres(filter) ||
@@ -594,15 +635,45 @@ class NativeHomeViewModel(
     }
 
     fun signOut(server: ServerEntity) {
+        logoutAndShowLogin(server)
+    }
+
+    fun forgetSavedSession(server: ServerEntity) {
+        logoutAndShowLogin(server)
+    }
+
+    private fun logoutAndShowLogin(server: ServerEntity) {
+        currentServer = server
+        val version = nextAuthUiVersion()
+        authenticatedUiSession = false
+        runtimeAuthLossPending = false
         viewModelScope.launch {
-            homeRowsJob?.cancel()
-            movieSearchJob?.cancel()
-            homeLoadVersion++
-            movieSearchVersion++
+            invalidateContentLoads()
             _uiState.value = NativeHomeUiState.Loading
-            apiClientController.logoutCurrentUser()
+            val result = try {
+                apiClientController.logoutCurrentUser()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                if (isAuthUiCurrent(version, server)) {
+                    _uiState.value = NativeHomeUiState.Error(
+                        message = "Could not securely clear the saved session.",
+                        canForgetSavedSession = true,
+                    )
+                }
+                return@launch
+            }
+            if (!isAuthUiCurrent(version, server)) return@launch
+
+            if (!result.localCredentialsCleared) {
+                _uiState.value = NativeHomeUiState.Error(
+                    message = "Could not securely clear the saved session.",
+                    canForgetSavedSession = true,
+                )
+                return@launch
+            }
             currentUserId = null
-            showLogin(server)
+            showLogin(server, version)
         }
     }
 
@@ -672,18 +743,149 @@ class NativeHomeViewModel(
         }
     }
 
-    private suspend fun showLogin(server: ServerEntity) {
-        val users = runCatching {
-            withContext(Dispatchers.IO) { apiClient.userApi.getPublicUsers().content }
-        }.getOrElse { emptyList() }
+    private fun observeAuthenticationState() {
+        viewModelScope.launch {
+            authState.collect { state ->
+                val server = currentServer ?: return@collect
+                when (state) {
+                    is MobileAuthState.AuthRejected -> {
+                        if (!authenticatedUiSession && _uiState.value !is NativeHomeUiState.Content) {
+                            return@collect
+                        }
+                        runtimeAuthLossPending = true
+                        authenticatedUiSession = false
+                        nextAuthUiVersion()
+                        invalidateContentLoads()
+                        _uiState.value = NativeHomeUiState.Loading
+                    }
 
-        _uiState.value = NativeHomeUiState.Login(
-            serverName = server.hostname,
-            publicUsers = users.mapNotNull(UserDto::name),
+                    MobileAuthState.Unauthenticated -> {
+                        if (
+                            !runtimeAuthLossPending &&
+                            !authenticatedUiSession &&
+                            _uiState.value !is NativeHomeUiState.Content
+                        ) {
+                            return@collect
+                        }
+                        runtimeAuthLossPending = false
+                        authenticatedUiSession = false
+                        val version = nextAuthUiVersion()
+                        invalidateContentLoads()
+                        showLogin(server, version, "Your session expired. Sign in again.")
+                    }
+
+                    MobileAuthState.StorageError -> {
+                        if (
+                            !runtimeAuthLossPending &&
+                            !authenticatedUiSession &&
+                            _uiState.value !is NativeHomeUiState.Content
+                        ) {
+                            return@collect
+                        }
+                        runtimeAuthLossPending = false
+                        authenticatedUiSession = false
+                        nextAuthUiVersion()
+                        invalidateContentLoads()
+                        _uiState.value = NativeHomeUiState.Error(
+                            message = "PiggieTV could not securely clear the expired session.",
+                            canForgetSavedSession = true,
+                        )
+                    }
+
+                    else -> Unit
+                }
+            }
+        }
+    }
+
+    private suspend fun handleAuthenticationResult(
+        result: MobileAuthenticationResult,
+        request: NativeAuthRequest,
+        server: ServerEntity,
+        version: Long,
+        username: String = "",
+    ) {
+        if (!isAuthUiCurrent(version, server)) return
+
+        when (val presentation = result.presentation(request)) {
+            NativeAuthPresentation.Authenticated -> {
+                val authenticated = result as MobileAuthenticationResult.Authenticated
+                authenticatedUiSession = true
+                runtimeAuthLossPending = false
+                loadHome(authenticated.user, version)
+            }
+
+            NativeAuthPresentation.LoginRequired -> {
+                authenticatedUiSession = false
+                showLogin(server, version)
+            }
+
+            NativeAuthPresentation.Ignore -> Unit
+
+            is NativeAuthPresentation.LoginFailure -> {
+                authenticatedUiSession = false
+                showLoginError(server, username, presentation.message)
+            }
+
+            is NativeAuthPresentation.RecoveryFailure -> {
+                authenticatedUiSession = false
+                _uiState.value = NativeHomeUiState.Error(
+                    message = presentation.message,
+                    canForgetSavedSession = true,
+                )
+            }
+        }
+    }
+
+    private fun showLoginError(server: ServerEntity, username: String = "", message: String?) {
+        val current = (_uiState.value as? NativeHomeUiState.Login)
+            ?.takeIf { state -> state.serverName == server.hostname }
+        _uiState.value = (current ?: NativeHomeUiState.Login(server.hostname)).copy(
+            username = username.ifBlank { current?.username.orEmpty() },
+            error = message,
         )
     }
 
-    private suspend fun loadHome(user: UserDto) {
+    private fun nextAuthUiVersion(): Long {
+        authUiVersion += 1L
+        return authUiVersion
+    }
+
+    private fun isAuthUiCurrent(version: Long, server: ServerEntity): Boolean =
+        version == authUiVersion && currentServer?.id == server.id
+
+    private fun invalidateContentLoads() {
+        homeRowsJob?.cancel()
+        movieSearchJob?.cancel()
+        homeLoadVersion++
+        movieSearchVersion++
+        currentUserId = null
+    }
+
+    private suspend fun showLogin(server: ServerEntity, version: Long, error: String? = null) {
+        val previous = (_uiState.value as? NativeHomeUiState.Login)
+            ?.takeIf { state -> state.serverName == server.hostname }
+        _uiState.value = NativeHomeUiState.Login(
+            serverName = server.hostname,
+            publicUsers = previous?.publicUsers.orEmpty(),
+            username = previous?.username.orEmpty(),
+            error = error,
+        )
+        val users = runCatching {
+            withContext(Dispatchers.IO) { apiClient.userApi.getPublicUsers().content }
+        }.getOrElse { emptyList() }
+        if (!isAuthUiCurrent(version, server)) return
+
+        _uiState.update { state ->
+            when (state) {
+                is NativeHomeUiState.Login -> state.copy(publicUsers = users.mapNotNull(UserDto::name))
+                else -> state
+            }
+        }
+    }
+
+    private suspend fun loadHome(user: UserDto, authVersion: Long) {
+        if (!isAuthUiCurrent(authVersion, requireNotNull(currentServer))) return
         currentUserId = user.id
         val loadVersion = ++homeLoadVersion
         homeRowsJob?.cancel()
@@ -697,7 +899,7 @@ class NativeHomeViewModel(
                     includeHidden = false,
                 ).content.items
             }
-            if (loadVersion != homeLoadVersion) return
+            if (loadVersion != homeLoadVersion || authVersion != authUiVersion) return
 
             val rows = PtvHomeRows.homeRows
             val rowResults = mutableMapOf<String, List<BaseItemDto>>()
@@ -719,12 +921,30 @@ class NativeHomeViewModel(
                 loadRowsProgressively(loadVersion, user.id, userViews)
             }
         } catch (e: Exception) {
-            if (e is ApiClientException) {
-                showLogin(requireNotNull(currentServer))
-                return
-            }
+            if (loadVersion != homeLoadVersion || authVersion != authUiVersion) return
+            when (apiClientController.authState.value) {
+                is MobileAuthState.AuthRejected -> Unit
 
-            _uiState.value = NativeHomeUiState.Error(e.friendlyMessage("Could not load PiggieTV."))
+                MobileAuthState.Unauthenticated -> {
+                    authenticatedUiSession = false
+                    showLogin(requireNotNull(currentServer), authVersion, "Your session expired. Sign in again.")
+                }
+
+                MobileAuthState.StorageError -> {
+                    authenticatedUiSession = false
+                    _uiState.value = NativeHomeUiState.Error(
+                        message = "PiggieTV could not securely update the saved session.",
+                        canForgetSavedSession = true,
+                    )
+                }
+
+                else -> {
+                    _uiState.value = NativeHomeUiState.Error(
+                        message = e.friendlyMessage("Could not load PiggieTV."),
+                        canForgetSavedSession = false,
+                    )
+                }
+            }
         }
     }
 
@@ -1321,6 +1541,11 @@ class NativeHomeViewModel(
 
     private fun ServerEntity.dashboardUrl(): String = "${hostname.trimEnd('/')}/web/index.html#!/dashboard.html"
 
+    override fun onCleared() {
+        apiClientController.cancelQuickConnect()
+        super.onCleared()
+    }
+
     private companion object {
         const val PTV_SEARCH_TERM_LIMIT = 8
         const val PTV_ROW_FETCH_CONCURRENCY = 4
@@ -1395,7 +1620,6 @@ sealed interface NativeHomeUiState {
         val serverName: String,
         val publicUsers: List<String> = emptyList(),
         val username: String = "",
-        val isSigningIn: Boolean = false,
         val error: String? = null,
     ) : NativeHomeUiState
     data class Content(
@@ -1410,7 +1634,105 @@ sealed interface NativeHomeUiState {
         val isSearchingMovies: Boolean = false,
         val movieSearchError: String? = null,
     ) : NativeHomeUiState
-    data class Error(val message: String) : NativeHomeUiState
+    data class Error(val message: String, val canForgetSavedSession: Boolean = false) : NativeHomeUiState
+}
+
+internal enum class NativeAuthRequest {
+    RESTORE,
+    PASSWORD,
+    QUICK_CONNECT,
+}
+
+internal sealed interface NativeAuthPresentation {
+    data object Authenticated : NativeAuthPresentation
+    data object LoginRequired : NativeAuthPresentation
+    data object Ignore : NativeAuthPresentation
+    data class LoginFailure(val message: String?) : NativeAuthPresentation
+    data class RecoveryFailure(val message: String) : NativeAuthPresentation
+}
+
+internal fun MobileAuthState.isQuickConnectInProgress(): Boolean = when (this) {
+    MobileAuthState.QuickConnectRequesting,
+    is MobileAuthState.QuickConnectWaiting,
+    -> true
+
+    is MobileAuthState.Authenticating -> method == AuthMethod.QUICK_CONNECT
+
+    else -> false
+}
+
+internal fun MobileAuthenticationResult.presentation(request: NativeAuthRequest): NativeAuthPresentation = when (this) {
+    is MobileAuthenticationResult.Authenticated -> NativeAuthPresentation.Authenticated
+
+    MobileAuthenticationResult.LoginRequired -> NativeAuthPresentation.LoginRequired
+
+    MobileAuthenticationResult.SecureStorageFailure -> NativeAuthPresentation.RecoveryFailure(
+        "PiggieTV could not securely access the saved session.",
+    )
+
+    MobileAuthenticationResult.Superseded,
+    MobileAuthenticationResult.QuickConnectAlreadyRunning,
+    -> NativeAuthPresentation.Ignore
+
+    is MobileAuthenticationResult.RecoverableFailure -> category.presentation(request)
+}
+
+private fun AuthFailureCategory.presentation(request: NativeAuthRequest): NativeAuthPresentation = when (this) {
+    AuthFailureCategory.AUTH_OPERATION_SUPERSEDED -> NativeAuthPresentation.Ignore
+
+    AuthFailureCategory.SECURE_STORAGE_FAILURE -> NativeAuthPresentation.RecoveryFailure(
+        "PiggieTV could not securely access the saved session.",
+    )
+
+    AuthFailureCategory.NETWORK_UNAVAILABLE -> if (request == NativeAuthRequest.RESTORE) {
+        NativeAuthPresentation.RecoveryFailure(
+            "PiggieTV is offline. Your saved session was kept; reconnect and retry.",
+        )
+    } else {
+        NativeAuthPresentation.LoginFailure("PiggieTV is offline. Reconnect and try again.")
+    }
+
+    AuthFailureCategory.SERVER_UNAVAILABLE -> if (request == NativeAuthRequest.RESTORE) {
+        NativeAuthPresentation.RecoveryFailure(
+            "The PiggieTV server is unavailable. Your saved session was kept; retry when it is reachable.",
+        )
+    } else {
+        NativeAuthPresentation.LoginFailure("The PiggieTV server is unavailable. Try again shortly.")
+    }
+
+    AuthFailureCategory.AUTH_REJECTED -> when (request) {
+        NativeAuthRequest.PASSWORD -> NativeAuthPresentation.LoginFailure(
+            "The username or password was not accepted.",
+        )
+
+        NativeAuthRequest.QUICK_CONNECT -> NativeAuthPresentation.LoginFailure(
+            "Quick Connect was not accepted. Start a new attempt.",
+        )
+
+        NativeAuthRequest.RESTORE -> NativeAuthPresentation.LoginRequired
+    }
+
+    AuthFailureCategory.INVALID_LOCAL_SESSION -> NativeAuthPresentation.LoginFailure(
+        "The selected server changed. Return to server selection and try again.",
+    )
+
+    AuthFailureCategory.QUICK_CONNECT_EXPIRED -> NativeAuthPresentation.LoginFailure(
+        "The Quick Connect code expired. Start a new attempt.",
+    )
+
+    AuthFailureCategory.QUICK_CONNECT_CANCELLED -> NativeAuthPresentation.LoginFailure(message = null)
+
+    AuthFailureCategory.QUICK_CONNECT_FAILED -> NativeAuthPresentation.LoginFailure(
+        "Quick Connect could not be completed. Try again.",
+    )
+
+    AuthFailureCategory.REQUEST_FAILED -> NativeAuthPresentation.LoginFailure(
+        when (request) {
+            NativeAuthRequest.PASSWORD -> "Could not sign in to PiggieTV."
+            NativeAuthRequest.QUICK_CONNECT -> "Quick Connect could not be completed. Try again."
+            NativeAuthRequest.RESTORE -> "Could not restore your PiggieTV session."
+        },
+    )
 }
 
 data class NativeHomeContent(

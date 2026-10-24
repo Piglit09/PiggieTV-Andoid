@@ -307,7 +307,7 @@ class SessionBrowserCallback(private val context: Context, private val api: ApiC
                 enableRemoteMedia = true,
             )
 
-            it.buildUpon().setUri(playbackUri + "&ApiKey=${api.accessToken}").build()
+            it.buildUpon().setUri(playbackUri).build()
         }
     }
 }

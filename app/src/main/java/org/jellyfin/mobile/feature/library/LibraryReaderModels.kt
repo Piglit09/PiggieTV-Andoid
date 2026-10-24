@@ -110,14 +110,21 @@ data class LibraryReaderResumeState(
         }
 
         return copy(
+            title = SAFE_PERSISTED_READER_TITLE,
             pageIndex = safePageIndex,
             pageCount = safePageCount,
             progress = safeProgress,
             updatedAtMs = updatedAtMs.coerceAtLeast(0),
             chapterIndex = safeChapterIndex,
+            chapterTitle = null,
             chapterPageIndex = chapterPageIndex.coerceAtLeast(0),
         )
     }
+
+    override fun toString(): String =
+        "LibraryReaderResumeState(content=[REDACTED], pageIndex=$pageIndex, pageCount=$pageCount, " +
+            "progress=$progress, updatedAtMs=$updatedAtMs, chapterIndex=$chapterIndex, " +
+            "chapterPageIndex=$chapterPageIndex)"
 }
 
 data class LibraryReadingProgress(
@@ -243,16 +250,22 @@ internal object LibraryReaderJson {
 }
 
 internal object LibraryReaderResumeStateSerializer {
-    fun encode(state: LibraryReaderResumeState): String =
-        LibraryReaderJson.json.encodeToString(state.normalized())
+    fun encode(state: LibraryReaderResumeState): String {
+        require(state.readerKey.isSafePersistentReaderKey()) {
+            "Reader progress requires a safe persistent identity."
+        }
+        return LibraryReaderJson.json.encodeToString(state.normalized())
+    }
 
     fun decode(value: String): LibraryReaderResumeState? = runCatching {
-        LibraryReaderJson.json.decodeFromString<LibraryReaderResumeState>(value).normalized()
+        LibraryReaderJson.json.decodeFromString<LibraryReaderResumeState>(value)
+            .normalized()
+            .takeIf { state -> state.readerKey.isSafePersistentReaderKey() }
     }.onFailure { error ->
         if (error is SerializationException || error is IllegalArgumentException) {
-            Timber.w(error, "PTV Books could not decode saved reader progress")
+            Timber.w("PTV Books could not decode saved reader progress")
         } else {
-            Timber.e(error, "PTV Books saved reader progress failed unexpectedly")
+            Timber.e("PTV Books saved reader progress failed unexpectedly")
         }
     }.getOrNull()
 }
@@ -265,9 +278,9 @@ internal object LibraryReaderSettingsSerializer {
         LibraryReaderJson.json.decodeFromString<LibraryReaderSettings>(value).normalized()
     }.onFailure { error ->
         if (error is SerializationException || error is IllegalArgumentException) {
-            Timber.w(error, "PTV Books could not decode reader settings")
+            Timber.w("PTV Books could not decode reader settings")
         } else {
-            Timber.e(error, "PTV Books reader settings failed unexpectedly")
+            Timber.e("PTV Books reader settings failed unexpectedly")
         }
     }.getOrNull()
 }
@@ -277,3 +290,4 @@ private val CBZ_MIME_TYPES = setOf("application/x-cbz", "application/vnd.comicbo
 private val CBR_MIME_TYPES = setOf("application/x-cbr", "application/vnd.comicbook-rar")
 private val MOBI_MIME_TYPES = setOf("application/x-mobipocket-ebook")
 private val AZW3_MIME_TYPES = setOf("application/vnd.amazon.ebook", "application/x-kindle-application")
+private const val SAFE_PERSISTED_READER_TITLE = "Book"

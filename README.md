@@ -141,7 +141,7 @@ assembleProprietaryDebug
 
 ## Security Notes
 
-Media reports are sent only to the authenticated `/Ptv/v1/reports/media` route on the connected PiggieTV server. The Android app does not contain a reporting webhook or another reporting credential. Servers that do not provide the route fail closed and the app tells the user that reporting is unavailable.
+Media reports are sent once, without automatic retry, to the authenticated `/Ptv/v1/reports/media` route on the connected PiggieTV server. The bounded payload contains the Jellyfin item id, issue category, optional playback context, and optional user detail that the server sanitizes before storage; media titles, subtitles, user identity, authentication material, and reporting credentials never enter the report body. Servers that do not provide the route fail closed and the app tells the user that reporting is unavailable.
 
 Any reporting webhook previously embedded in an app build must be treated as compromised and revoked. A replacement belongs only in the server environment; never add it to source code, Gradle properties, resources, or an APK.
 

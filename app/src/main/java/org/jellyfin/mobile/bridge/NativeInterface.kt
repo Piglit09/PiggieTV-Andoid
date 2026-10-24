@@ -7,6 +7,7 @@ import android.media.session.PlaybackState
 import android.webkit.JavascriptInterface
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
+import org.jellyfin.mobile.auth.transport.toHttpUrlWithoutAuthenticationQuery
 import org.jellyfin.mobile.events.ActivityEvent
 import org.jellyfin.mobile.events.ActivityEventHandler
 import org.jellyfin.mobile.utils.Constants
@@ -81,8 +82,8 @@ class NativeInterface(private val context: Context) : KoinComponent {
     fun updateMediaSession(args: String): Boolean {
         val options = try {
             JSONObject(args)
-        } catch (e: JSONException) {
-            Timber.e("updateMediaSession: %s", e.message)
+        } catch (_: JSONException) {
+            Timber.e("Media-session update was malformed")
             return false
         }
         val intent = Intent(context, RemotePlayerService::class.java).apply {
@@ -132,12 +133,15 @@ class NativeInterface(private val context: Context) : KoinComponent {
 
                 val title: String = file.getString("title")
                 val filename: String = file.getString("filename")
-                val url: String = file.getString("url")
+                val url = file.getString("url")
+                    .toHttpUrlWithoutAuthenticationQuery()
+                    ?.toString()
+                    ?: throw JSONException("Invalid download URL")
 
                 emitEvent(ActivityEvent.DownloadFile(url.toUri(), title, filename))
             }
-        } catch (e: JSONException) {
-            Timber.e("Download failed: %s", e.message)
+        } catch (_: JSONException) {
+            Timber.e("Download request was malformed")
             return false
         }
 
@@ -166,7 +170,11 @@ class NativeInterface(private val context: Context) : KoinComponent {
 
     @JavascriptInterface
     fun execCast(action: String, args: String) {
-        emitEvent(ActivityEvent.CastMessage(action, JSONArray(args)))
+        try {
+            emitEvent(ActivityEvent.CastMessage(action, JSONArray(args)))
+        } catch (_: JSONException) {
+            Timber.e("Cast command arguments were malformed")
+        }
     }
 
     @Suppress("NOTHING_TO_INLINE")

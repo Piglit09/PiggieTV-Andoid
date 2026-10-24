@@ -22,6 +22,7 @@ import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.jellyfin.mobile.app.AppPreferences
+import org.jellyfin.mobile.auth.transport.toHttpUrlWithoutAuthenticationQuery
 import org.jellyfin.sdk.api.client.ApiClient
 import org.jellyfin.sdk.api.client.extensions.imageApi
 import org.jellyfin.sdk.api.client.extensions.itemsApi
@@ -49,8 +50,8 @@ class LibraryRepository(
     suspend fun loadHome(): LibraryHome = withContext(Dispatchers.IO) {
         val jellyfinHome = runCatching {
             loadJellyfinHome()
-        }.onFailure { error ->
-            Timber.w(error, "PTV Books could not load Jellyfin-backed books; trying optional OPDS fallback")
+        }.onFailure {
+            Timber.w("PTV Books could not load Jellyfin-backed books; trying optional OPDS fallback")
         }.getOrNull()
 
         if (jellyfinHome != null && jellyfinHome.allBooks.isNotEmpty()) {
@@ -231,8 +232,8 @@ class LibraryRepository(
                 isFavorite = isFavorite,
                 limit = limit,
             )
-        }.onFailure { error ->
-            Timber.w(error, "PTV Reading primary book query failed for library=${library?.name}")
+        }.onFailure {
+            Timber.w("PTV Reading primary book query failed; trying nested containers")
         }.getOrDefault(emptyList())
         if (primaryItems.isNotEmpty() || library == null) {
             return primaryItems.map { item -> item.toJellyfinBook(library?.kind, library?.name) }
@@ -308,6 +309,8 @@ class LibraryRepository(
         val filename = "${name.orEmpty().ifBlank { id.toString() }.safeFilename()}.$extension"
         val mimeType = extension.toBookMimeType()
         val downloadUrl = apiClient.libraryApi.getDownloadUrl(itemId = id)
+            .withoutAuthenticationUrlMaterial()
+            ?: error("Jellyfin returned an invalid book download URL.")
         val link = LibraryLink(
             title = "Open native reader",
             href = downloadUrl,
@@ -336,7 +339,7 @@ class LibraryRepository(
                     maxWidth = 640,
                     quality = 88,
                     tag = tag,
-                )
+                ).withoutAuthenticationUrlMaterial()
             },
             categories = bookGenres,
             series = seriesName,
@@ -774,3 +777,12 @@ class LibraryRepository(
         )
     }
 }
+
+private fun String.withoutAuthenticationUrlMaterial(): String? =
+    toHttpUrlWithoutAuthenticationQuery()
+        ?.newBuilder()
+        ?.username("")
+        ?.password("")
+        ?.fragment(null)
+        ?.build()
+        ?.toString()

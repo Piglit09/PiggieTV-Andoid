@@ -51,6 +51,31 @@ internal enum class MusicRecommendationSurface(val policy: MusicRecommendationPo
     ),
 }
 
+/** Explicit music-session policy. Legacy surfaces keep their existing behavior when this is omitted. */
+internal enum class MusicListeningMode(val policy: MusicRecommendationPolicy, val prioritizeSeedMatches: Boolean) {
+    STAY_IN_THE_VIBE(
+        MusicRecommendationPolicy(
+            preferredFamiliarPercent = 70,
+            minFamiliarPercent = 70,
+            maxFamiliarPercent = 70,
+            seedArtistAffinityBoost = 450L,
+            seedAlbumAffinityBoost = 650L,
+        ),
+        prioritizeSeedMatches = true,
+    ),
+    BALANCED_DISCOVERY(
+        MusicRecommendationPolicy(
+            preferredFamiliarPercent = 40,
+            minFamiliarPercent = 40,
+            maxFamiliarPercent = 40,
+            seedArtistAffinityBoost = 450L,
+            seedAlbumAffinityBoost = 650L,
+        ),
+        prioritizeSeedMatches = true,
+    ),
+    ANYTHING_GOES(MusicRecommendationSurface.RADIO.policy, prioritizeSeedMatches = false),
+}
+
 internal data class MusicRecommendationPolicy(
     val preferredFamiliarPercent: Int,
     val minFamiliarPercent: Int,
@@ -91,12 +116,13 @@ internal object MusicRecommendationRanker {
         excludedIds: Set<UUID> = emptySet(),
         maxItems: Int,
         surface: MusicRecommendationSurface = MusicRecommendationSurface.HOME,
+        listeningMode: MusicListeningMode? = null,
     ): List<MusicItem> {
         val limit = maxItems.coerceAtLeast(0)
         if (limit == 0) return emptyList()
 
         val pinnedSeed = seed?.takeIf(MusicItem::isPlayable)
-        val policy = surface.policy
+        val policy = listeningMode?.policy ?: surface.policy
         val profile = buildProfile(seed = seed, affinityItems = affinityItems)
         val mergedCandidates = linkedMapOf<UUID, MergedCandidate>()
 
@@ -168,6 +194,8 @@ internal object MusicRecommendationRanker {
                 albumCap = albumCap,
                 maxConsecutiveArtist = policy.maxConsecutiveArtist,
                 maxConsecutiveAlbum = policy.maxConsecutiveAlbum,
+                prioritizeSeedMatches = listeningMode?.prioritizeSeedMatches == true,
+                explicitMode = listeningMode != null,
             )
             if (selectedIndex < 0) break
 
@@ -195,39 +223,76 @@ internal object MusicRecommendationRanker {
         albumCap: Int,
         maxConsecutiveArtist: Int,
         maxConsecutiveAlbum: Int,
+        prioritizeSeedMatches: Boolean,
+        explicitMode: Boolean,
     ): Int {
         val alternateBucket = desiredBucket.other()
-
-        fun find(bucket: MusicRecommendationBucket?, enforceCaps: Boolean, enforceRun: Boolean): Int =
-            candidates.indexOfFirst { candidate ->
-                (bucket == null || candidate.bucket == bucket) &&
-                    (
-                        !enforceRun || !wouldExceedConsecutiveCap(
-                            item = candidate.item,
-                            selectedItems = selectedItems,
-                            maxConsecutiveArtist = maxConsecutiveArtist,
-                            maxConsecutiveAlbum = maxConsecutiveAlbum,
-                        )
-                        ) &&
-                    (
-                        !enforceCaps || candidate.withinCaps(
-                            sourceCounts = sourceCounts,
-                            artistCounts = artistCounts,
-                            albumCounts = albumCounts,
-                            sourceCap = sourceCap,
-                            artistCap = artistCap,
-                            albumCap = albumCap,
-                        )
-                        )
+        val constraints = CandidateSelectionConstraints(
+            selectedItems = selectedItems,
+            sourceCounts = sourceCounts,
+            artistCounts = artistCounts,
+            albumCounts = albumCounts,
+            sourceCap = sourceCap,
+            artistCap = artistCap,
+            albumCap = albumCap,
+            maxConsecutiveArtist = maxConsecutiveArtist,
+            maxConsecutiveAlbum = maxConsecutiveAlbum,
+        )
+        val passes = if (explicitMode) {
+            listOf(
+                CandidateSelectionPass(desiredBucket, enforceCaps = true, enforceRun = true),
+                CandidateSelectionPass(desiredBucket, enforceCaps = false, enforceRun = true),
+                CandidateSelectionPass(alternateBucket, enforceCaps = true, enforceRun = true),
+                CandidateSelectionPass(alternateBucket, enforceCaps = false, enforceRun = true),
+                CandidateSelectionPass(bucket = null, enforceCaps = false, enforceRun = false),
+            )
+        } else {
+            listOf(
+                CandidateSelectionPass(desiredBucket, enforceCaps = true, enforceRun = true),
+                CandidateSelectionPass(alternateBucket, enforceCaps = true, enforceRun = true),
+                CandidateSelectionPass(bucket = null, enforceCaps = true, enforceRun = true),
+                CandidateSelectionPass(desiredBucket, enforceCaps = false, enforceRun = true),
+                CandidateSelectionPass(alternateBucket, enforceCaps = false, enforceRun = true),
+                CandidateSelectionPass(bucket = null, enforceCaps = false, enforceRun = true),
+                CandidateSelectionPass(bucket = null, enforceCaps = false, enforceRun = false),
+            )
+        }
+        val seedFilters = if (prioritizeSeedMatches) listOf(true, false) else listOf(false)
+        for (seedMatchesOnly in seedFilters) {
+            for (pass in passes) {
+                val candidateIndex = candidates.indexOfFirst { candidate ->
+                    candidate.matchesSelectionPass(pass, seedMatchesOnly, constraints)
+                }
+                if (candidateIndex >= 0) return candidateIndex
             }
+        }
+        return -1
+    }
 
-        return find(desiredBucket, enforceCaps = true, enforceRun = true).takeIf { it >= 0 }
-            ?: find(alternateBucket, enforceCaps = true, enforceRun = true).takeIf { it >= 0 }
-            ?: find(bucket = null, enforceCaps = true, enforceRun = true).takeIf { it >= 0 }
-            ?: find(desiredBucket, enforceCaps = false, enforceRun = true).takeIf { it >= 0 }
-            ?: find(alternateBucket, enforceCaps = false, enforceRun = true).takeIf { it >= 0 }
-            ?: find(bucket = null, enforceCaps = false, enforceRun = true).takeIf { it >= 0 }
-            ?: find(bucket = null, enforceCaps = false, enforceRun = false)
+    private fun RankedCandidate.matchesSelectionPass(
+        pass: CandidateSelectionPass,
+        seedMatchesOnly: Boolean,
+        constraints: CandidateSelectionConstraints,
+    ): Boolean {
+        if (seedMatchesOnly && !seedMatch) return false
+        if (pass.bucket != null && bucket != pass.bucket) return false
+        val violatesRun = pass.enforceRun && wouldExceedConsecutiveCap(
+            item = item,
+            selectedItems = constraints.selectedItems,
+            maxConsecutiveArtist = constraints.maxConsecutiveArtist,
+            maxConsecutiveAlbum = constraints.maxConsecutiveAlbum,
+        )
+        if (violatesRun) return false
+        val violatesCaps = pass.enforceCaps && !withinCaps(
+            sourceCounts = constraints.sourceCounts,
+            artistCounts = constraints.artistCounts,
+            albumCounts = constraints.albumCounts,
+            sourceCap = constraints.sourceCap,
+            artistCap = constraints.artistCap,
+            albumCap = constraints.albumCap,
+        )
+        if (violatesCaps) return false
+        return true
     }
 
     private fun MergedCandidate.rank(
@@ -238,7 +303,8 @@ internal object MusicRecommendationRanker {
             .maxOfOrNull { key -> profile.artistWeights[key] ?: 0 }
             ?: 0
         val albumAffinity = item.recommendationAlbumKey()?.let { key -> profile.albumWeights[key] } ?: 0
-        val genreAffinity = item.recommendationGenreKeys()
+        val genreKeys = item.recommendationGenreKeys()
+        val genreAffinity = genreKeys
             .map { key -> profile.genreWeights[key] ?: 0 }
             .sortedDescending()
             .take(2)
@@ -246,6 +312,7 @@ internal object MusicRecommendationRanker {
         val strongestSourceScore = sources.maxOfOrNull(MusicRecommendationSource::baseScore) ?: 0
         val seedArtistMatch = item.recommendationArtistKeys().intersect(profile.seedArtistKeys).isNotEmpty()
         val seedAlbumMatch = profile.seedAlbumKey != null && item.recommendationAlbumKey() == profile.seedAlbumKey
+        val seedGenreMatch = genreKeys.intersect(profile.seedGenreKeys).isNotEmpty()
         val score = strongestSourceScore * 10L +
             (sources.size - 1).coerceAtLeast(0) * 15L +
             artistAffinity * 24L +
@@ -281,6 +348,7 @@ internal object MusicRecommendationRanker {
             primarySource = primarySource,
             bucket = bucket,
             score = score,
+            seedMatch = seedArtistMatch || seedAlbumMatch || seedGenreMatch,
         )
     }
 
@@ -323,6 +391,7 @@ internal object MusicRecommendationRanker {
             listeningIds = listeningIds,
             seedArtistKeys = seed?.recommendationArtistKeys().orEmpty(),
             seedAlbumKey = seed?.recommendationAlbumKey(),
+            seedGenreKeys = seed?.recommendationGenreKeys().orEmpty(),
         )
     }
 
@@ -384,6 +453,7 @@ internal object MusicRecommendationRanker {
         val listeningIds: Set<UUID>,
         val seedArtistKeys: Set<String>,
         val seedAlbumKey: String?,
+        val seedGenreKeys: Set<String>,
     )
 
     private data class MergedCandidate(val item: MusicItem, val sources: MutableSet<MusicRecommendationSource>)
@@ -394,6 +464,25 @@ internal object MusicRecommendationRanker {
         val primarySource: MusicRecommendationSource?,
         val bucket: MusicRecommendationBucket,
         val score: Long,
+        val seedMatch: Boolean,
+    )
+
+    private data class CandidateSelectionPass(
+        val bucket: MusicRecommendationBucket?,
+        val enforceCaps: Boolean,
+        val enforceRun: Boolean,
+    )
+
+    private data class CandidateSelectionConstraints(
+        val selectedItems: List<MusicItem>,
+        val sourceCounts: Map<MusicRecommendationSource, Int>,
+        val artistCounts: Map<String, Int>,
+        val albumCounts: Map<String, Int>,
+        val sourceCap: Int,
+        val artistCap: Int,
+        val albumCap: Int,
+        val maxConsecutiveArtist: Int,
+        val maxConsecutiveAlbum: Int,
     )
 
     private enum class MusicRecommendationBucket {

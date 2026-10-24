@@ -1,6 +1,7 @@
 package org.jellyfin.mobile.feature.music.auto
 
 import org.jellyfin.mobile.feature.music.MusicBrowseKind
+import org.jellyfin.mobile.feature.music.MusicListeningMode
 import org.jellyfin.sdk.model.UUID
 import org.jellyfin.sdk.model.serializer.toUUIDOrNull
 
@@ -158,6 +159,37 @@ internal enum class PtvMusicAutoMix(val mediaId: String, val title: String, val 
     }
 }
 
+internal enum class PtvMusicAutoListeningMode(
+    val mediaId: String,
+    val title: String,
+    val subtitle: String,
+    val listeningMode: MusicListeningMode,
+) {
+    STAY_IN_THE_VIBE(
+        mediaId = "ptv:auto:listening-mode:stay-in-the-vibe",
+        title = "Stay in the Vibe",
+        subtitle = "More familiar songs and close matches",
+        listeningMode = MusicListeningMode.STAY_IN_THE_VIBE,
+    ),
+    BALANCED_DISCOVERY(
+        mediaId = "ptv:auto:listening-mode:balanced-discovery",
+        title = "Balanced Discovery",
+        subtitle = "A mix of familiar and new songs",
+        listeningMode = MusicListeningMode.BALANCED_DISCOVERY,
+    ),
+    ANYTHING_GOES(
+        mediaId = "ptv:auto:listening-mode:anything-goes",
+        title = "Anything Goes",
+        subtitle = "Explore further across your library",
+        listeningMode = MusicListeningMode.ANYTHING_GOES,
+    ),
+    ;
+
+    companion object {
+        fun fromMediaId(mediaId: String): PtvMusicAutoListeningMode? = entries.firstOrNull { it.mediaId == mediaId }
+    }
+}
+
 internal data class PtvMusicAutoRootItem(
     val mediaId: String,
     val title: String,
@@ -168,19 +200,9 @@ internal data class PtvMusicAutoRootItem(
 
 internal val PTV_MUSIC_AUTO_ROOT_ITEMS: List<PtvMusicAutoRootItem> = listOf(
     PtvMusicAutoRootItem(
-        mediaId = PtvMusicAutoIds.RECOMMENDED_MIXES,
-        title = "Recommended Mixes",
-        subtitle = "Driving-safe PTV queues",
-    ),
-    PtvMusicAutoRootItem(
-        mediaId = PtvMusicAutoMix.LATEST.mediaId,
-        title = "Latest Music",
-        subtitle = "Newest tracks in your library",
-    ),
-    PtvMusicAutoRootItem(
-        mediaId = PtvMusicAutoCategory.FAVORITES.mediaId,
-        title = PtvMusicAutoCategory.FAVORITES.title,
-        subtitle = PtvMusicAutoCategory.FAVORITES.subtitle,
+        mediaId = PtvMusicAutoCategory.PLAYLISTS.mediaId,
+        title = PtvMusicAutoCategory.PLAYLISTS.title,
+        subtitle = PtvMusicAutoCategory.PLAYLISTS.subtitle,
     ),
     PtvMusicAutoRootItem(
         mediaId = PtvMusicAutoCategory.RECENTLY_PLAYED.mediaId,
@@ -188,9 +210,14 @@ internal val PTV_MUSIC_AUTO_ROOT_ITEMS: List<PtvMusicAutoRootItem> = listOf(
         subtitle = PtvMusicAutoCategory.RECENTLY_PLAYED.subtitle,
     ),
     PtvMusicAutoRootItem(
-        mediaId = PtvMusicAutoCategory.GENRES.mediaId,
-        title = PtvMusicAutoCategory.GENRES.title,
-        subtitle = PtvMusicAutoCategory.GENRES.subtitle,
+        mediaId = PtvMusicAutoCategory.FAVORITES.mediaId,
+        title = PtvMusicAutoCategory.FAVORITES.title,
+        subtitle = PtvMusicAutoCategory.FAVORITES.subtitle,
+    ),
+    PtvMusicAutoRootItem(
+        mediaId = PtvMusicAutoMix.LATEST.mediaId,
+        title = "Latest Music",
+        subtitle = "Newest tracks in your library",
     ),
     PtvMusicAutoRootItem(
         mediaId = PtvMusicAutoCategory.ALBUMS.mediaId,
@@ -203,9 +230,19 @@ internal val PTV_MUSIC_AUTO_ROOT_ITEMS: List<PtvMusicAutoRootItem> = listOf(
         subtitle = PtvMusicAutoCategory.ARTISTS.subtitle,
     ),
     PtvMusicAutoRootItem(
-        mediaId = PtvMusicAutoCategory.PLAYLISTS.mediaId,
-        title = PtvMusicAutoCategory.PLAYLISTS.title,
-        subtitle = PtvMusicAutoCategory.PLAYLISTS.subtitle,
+        mediaId = PtvMusicAutoCategory.GENRES.mediaId,
+        title = PtvMusicAutoCategory.GENRES.title,
+        subtitle = PtvMusicAutoCategory.GENRES.subtitle,
+    ),
+    PtvMusicAutoRootItem(
+        mediaId = PtvMusicAutoIds.RECOMMENDED_MIXES,
+        title = "Recommended Mixes",
+        subtitle = "Driving-safe PTV queues",
+    ),
+    PtvMusicAutoRootItem(
+        mediaId = PtvMusicAutoIds.LISTENING_MODES,
+        title = "Listening Mode",
+        subtitle = "Choose how PTV finds your next songs",
     ),
     PtvMusicAutoRootItem(
         mediaId = PtvMusicAutoIds.AUTO_PICKS,
@@ -223,6 +260,7 @@ internal object PtvMusicAutoIds {
     const val ROOT = "ptv:auto:root"
     const val MORE = "ptv:auto:more"
     const val RECOMMENDED_MIXES = "ptv:auto:recommended-mixes"
+    const val LISTENING_MODES = "ptv:auto:listening-modes"
     const val AUTO_PICKS = "ptv:auto:auto-picks"
     const val SHUFFLE_ALL = "ptv:auto:action:shuffle-all"
     const val MORE_LIKE_THIS = "ptv:auto:action:more-like-this"

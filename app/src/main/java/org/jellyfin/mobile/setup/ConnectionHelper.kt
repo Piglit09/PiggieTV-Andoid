@@ -17,12 +17,12 @@ import timber.log.Timber
 class ConnectionHelper(private val context: Context, private val jellyfin: Jellyfin) {
     @Suppress("LongMethod")
     suspend fun checkServerUrl(enteredUrl: String): CheckUrlState {
-        Timber.i("checkServerUrlAndConnection $enteredUrl")
+        Timber.i("Checking entered server address")
 
         val candidates = withContext(Dispatchers.IO) {
             jellyfin.discovery.getAddressCandidates(enteredUrl)
         }
-        Timber.i("Address candidates are $candidates")
+        Timber.i("Server discovery produced %d candidates", candidates.size)
 
         // Find servers and classify them into groups.
         // BAD servers are collected in case we need an error message,
@@ -53,13 +53,12 @@ class ConnectionHelper(private val context: Context, private val jellyfin: Jelly
         if (server != null) {
             val systemInfo = requireNotNull(server.systemInfo)
             val serverVersion = systemInfo.getOrNull()?.version
-            Timber.i("Found valid server at ${server.address} with rating ${server.score} and version $serverVersion")
+            Timber.i("Found valid server rating=%s version=%s", server.score, serverVersion)
             return CheckUrlState.Success(server.address)
         }
 
         // No valid server found, log and show error message
-        val loggedServers = badServers.joinToString { "${it.address}/${it.systemInfo}" }
-        Timber.i("No valid servers found, invalid candidates were: $loggedServers")
+        Timber.i("No valid server found invalidCandidateCount=%d", badServers.size)
 
         val error = when {
             badServers.isNotEmpty() -> {
@@ -77,7 +76,7 @@ class ConnectionHelper(private val context: Context, private val jellyfin: Jelly
                         append(":\n")
                         append(
                             unreachableServers.joinToString(separator = "\n") { result ->
-                                "\u00b7 ${result.address}"
+                                "\u00b7 ${result.address.secretSafeServerLabel()}"
                             },
                         )
                     }
@@ -87,7 +86,7 @@ class ConnectionHelper(private val context: Context, private val jellyfin: Jelly
                         append(":\n")
                         append(
                             incompatibleServers.joinToString(separator = "\n") { result ->
-                                "\u00b7 ${result.address}"
+                                "\u00b7 ${result.address.secretSafeServerLabel()}"
                             },
                         )
                     }
@@ -99,6 +98,17 @@ class ConnectionHelper(private val context: Context, private val jellyfin: Jelly
 
         return CheckUrlState.Error(error)
     }
+
+    private fun String.secretSafeServerLabel(): String = runCatching {
+        val uri = android.net.Uri.parse(this)
+        val host = uri.host ?: return@runCatching "Server address"
+        buildString {
+            uri.scheme?.let { scheme -> append(scheme).append("://") }
+            append(host)
+            if (uri.port >= 0) append(':').append(uri.port)
+            uri.path?.takeIf(String::isNotBlank)?.let(::append)
+        }
+    }.getOrDefault("Server address")
 
     fun discoverServersAsFlow(): Flow<ServerDiscoveryInfo> = jellyfin.discovery
         .discoverLocalServers(maxServers = LocalServerDiscovery.DISCOVERY_MAX_SERVERS)

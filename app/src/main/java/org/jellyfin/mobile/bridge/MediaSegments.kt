@@ -16,8 +16,8 @@ class MediaSegments(private val mediaSegmentRepository: MediaSegmentRepository) 
                 MediaSegmentType.fromName(typeString),
                 MediaSegmentAction.fromName(actionString),
             )
-    } catch (e: IllegalArgumentException) {
-        Timber.e("setSegmentTypeAction: %s", e.message)
+    } catch (_: IllegalArgumentException) {
+        Timber.e("Media-segment action was malformed")
     }
 
     @JavascriptInterface

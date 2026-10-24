@@ -1,19 +1,18 @@
 package org.jellyfin.mobile.app
 
 import android.content.Context
-import androidx.core.net.toUri
 import androidx.media3.common.util.Util
 import androidx.media3.database.DatabaseProvider
 import androidx.media3.database.StandaloneDatabaseProvider
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultDataSource
-import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.ResolvingDataSource
 import androidx.media3.datasource.cache.Cache
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.NoOpCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
+import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.MediaSource
@@ -26,13 +25,32 @@ import coil3.network.okhttp.OkHttpNetworkFetcherFactory
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import okhttp3.Credentials
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
+import okhttp3.Request
 import org.jellyfin.mobile.MainViewModel
+import org.jellyfin.mobile.auth.AuthSessionCoordinator
+import org.jellyfin.mobile.auth.storage.SecureSessionTokenStore
+import org.jellyfin.mobile.auth.transport.AuthTransportRealm
+import org.jellyfin.mobile.auth.transport.AuthTransportSession
+import org.jellyfin.mobile.auth.transport.AuthenticatedTransportInterceptor
+import org.jellyfin.mobile.auth.transport.INTERNAL_AUTH_EPOCH_HEADER
+import org.jellyfin.mobile.auth.transport.INTERNAL_LIBRARY_AUTH_HEADER
+import org.jellyfin.mobile.auth.transport.INTERNAL_LIBRARY_AUTH_VALUE
+import org.jellyfin.mobile.auth.transport.JellyfinSessionRevoker
+import org.jellyfin.mobile.auth.transport.OkHttpJellyfinSessionRevoker
+import org.jellyfin.mobile.auth.transport.authTransportRealm
+import org.jellyfin.mobile.auth.transport.hasSameOrigin
 import org.jellyfin.mobile.bridge.MediaSegments
 import org.jellyfin.mobile.bridge.NativePlayer
+import org.jellyfin.mobile.data.LegacyTokenResidueRemediation
+import org.jellyfin.mobile.downloads.AUTHENTICATED_DOWNLOAD_DATA_SOURCE
+import org.jellyfin.mobile.downloads.AuthenticatedDownloadIndexSanitizer
+import org.jellyfin.mobile.downloads.AuthenticatedDownloadOwnership
 import org.jellyfin.mobile.downloads.DownloadsViewModel
 import org.jellyfin.mobile.events.ActivityEventHandler
 import org.jellyfin.mobile.feature.library.LibraryReaderFragment
+import org.jellyfin.mobile.feature.library.LibraryReaderLaunchRequestRegistry
 import org.jellyfin.mobile.feature.library.LibraryReaderStore
 import org.jellyfin.mobile.feature.library.LibraryRepository
 import org.jellyfin.mobile.feature.library.LibraryViewModel
@@ -62,35 +80,44 @@ import org.jellyfin.mobile.utils.isLowRamDevice
 import org.jellyfin.mobile.webapp.RemoteVolumeProvider
 import org.jellyfin.mobile.webapp.WebViewFragment
 import org.jellyfin.mobile.webapp.WebappFunctionChannel
-import org.jellyfin.sdk.api.client.ApiClient
-import org.jellyfin.sdk.api.client.util.AuthorizationHeaderBuilder
 import org.koin.android.ext.koin.androidApplication
 import org.koin.androidx.fragment.dsl.fragment
 import org.koin.core.module.dsl.viewModel
 import org.koin.core.qualifier.named
 import org.koin.dsl.module
 import java.io.File
+import java.io.InterruptedIOException
 
 const val PLAYER_EVENT_CHANNEL = "PlayerEventChannel"
 private const val TS_SEARCH_PACKETS = 1800
 
 val applicationModule = module {
     single { AppPreferences(androidApplication()) }
+    single { SecureSessionTokenStore(androidApplication()) }
     single { InMemoryCookieJar() }
     single {
         val appPreferences: AppPreferences = get()
+        val authTransportSession: AuthTransportSession = get()
         OkHttpClient.Builder()
             .cookieJar(get<InMemoryCookieJar>())
             .addInterceptor { chain ->
                 val request = chain.request()
-                val libraryBaseUrl = appPreferences.libraryServerBaseUrl
-                val requestUrl = request.url.toString()
-                val authenticatedRequest = if (
-                    libraryBaseUrl.isNotBlank() &&
-                    requestUrl.startsWith(libraryBaseUrl) &&
-                    request.header("Authorization") == null
+                val libraryBaseUrl = appPreferences.libraryServerBaseUrl.toHttpUrlOrNull()
+                val cleanRequest = request.newBuilder()
+                    .removeHeader(INTERNAL_LIBRARY_AUTH_HEADER)
+                    .apply {
+                        if (request.header(INTERNAL_LIBRARY_AUTH_HEADER) == INTERNAL_LIBRARY_AUTH_VALUE) {
+                            authTransportRealm(AuthTransportRealm.LIBRARY)
+                        }
+                    }
+                    .build()
+                val authenticatedRequest = if (shouldApplyLibraryAuthentication(
+                        request = request,
+                        libraryBaseUrl = libraryBaseUrl,
+                    )
                 ) {
-                    val builder = request.newBuilder()
+                    val builder = cleanRequest.newBuilder()
+                        .authTransportRealm(AuthTransportRealm.LIBRARY)
                     appPreferences.libraryBearerToken?.let { token ->
                         builder.header("Authorization", "Bearer $token")
                     } ?: appPreferences.libraryUsername?.let { username ->
@@ -101,11 +128,12 @@ val applicationModule = module {
                     }
                     builder.build()
                 } else {
-                    request
+                    cleanRequest
                 }
 
                 chain.proceed(authenticatedRequest)
             }
+            .addInterceptor(AuthenticatedTransportInterceptor(authTransportSession))
             .build()
     }
     single {
@@ -116,15 +144,18 @@ val applicationModule = module {
             .build()
     }
     single { PermissionRequestHelper() }
+    single<JellyfinSessionRevoker> { OkHttpJellyfinSessionRevoker(get()) }
     single {
         MediaReportSender(
             okHttpClient = get(),
             apiClient = get(),
+            authTransportSession = get(),
             ioDispatcher = Dispatchers.IO,
         )
     }
     single { NativeSignupRepository(get()) }
     single { OpdsClient(get()) }
+    single { LibraryReaderLaunchRequestRegistry() }
     single { LibraryReaderStore(androidApplication()) }
     single { LibraryRepository(get(), get(), get()) }
     single {
@@ -144,10 +175,25 @@ val applicationModule = module {
     single(named(PLAYER_EVENT_CHANNEL)) { Channel<PlayerEvent>() }
 
     // Controllers
-    single { ApiClientController(get(), get(), get(), get(), get(), get()) }
+    single {
+        ApiClientController(
+            application = androidApplication(),
+            appPreferences = get(),
+            jellyfin = get(),
+            apiClient = get(),
+            serverDao = get(),
+            userDao = get(),
+            musicSessionInvalidator = get(),
+            secureSessionTokenStore = get(),
+            legacyTokenResidueRemediation = get<LegacyTokenResidueRemediation>(),
+            authCoordinator = get(),
+            authTransportSession = get(),
+            sessionRevoker = get(),
+        )
+    }
 
     // Event handlers and channels
-    single { ActivityEventHandler(get()) }
+    single { ActivityEventHandler(get(), get()) }
     single { WebappFunctionChannel() }
 
     // Bridge interfaces
@@ -181,6 +227,7 @@ val applicationModule = module {
         val dbProvider = StandaloneDatabaseProvider(get<Context>())
         dbProvider
     }
+    single { AuthenticatedDownloadIndexSanitizer(get<DatabaseProvider>()) }
     single<Cache> {
         val downloadPath = File(get<Context>().filesDir, Constants.DOWNLOAD_PATH)
         if (!downloadPath.exists()) {
@@ -192,33 +239,32 @@ val applicationModule = module {
 
     single<DataSource.Factory> {
         val context: Context = get()
-        val apiClient: ApiClient = get()
+        val authTransportSession: AuthTransportSession = get()
 
-        val baseDataSourceFactory = DefaultHttpDataSource.Factory().apply {
-            setUserAgent(Util.getUserAgent(context, Constants.APP_INFO_NAME))
-        }
+        val baseDataSourceFactory = OkHttpDataSource.Factory(get<OkHttpClient>())
+            .setUserAgent(Util.getUserAgent(context, Constants.APP_INFO_NAME))
 
         val dataSourceFactory = DefaultDataSource.Factory(context, baseDataSourceFactory)
-
-        // Add authorization header. This is needed as we don't pass the
-        // access token in the URL for Android Auto.
         ResolvingDataSource.Factory(dataSourceFactory) { dataSpec: DataSpec ->
-            // Only send authorization header if URI matches the jellyfin server
-            val baseUrlAuthority = apiClient.baseUrl?.toUri()?.authority
-
-            if (dataSpec.uri.authority == baseUrlAuthority) {
-                val authorizationHeaderString = AuthorizationHeaderBuilder.buildHeader(
-                    clientName = apiClient.clientInfo.name,
-                    clientVersion = apiClient.clientInfo.version,
-                    deviceId = apiClient.deviceInfo.id,
-                    deviceName = apiClient.deviceInfo.name,
-                    accessToken = apiClient.accessToken,
+            val requestUrl = dataSpec.uri.toString().toHttpUrlOrNull()
+            val snapshot = authTransportSession.currentSnapshot()
+            if (requestUrl != null && snapshot?.serverOrigin?.hasSameOrigin(requestUrl) == true) {
+                dataSpec.withRequestHeaders(
+                    dataSpec.httpRequestHeaders + (INTERNAL_AUTH_EPOCH_HEADER to snapshot.epoch.toString()),
                 )
-
-                dataSpec.withRequestHeaders(hashMapOf("Authorization" to authorizationHeaderString))
             } else {
                 dataSpec
             }
+        }
+    }
+
+    single<DataSource.Factory>(named(AUTHENTICATED_DOWNLOAD_DATA_SOURCE)) {
+        val authCoordinator: AuthSessionCoordinator = get()
+        ResolvingDataSource.Factory(get<DataSource.Factory>()) { dataSpec ->
+            if (!AuthenticatedDownloadOwnership.isAuthorized(dataSpec.key, authCoordinator.state.value)) {
+                throw InterruptedIOException("AUTH_OPERATION_SUPERSEDED")
+            }
+            dataSpec
         }
     }
 
@@ -252,4 +298,21 @@ val applicationModule = module {
     single { ProgressiveMediaSource.Factory(get<CacheDataSource.Factory>()) }
     single { HlsMediaSource.Factory(get<CacheDataSource.Factory>()) }
     single { SingleSampleMediaSource.Factory(get<CacheDataSource.Factory>()) }
+}
+
+/**
+ * Only explicitly library-owned traffic may receive Reading/OPDS credentials. Jellyfin, excluded,
+ * and unowned traffic remains under its own transport policy even when services share an origin.
+ */
+internal fun shouldApplyLibraryAuthentication(request: Request, libraryBaseUrl: okhttp3.HttpUrl?): Boolean {
+    val realm = request.tag(AuthTransportRealm::class.java)
+    return libraryBaseUrl?.hasSameOrigin(request.url) == true &&
+        request.header("Authorization") == null &&
+        realm != AuthTransportRealm.JELLYFIN &&
+        realm != AuthTransportRealm.EXCLUDED &&
+        request.header(INTERNAL_AUTH_EPOCH_HEADER) == null &&
+        (
+            request.header(INTERNAL_LIBRARY_AUTH_HEADER) == INTERNAL_LIBRARY_AUTH_VALUE ||
+                realm == AuthTransportRealm.LIBRARY
+            )
 }

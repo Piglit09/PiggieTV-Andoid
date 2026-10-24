@@ -9,6 +9,7 @@ import androidx.media3.exoplayer.offline.DownloadNotificationHelper
 import org.jellyfin.mobile.utils.Constants.DOWNLOAD_NOTIFICATION_CHANNEL_ID
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
+import org.koin.core.qualifier.named
 import java.util.concurrent.Executors
 
 object DownloadServiceUtil : KoinComponent {
@@ -16,8 +17,9 @@ object DownloadServiceUtil : KoinComponent {
 
     private val context: Context by inject()
     private val databaseProvider: DatabaseProvider by inject()
+    private val downloadIndexSanitizer: AuthenticatedDownloadIndexSanitizer by inject()
     private val downloadCache: Cache by inject()
-    private val dataSourceFactory: DataSource.Factory by inject()
+    private val dataSourceFactory: DataSource.Factory by inject(named(AUTHENTICATED_DOWNLOAD_DATA_SOURCE))
     private var downloadManager: DownloadManager? = null
     private var downloadNotificationHelper: DownloadNotificationHelper? = null
     private var downloadTracker: DownloadTracker? = null
@@ -46,6 +48,7 @@ object DownloadServiceUtil : KoinComponent {
     @Synchronized
     private fun ensureDownloadManagerInitialized(context: Context) {
         if (downloadManager == null) {
+            downloadIndexSanitizer.requireSanitized()
             downloadManager = DownloadManager(
                 context,
                 databaseProvider,

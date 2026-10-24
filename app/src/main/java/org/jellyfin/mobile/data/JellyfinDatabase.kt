@@ -24,10 +24,11 @@ import java.util.UUID
         UserEntity::class,
         DownloadEntity::class,
     ],
-    version = 4,
+    version = 5,
     autoMigrations = [
         AutoMigration(from = 2, to = 3),
         AutoMigration(from = 3, to = 4, spec = JellyfinDatabase.MigrateV4::class),
+        AutoMigration(from = 4, to = 5, spec = JellyfinDatabase.SanitizeDownloadCredentialsV5::class),
     ],
 )
 @TypeConverters(JellyfinDatabase.Converters::class)
@@ -58,14 +59,38 @@ abstract class JellyfinDatabase : RoomDatabase() {
                 val newValue = oldValue.toUUIDOrNull()?.toString()
 
                 if (newValue == null) {
-                    Timber.i("Deleting user $oldValue due to invalid userId")
+                    Timber.i("Deleting a user record due to an invalid user ID")
                     db.execSQL("DELETE FROM user WHERE user_id = ?", arrayOf(oldValue))
                 } else {
-                    Timber.i("Updating user $oldValue to userId $newValue")
+                    Timber.i("Normalizing a persisted user ID")
                     db.execSQL("UPDATE user SET user_id = ? WHERE user_id = ?", arrayOf(newValue, oldValue))
                 }
             }
 
+            cursor.close()
+        }
+    }
+
+    /** Removes URL query/header-token residues written by the legacy WebView download bridge. */
+    class SanitizeDownloadCredentialsV5 : AutoMigrationSpec {
+        override fun onPostMigrate(db: SupportSQLiteDatabase) {
+            val cursor = db.query("SELECT item_id, media_source FROM Download")
+            while (cursor.moveToNext()) {
+                val itemId = cursor.getString(0)
+                val original = cursor.getString(1)
+                val sanitized = DownloadCredentialSanitizer.sanitizeSerializedMediaSource(original)
+                when {
+                    sanitized == null -> db.execSQL(
+                        "DELETE FROM Download WHERE item_id = ?",
+                        arrayOf(itemId),
+                    )
+
+                    sanitized != original -> db.execSQL(
+                        "UPDATE Download SET media_source = ? WHERE item_id = ?",
+                        arrayOf(sanitized, itemId),
+                    )
+                }
+            }
             cursor.close()
         }
     }

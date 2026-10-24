@@ -1,12 +1,22 @@
 package org.jellyfin.mobile.feature.music.auto
 
 import androidx.core.net.toUri
+import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
+import androidx.media3.common.DeviceInfo
 import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.Metadata
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.Timeline
+import androidx.media3.common.TrackSelectionParameters
+import androidx.media3.common.Tracks
+import androidx.media3.common.VideoSize
+import androidx.media3.common.text.Cue
+import androidx.media3.common.text.CueGroup
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.common.util.Util
 import org.jellyfin.mobile.feature.music.MusicItem
@@ -14,14 +24,21 @@ import org.jellyfin.mobile.feature.music.MusicPlaybackController
 import org.jellyfin.mobile.feature.music.MusicPlaybackState
 import org.jellyfin.mobile.feature.music.MusicRepeatMode
 import timber.log.Timber
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArraySet
 
 @UnstableApi
-internal class PtvMusicSessionPlayer(private val playbackController: MusicPlaybackController) :
-    ForwardingPlayer(playbackController.mediaSessionPlayer) {
+internal class PtvMusicSessionPlayer(
+    private val playbackController: MusicPlaybackController,
+    private val isAuthenticatedQueueOwner: () -> Boolean,
+    private val pendingQueueAuthenticationProof: () -> PtvMusicQueueAuthenticationProof? = { null },
+) : ForwardingPlayer(playbackController.mediaSessionPlayer) {
     val instanceId: String = runtimeInstanceId(this)
     private val sessionListeners = CopyOnWriteArraySet<Player.Listener>()
+    private val underlyingListeners = ConcurrentHashMap<Player.Listener, Player.Listener>()
     private var lastNotifiedSnapshot: PtvMusicAutoPlayerStateSnapshot? = null
+    private var pendingPlay: PendingPlayIntent? = null
 
     init {
         Timber.i(
@@ -32,13 +49,17 @@ internal class PtvMusicSessionPlayer(private val playbackController: MusicPlayba
     }
 
     override fun addListener(listener: Player.Listener) {
-        sessionListeners += listener
-        super.addListener(listener)
+        if (!sessionListeners.add(listener)) return
+        val underlyingListener = PtvMusicUnderlyingListener(listener) {
+            playbackController.isCurrentQueueOwnedByAuthenticatedUser() && isAuthenticatedQueueOwner()
+        }
+        underlyingListeners[listener] = underlyingListener
+        super.addListener(underlyingListener)
     }
 
     override fun removeListener(listener: Player.Listener) {
-        sessionListeners -= listener
-        super.removeListener(listener)
+        if (!sessionListeners.remove(listener)) return
+        underlyingListeners.remove(listener)?.let { underlyingListener -> super.removeListener(underlyingListener) }
     }
 
     override fun getAvailableCommands(): Player.Commands = ptvMusicAutoPlayerCommands(
@@ -47,14 +68,24 @@ internal class PtvMusicSessionPlayer(private val playbackController: MusicPlayba
 
     override fun isCommandAvailable(command: Int): Boolean = command in getAvailableCommands()
 
-    override fun getCurrentMediaItemIndex(): Int = playbackController.state.value.safeCurrentIndex()
+    private fun visibleState(state: MusicPlaybackState = playbackController.state.value): MusicPlaybackState =
+        if (playbackController.state.value === state &&
+            playbackController.isCurrentQueueOwnedByAuthenticatedUser() &&
+            isAuthenticatedQueueOwner()
+        ) {
+            state
+        } else {
+            MusicPlaybackState()
+        }
+
+    override fun getCurrentMediaItemIndex(): Int = visibleState().safeCurrentIndex()
 
     @Suppress("DEPRECATION")
     @Deprecated("Deprecated in Media3")
     override fun getCurrentWindowIndex(): Int = currentMediaItemIndex
 
     override fun getNextMediaItemIndex(): Int {
-        val state = playbackController.state.value
+        val state = visibleState()
         val queue = state.queue
         val index = state.safeCurrentIndex()
         return when {
@@ -70,7 +101,7 @@ internal class PtvMusicSessionPlayer(private val playbackController: MusicPlayba
     override fun getNextWindowIndex(): Int = nextMediaItemIndex
 
     override fun getPreviousMediaItemIndex(): Int {
-        val state = playbackController.state.value
+        val state = visibleState()
         val queue = state.queue
         val index = state.safeCurrentIndex()
         return when {
@@ -89,22 +120,16 @@ internal class PtvMusicSessionPlayer(private val playbackController: MusicPlayba
 
     override fun hasPreviousMediaItem(): Boolean = previousMediaItemIndex != C.INDEX_UNSET
 
-    override fun getCurrentMediaItem(): MediaItem? = playbackController.state.value.currentItem?.toSessionMediaItem()
-        ?: super.getCurrentMediaItem()
+    override fun getCurrentMediaItem(): MediaItem? = visibleState().currentItem?.toSessionMediaItem()
 
-    override fun getMediaItemCount(): Int = playbackController.state.value.queue.size
-        .takeIf { count -> count > 0 }
-        ?: super.getMediaItemCount()
+    override fun getMediaItemCount(): Int = visibleState().queue.size
 
-    override fun getMediaItemAt(index: Int): MediaItem = playbackController.state.value.queue
-        .getOrNull(index)
-        ?.toSessionMediaItem()
-        ?: super.getMediaItemAt(index)
+    override fun getMediaItemAt(index: Int): MediaItem = visibleState().queue[index].toSessionMediaItem()
 
     override fun getCurrentTimeline(): Timeline {
-        val state = playbackController.state.value
+        val state = visibleState()
         return if (state.queue.isEmpty()) {
-            super.getCurrentTimeline()
+            Timeline.EMPTY
         } else {
             PtvMusicQueueTimeline(
                 queue = state.queue,
@@ -114,48 +139,118 @@ internal class PtvMusicSessionPlayer(private val playbackController: MusicPlayba
         }
     }
 
-    override fun getMediaMetadata(): MediaMetadata = playbackController.state.value.currentItem
+    override fun getMediaMetadata(): MediaMetadata = visibleState().currentItem
         ?.toSessionMediaItem()
         ?.mediaMetadata
-        ?: super.getMediaMetadata()
+        ?: MediaMetadata.EMPTY
 
-    override fun getDuration(): Long = liveDurationMs()
-        .takeIf { duration -> duration > 0 }
-        ?: playbackController.state.value.durationMs.takeIf { duration -> duration > 0 }
-        ?: C.TIME_UNSET
+    override fun getPlaylistMetadata(): MediaMetadata =
+        if (visibleState().hasCurrent) super.getPlaylistMetadata() else MediaMetadata.EMPTY
+
+    override fun getCurrentTracks(): Tracks = if (visibleState().hasCurrent) super.getCurrentTracks() else Tracks.EMPTY
+
+    override fun getCurrentManifest(): Any? = if (visibleState().hasCurrent) super.getCurrentManifest() else null
+
+    override fun getPlayerError(): PlaybackException? = if (visibleState().hasCurrent) super.getPlayerError() else null
+
+    override fun getCurrentCues(): CueGroup =
+        if (visibleState().hasCurrent) super.getCurrentCues() else CueGroup.EMPTY_TIME_ZERO
+
+    override fun getDuration(): Long = if (!visibleState().hasCurrent) {
+        C.TIME_UNSET
+    } else {
+        liveDurationMs().takeIf { duration -> duration > 0 }
+            ?: visibleState().durationMs.takeIf { duration -> duration > 0 }
+            ?: C.TIME_UNSET
+    }
 
     override fun getContentDuration(): Long = duration
 
-    override fun getCurrentPosition(): Long = liveCurrentPositionMs()
-        ?: playbackController.state.value.positionMs.coerceAtLeast(0)
+    override fun getCurrentPosition(): Long = if (!visibleState().hasCurrent) {
+        0
+    } else {
+        liveCurrentPositionMs() ?: visibleState().positionMs.coerceAtLeast(0)
+    }
 
     override fun getContentPosition(): Long = currentPosition
 
-    override fun getBufferedPosition(): Long = liveBufferedPositionMs()
-        ?.coerceAtLeast(currentPosition)
-        ?: playbackController.state.value.bufferedPositionMs.coerceAtLeast(currentPosition)
+    override fun getBufferedPosition(): Long = if (!visibleState().hasCurrent) {
+        0
+    } else {
+        liveBufferedPositionMs()?.coerceAtLeast(currentPosition)
+            ?: visibleState().bufferedPositionMs.coerceAtLeast(currentPosition)
+    }
 
     override fun getContentBufferedPosition(): Long = bufferedPosition
 
     override fun getTotalBufferedDuration(): Long = (bufferedPosition - currentPosition).coerceAtLeast(0)
 
+    override fun getPlaybackState(): Int =
+        if (visibleState().hasCurrent) super.getPlaybackState() else Player.STATE_IDLE
+
+    override fun isPlaying(): Boolean = visibleState().hasCurrent && super.isPlaying()
+
+    override fun getPlayWhenReady(): Boolean = visibleState().hasCurrent && super.getPlayWhenReady()
+
+    override fun isLoading(): Boolean = visibleState().hasCurrent && super.isLoading()
+
+    override fun getBufferedPercentage(): Int = if (visibleState().hasCurrent) super.getBufferedPercentage() else 0
+
     override fun play() {
-        playbackController.playCurrent()
+        val state = playbackController.state.value
+        if (visibleState(state).hasCurrent) {
+            pendingPlay = null
+            playbackController.playCurrent()
+            return
+        }
+
+        // A hidden queue may be awaiting the service's account proof. Retain only this Play,
+        // and only for the local owner and the exact proof request currently in flight.
+        pendingPlay = null
+        val proof = pendingQueueAuthenticationProof()
+        if (proof != null) {
+            val currentItem = state.currentItem
+            if (currentItem != null && canDeferPlay(state, currentItem, proof)) {
+                pendingPlay = PendingPlayIntent(
+                    requestedProof = proof,
+                    currentItemId = currentItem.id,
+                    currentIndex = state.currentIndex,
+                    queueSize = state.queue.size,
+                )
+            }
+        }
+    }
+
+    private fun canDeferPlay(
+        state: MusicPlaybackState,
+        currentItem: MusicItem,
+        proof: PtvMusicQueueAuthenticationProof,
+    ): Boolean {
+        val selectedItemMatchesQueue = state.queueOwner == proof.owner &&
+            state.currentIndex in state.queue.indices &&
+            state.queue[state.currentIndex].id == currentItem.id
+        return selectedItemMatchesQueue && playbackController.isCurrentQueueOwnedByAuthenticatedUser()
+    }
+
+    override fun setPlayWhenReady(playWhenReady: Boolean) {
+        if (playWhenReady) play() else pause()
     }
 
     override fun pause() {
+        cancelPendingPlay()
         playbackController.pause()
     }
 
     override fun prepare() {
-        playbackController.prepareCurrent()
+        if (visibleState().hasCurrent) playbackController.prepareCurrent()
     }
 
     override fun seekTo(positionMs: Long) {
-        playbackController.seekTo(positionMs)
+        if (visibleState().hasCurrent) playbackController.seekTo(positionMs)
     }
 
     override fun seekTo(mediaItemIndex: Int, positionMs: Long) {
+        if (!visibleState().hasCurrent) return
         if (mediaItemIndex == C.INDEX_UNSET) {
             playbackController.seekTo(positionMs)
         } else {
@@ -164,48 +259,53 @@ internal class PtvMusicSessionPlayer(private val playbackController: MusicPlayba
     }
 
     override fun seekToDefaultPosition() {
-        playbackController.seekTo(0)
+        if (visibleState().hasCurrent) playbackController.seekTo(0)
     }
 
     override fun seekToDefaultPosition(mediaItemIndex: Int) {
-        playbackController.seekToQueueItem(mediaItemIndex, 0)
+        if (visibleState().hasCurrent) playbackController.seekToQueueItem(mediaItemIndex, 0)
     }
 
     override fun seekBack() {
-        playbackController.seekBy(-seekBackIncrement)
+        if (visibleState().hasCurrent) playbackController.seekBy(-seekBackIncrement)
     }
 
     override fun seekForward() {
-        playbackController.seekBy(seekForwardIncrement)
+        if (visibleState().hasCurrent) playbackController.seekBy(seekForwardIncrement)
     }
 
     override fun seekToNext() {
-        playbackController.next()
+        if (visibleState().hasCurrent) playbackController.next()
     }
 
     override fun seekToNextMediaItem() {
-        playbackController.next()
+        if (visibleState().hasCurrent) playbackController.next()
     }
 
     override fun seekToPrevious() {
-        playbackController.previous()
+        if (visibleState().hasCurrent) playbackController.previous()
     }
 
     override fun seekToPreviousMediaItem() {
-        playbackController.previous()
+        if (visibleState().hasCurrent) playbackController.previous()
     }
 
     override fun setShuffleModeEnabled(shuffleModeEnabled: Boolean) {
-        playbackController.setShuffleEnabled(shuffleModeEnabled, source = "mediaSession")
+        if (visibleState().hasCurrent) playbackController.setShuffleEnabled(shuffleModeEnabled, source = "mediaSession")
     }
 
-    override fun getShuffleModeEnabled(): Boolean = playbackController.state.value.shuffleEnabled
+    override fun getShuffleModeEnabled(): Boolean = visibleState().shuffleEnabled
 
     override fun setRepeatMode(repeatMode: Int) {
-        playbackController.setRepeatMode(repeatMode.toMusicRepeatMode(), source = "mediaSession")
+        if (visibleState().hasCurrent) {
+            playbackController.setRepeatMode(
+                repeatMode.toMusicRepeatMode(),
+                source = "mediaSession",
+            )
+        }
     }
 
-    override fun getRepeatMode(): Int = playbackController.state.value.repeatMode.toPlayerRepeatMode()
+    override fun getRepeatMode(): Int = visibleState().repeatMode.toPlayerRepeatMode()
 
     override fun setMediaItem(mediaItem: MediaItem) = Unit
 
@@ -220,13 +320,47 @@ internal class PtvMusicSessionPlayer(private val playbackController: MusicPlayba
     override fun setMediaItems(mediaItems: List<MediaItem>, startIndex: Int, startPositionMs: Long) = Unit
 
     override fun stop() {
+        cancelPendingPlay()
         playbackController.stop(source = "mediaSession")
     }
 
+    /** Called for direct notification actions and authentication failures outside this Player. */
+    fun cancelPendingPlay() {
+        pendingPlay = null
+    }
+
+    /** Task removal may retain the service only for this exact live proof request and Play intent. */
+    fun hasPendingPlayFor(requestedProof: PtvMusicQueueAuthenticationProof?): Boolean {
+        if (requestedProof == null) return false
+        discardStalePendingPlay()
+        return pendingPlay?.requestedProof === requestedProof
+    }
+
+    /** A deferred Play may start only after the service publishes the matching verified proof. */
+    fun onQueueAuthenticationVerified(
+        requestedProof: PtvMusicQueueAuthenticationProof,
+        verifiedProof: PtvMusicQueueAuthenticationProof,
+    ) {
+        val intent = pendingPlay ?: return
+        pendingPlay = null
+        val state = playbackController.state.value
+        val proofMatches = intent.requestedProof === requestedProof && requestedProof == verifiedProof
+        if (!proofMatches || !intent.matches(state) || !visibleState(state).hasCurrent) {
+            return
+        }
+        playbackController.playCurrent()
+    }
+
     fun notifyControllerStateChanged(state: MusicPlaybackState, force: Boolean = false) {
-        val snapshot = state.toAutoPlayerStateSnapshot()
-        if (!force && snapshot == lastNotifiedSnapshot) return
+        discardStalePendingPlay()
+        val snapshot = visibleState(state).toAutoPlayerStateSnapshot()
+        val previous = lastNotifiedSnapshot
+        if (!force && snapshot == previous) return
         lastNotifiedSnapshot = snapshot
+
+        val timelineChanged = timelineChanged(previous, snapshot)
+        val currentItemChanged = currentItemChanged(previous, snapshot)
+        val metadataChanged = force || previous == null || snapshot.currentItem != previous.currentItem
 
         val mediaItem = currentMediaItem
         val metadata = mediaMetadata
@@ -246,9 +380,15 @@ internal class PtvMusicSessionPlayer(private val playbackController: MusicPlayba
                 "force=$force",
         )
         sessionListeners.forEach { listener ->
-            listener.onTimelineChanged(timeline, Player.TIMELINE_CHANGE_REASON_PLAYLIST_CHANGED)
-            listener.onMediaItemTransition(mediaItem, Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED)
-            listener.onMediaMetadataChanged(metadata)
+            if (timelineChanged) {
+                listener.onTimelineChanged(timeline, Player.TIMELINE_CHANGE_REASON_PLAYLIST_CHANGED)
+            }
+            if (currentItemChanged) {
+                listener.onMediaItemTransition(mediaItem, Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED)
+            }
+            if (metadataChanged) {
+                listener.onMediaMetadataChanged(metadata)
+            }
             listener.onAvailableCommandsChanged(commands)
             listener.onRepeatModeChanged(repeatMode)
             listener.onShuffleModeEnabledChanged(shuffleModeEnabled)
@@ -257,7 +397,49 @@ internal class PtvMusicSessionPlayer(private val playbackController: MusicPlayba
         }
     }
 
-    private fun canSeekInCurrentMediaItem(): Boolean = liveDurationMs() > 0 &&
+    private fun timelineChanged(
+        previous: PtvMusicAutoPlayerStateSnapshot?,
+        current: PtvMusicAutoPlayerStateSnapshot,
+    ): Boolean = previous == null ||
+        current.queue != previous.queue ||
+        current.currentIndex != previous.currentIndex ||
+        current.durationMs != previous.durationMs
+
+    private fun currentItemChanged(
+        previous: PtvMusicAutoPlayerStateSnapshot?,
+        current: PtvMusicAutoPlayerStateSnapshot,
+    ): Boolean = previous == null ||
+        current.currentItemId != previous.currentItemId ||
+        current.currentIndex != previous.currentIndex
+
+    private fun discardStalePendingPlay() {
+        val intent = pendingPlay ?: return
+        val state = playbackController.state.value
+        val currentPendingProof = pendingQueueAuthenticationProof()
+        val queueIsCurrent = intent.matches(state) &&
+            playbackController.isCurrentQueueOwnedByAuthenticatedUser()
+        val proofIsCurrent = queueIsCurrent &&
+            (currentPendingProof?.let { it === intent.requestedProof } ?: isAuthenticatedQueueOwner())
+        if (!proofIsCurrent) {
+            pendingPlay = null
+        }
+    }
+
+    private data class PendingPlayIntent(
+        val requestedProof: PtvMusicQueueAuthenticationProof,
+        val currentItemId: UUID,
+        val currentIndex: Int,
+        val queueSize: Int,
+    ) {
+        fun matches(state: MusicPlaybackState): Boolean = state.queueOwner == requestedProof.owner &&
+            state.queue.size == queueSize &&
+            state.currentIndex == currentIndex &&
+            state.currentItem?.id == currentItemId &&
+            state.queue.getOrNull(currentIndex)?.id == currentItemId
+    }
+
+    private fun canSeekInCurrentMediaItem(): Boolean = visibleState().hasCurrent &&
+        liveDurationMs() > 0 &&
         playbackController.mediaSessionPlayer.isCommandAvailable(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM)
 
     private fun liveDurationMs(): Long = playbackController.mediaSessionPlayer.duration.sanitizeDurationMs()
@@ -271,8 +453,9 @@ internal class PtvMusicSessionPlayer(private val playbackController: MusicPlayba
     private fun MusicPlaybackState.toAutoPlayerStateSnapshot(): PtvMusicAutoPlayerStateSnapshot =
         PtvMusicAutoPlayerStateSnapshot(
             currentItemId = currentItem?.id?.toString(),
+            currentItem = currentItem?.toAutoMediaItemSnapshot(),
             currentIndex = currentIndex,
-            queueSize = queue.size,
+            queue = queue.map(MusicItem::toAutoMediaItemSnapshot),
             isPlaying = isPlaying,
             isBuffering = isBuffering,
             isEnded = isEnded,
@@ -295,10 +478,122 @@ internal class PtvMusicSessionPlayer(private val playbackController: MusicPlayba
     }
 }
 
+/** Relays ExoPlayer events while the shared controller remains the source for Auto queue events. */
+@Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
+private class PtvMusicUnderlyingListener(
+    private val delegate: Player.Listener,
+    private val ownerIsCurrent: () -> Boolean,
+) : Player.Listener {
+    private val visibleDelegate: Player.Listener
+        get() = if (ownerIsCurrent()) delegate else HIDDEN_LISTENER
+
+    // The controller emits these from its full queue state. Relaying ExoPlayer's single-item
+    // versions would duplicate transitions and replace the Auto queue with a partial timeline.
+    override fun onTimelineChanged(timeline: Timeline, reason: Int) = Unit
+
+    override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) = Unit
+
+    override fun onMediaMetadataChanged(mediaMetadata: MediaMetadata) = Unit
+
+    // Keep every other callback, including the single aggregate onEvents callback, intact.
+    override fun onEvents(player: Player, events: Player.Events) = visibleDelegate.onEvents(player, events)
+
+    override fun onTracksChanged(tracks: Tracks) = visibleDelegate.onTracksChanged(tracks)
+
+    override fun onPlaylistMetadataChanged(mediaMetadata: MediaMetadata) =
+        visibleDelegate.onPlaylistMetadataChanged(mediaMetadata)
+
+    override fun onIsLoadingChanged(isLoading: Boolean) = visibleDelegate.onIsLoadingChanged(isLoading)
+
+    override fun onLoadingChanged(isLoading: Boolean) = visibleDelegate.onLoadingChanged(isLoading)
+
+    override fun onAvailableCommandsChanged(availableCommands: Player.Commands) =
+        visibleDelegate.onAvailableCommandsChanged(availableCommands)
+
+    override fun onTrackSelectionParametersChanged(parameters: TrackSelectionParameters) =
+        visibleDelegate.onTrackSelectionParametersChanged(parameters)
+
+    override fun onPlayerStateChanged(playWhenReady: Boolean, playbackState: Int) =
+        visibleDelegate.onPlayerStateChanged(playWhenReady, playbackState)
+
+    override fun onPlaybackStateChanged(playbackState: Int) = visibleDelegate.onPlaybackStateChanged(playbackState)
+
+    override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) =
+        visibleDelegate.onPlayWhenReadyChanged(playWhenReady, reason)
+
+    override fun onPlaybackSuppressionReasonChanged(playbackSuppressionReason: Int) =
+        visibleDelegate.onPlaybackSuppressionReasonChanged(playbackSuppressionReason)
+
+    override fun onIsPlayingChanged(isPlaying: Boolean) = visibleDelegate.onIsPlayingChanged(isPlaying)
+
+    override fun onRepeatModeChanged(repeatMode: Int) = visibleDelegate.onRepeatModeChanged(repeatMode)
+
+    override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) =
+        visibleDelegate.onShuffleModeEnabledChanged(shuffleModeEnabled)
+
+    override fun onPlayerError(error: PlaybackException) = visibleDelegate.onPlayerError(error)
+
+    override fun onPlayerErrorChanged(error: PlaybackException?) = visibleDelegate.onPlayerErrorChanged(error)
+
+    override fun onPositionDiscontinuity(reason: Int) = visibleDelegate.onPositionDiscontinuity(reason)
+
+    override fun onPositionDiscontinuity(
+        oldPosition: Player.PositionInfo,
+        newPosition: Player.PositionInfo,
+        reason: Int,
+    ) {
+        visibleDelegate.onPositionDiscontinuity(oldPosition, newPosition, reason)
+    }
+
+    override fun onPlaybackParametersChanged(playbackParameters: PlaybackParameters) =
+        visibleDelegate.onPlaybackParametersChanged(playbackParameters)
+
+    override fun onSeekBackIncrementChanged(seekBackIncrementMs: Long) =
+        visibleDelegate.onSeekBackIncrementChanged(seekBackIncrementMs)
+
+    override fun onSeekForwardIncrementChanged(seekForwardIncrementMs: Long) =
+        visibleDelegate.onSeekForwardIncrementChanged(seekForwardIncrementMs)
+
+    override fun onMaxSeekToPreviousPositionChanged(maxSeekToPreviousPositionMs: Long) =
+        visibleDelegate.onMaxSeekToPreviousPositionChanged(maxSeekToPreviousPositionMs)
+
+    override fun onAudioSessionIdChanged(audioSessionId: Int) = visibleDelegate.onAudioSessionIdChanged(audioSessionId)
+
+    override fun onAudioAttributesChanged(audioAttributes: AudioAttributes) =
+        visibleDelegate.onAudioAttributesChanged(audioAttributes)
+
+    override fun onVolumeChanged(volume: Float) = visibleDelegate.onVolumeChanged(volume)
+
+    override fun onSkipSilenceEnabledChanged(skipSilenceEnabled: Boolean) =
+        visibleDelegate.onSkipSilenceEnabledChanged(skipSilenceEnabled)
+
+    override fun onDeviceInfoChanged(deviceInfo: DeviceInfo) = visibleDelegate.onDeviceInfoChanged(deviceInfo)
+
+    override fun onDeviceVolumeChanged(volume: Int, muted: Boolean) =
+        visibleDelegate.onDeviceVolumeChanged(volume, muted)
+
+    override fun onVideoSizeChanged(videoSize: VideoSize) = visibleDelegate.onVideoSizeChanged(videoSize)
+
+    override fun onSurfaceSizeChanged(width: Int, height: Int) = visibleDelegate.onSurfaceSizeChanged(width, height)
+
+    override fun onRenderedFirstFrame() = visibleDelegate.onRenderedFirstFrame()
+
+    override fun onCues(cues: List<Cue>) = visibleDelegate.onCues(cues)
+
+    override fun onCues(cueGroup: CueGroup) = visibleDelegate.onCues(cueGroup)
+
+    override fun onMetadata(metadata: Metadata) = visibleDelegate.onMetadata(metadata)
+
+    private companion object {
+        val HIDDEN_LISTENER = object : Player.Listener {}
+    }
+}
+
 private data class PtvMusicAutoPlayerStateSnapshot(
     val currentItemId: String?,
+    val currentItem: PtvMusicAutoMediaItemSnapshot?,
     val currentIndex: Int,
-    val queueSize: Int,
+    val queue: List<PtvMusicAutoMediaItemSnapshot>,
     val isPlaying: Boolean,
     val isBuffering: Boolean,
     val isEnded: Boolean,
@@ -306,6 +601,26 @@ private data class PtvMusicAutoPlayerStateSnapshot(
     val repeatMode: MusicRepeatMode,
     val shuffleEnabled: Boolean,
     val isFavorite: Boolean,
+) {
+    val queueSize: Int get() = queue.size
+}
+
+internal data class PtvMusicAutoMediaItemSnapshot(
+    val id: String,
+    val title: String,
+    val subtitle: String?,
+    val artist: String?,
+    val album: String?,
+    val posterUrl: String?,
+)
+
+internal fun MusicItem.toAutoMediaItemSnapshot(): PtvMusicAutoMediaItemSnapshot = PtvMusicAutoMediaItemSnapshot(
+    id = id.toString(),
+    title = title,
+    subtitle = subtitle,
+    artist = artist,
+    album = album,
+    posterUrl = posterUrl,
 )
 
 @UnstableApi
@@ -392,14 +707,15 @@ private class PtvMusicQueueTimeline(
     private val currentIndex: Int,
     private val currentDurationMs: Long,
 ) : Timeline() {
-    private val periodUids = queue.map { item -> "ptv-period-${item.id}" }
+    private val windowUids = queue.mapIndexed { index, item -> "ptv-window-${item.id}-$index" }
+    private val periodUids = queue.mapIndexed { index, item -> "ptv-period-${item.id}-$index" }
 
     override fun getWindowCount(): Int = queue.size
 
     override fun getWindow(windowIndex: Int, window: Window, defaultPositionProjectionUs: Long): Window {
         val durationUs = durationUsFor(windowIndex)
         return window.set(
-            queue[windowIndex].id.toString(),
+            windowUids[windowIndex],
             queue[windowIndex].toSessionMediaItem(),
             null,
             C.TIME_UNSET,
@@ -421,7 +737,7 @@ private class PtvMusicQueueTimeline(
     override fun getPeriod(periodIndex: Int, period: Period, setIds: Boolean): Period {
         val uid = periodUids[periodIndex]
         return period.set(
-            if (setIds) queue[periodIndex].id.toString() else null,
+            if (setIds) uid else null,
             uid,
             periodIndex,
             durationUsFor(periodIndex),
