@@ -31,7 +31,10 @@ class PtvMusicAutoResumeStore(context: Context, private val appPreferences: AppP
             ?: return null
         val serverId = appPreferences.currentServerId
         val userId = appPreferences.currentUserId
-        if (serverId == null || userId == null || !state.belongsTo(serverId, userId)) {
+        // Session restoration can temporarily have no selected local owner. Keep the queue
+        // private and intact until an owner is available to prove whether it matches.
+        if (serverId == null || userId == null) return null
+        if (!state.belongsTo(serverId, userId)) {
             clearPlaybackState()
             return null
         }
@@ -281,15 +284,25 @@ data class PtvMusicAutoResumeState(
     val queueUuids: List<UUID>
         get() = queueItemIds.mapNotNull(String::toUUIDOrNull)
 
-    fun trimmed(): PtvMusicAutoResumeState = copy(
-        queueItemIds = queueItemIds
-            .map(String::trim)
-            .filter(String::isNotBlank)
-            .distinct()
-            .take(MAX_PERSISTED_QUEUE_ITEMS),
-        currentIndex = currentIndex.coerceAtLeast(0),
-        positionMs = positionMs.coerceAtLeast(0),
-    )
+    fun trimmed(): PtvMusicAutoResumeState {
+        val indexedIds = queueItemIds.mapIndexedNotNull { index, rawId ->
+            rawId.trim().takeIf(String::isNotBlank)?.let { index to it }
+        }
+        if (indexedIds.isEmpty()) {
+            return copy(queueItemIds = emptyList(), currentIndex = 0, positionMs = positionMs.coerceAtLeast(0))
+        }
+        val selectedIndex = indexedIds.indexOfFirst { (sourceIndex, _) -> sourceIndex == currentIndex }
+            .takeIf { it >= 0 }
+            ?: indexedIds.indexOfFirst { (sourceIndex, _) -> sourceIndex > currentIndex }
+                .takeIf { it >= 0 }
+            ?: indexedIds.lastIndex
+        val bounded = boundResumeQueue(indexedIds.map { (_, id) -> id }, selectedIndex)
+        return copy(
+            queueItemIds = bounded.first,
+            currentIndex = bounded.second,
+            positionMs = positionMs.coerceAtLeast(0),
+        )
+    }
 
     fun belongsTo(serverId: Long, userId: Long): Boolean = ownerServerId == serverId && ownerUserId == userId
 
@@ -309,24 +322,16 @@ data class PtvMusicAutoResumeState(
             nowMs: Long = System.currentTimeMillis(),
         ): PtvMusicAutoResumeState? {
             val currentItemId = playbackState.currentItem?.id?.toString() ?: return null
-            val distinctQueueIds = playbackState.queue
-                .map { item -> item.id.toString() }
-                .distinct()
-            val queueIds = when {
-                currentItemId in distinctQueueIds.take(MAX_PERSISTED_QUEUE_ITEMS) ->
-                    distinctQueueIds.take(MAX_PERSISTED_QUEUE_ITEMS)
-
-                else -> (listOf(currentItemId) + distinctQueueIds.filterNot { itemId -> itemId == currentItemId })
-                    .take(MAX_PERSISTED_QUEUE_ITEMS)
-            }
-
-            val currentItemIndex = queueIds.indexOf(currentItemId)
-                .takeIf { index -> index >= 0 }
-                ?: playbackState.currentIndex.coerceIn(0, queueIds.lastIndex)
+            val queueIds = playbackState.queue.map { item -> item.id.toString() }
+            val selectedIndex = playbackState.currentIndex
+                .takeIf { index -> queueIds.getOrNull(index) == currentItemId }
+                ?: queueIds.indexOf(currentItemId).takeIf { index -> index >= 0 }
+            val completeQueue = if (selectedIndex == null) listOf(currentItemId) + queueIds else queueIds
+            val bounded = boundResumeQueue(completeQueue, selectedIndex ?: 0)
 
             return PtvMusicAutoResumeState(
-                queueItemIds = queueIds,
-                currentIndex = currentItemIndex,
+                queueItemIds = bounded.first,
+                currentIndex = bounded.second,
                 positionMs = playbackState.positionMs.coerceAtLeast(0),
                 shuffleEnabled = playbackState.shuffleEnabled,
                 repeatMode = playbackState.repeatMode.name,
@@ -424,6 +429,13 @@ internal object PtvMusicAutoDiagnosticReport {
         }
         appendLine("Raw errors, account and server details, media identity, and URLs are excluded.")
     }
+}
+
+private fun boundResumeQueue(queueIds: List<String>, selectedIndex: Int): Pair<List<String>, Int> {
+    val safeIndex = selectedIndex.coerceIn(0, queueIds.lastIndex)
+    val start = (safeIndex - PtvMusicAutoResumeState.MAX_PERSISTED_QUEUE_ITEMS / 2)
+        .coerceIn(0, (queueIds.size - PtvMusicAutoResumeState.MAX_PERSISTED_QUEUE_ITEMS).coerceAtLeast(0))
+    return queueIds.drop(start).take(PtvMusicAutoResumeState.MAX_PERSISTED_QUEUE_ITEMS) to safeIndex - start
 }
 
 internal object PtvMusicAutoResumeStateSerializer {

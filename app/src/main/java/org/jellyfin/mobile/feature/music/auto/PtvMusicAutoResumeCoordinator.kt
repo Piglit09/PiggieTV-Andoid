@@ -5,6 +5,7 @@ import kotlinx.coroutines.sync.withLock
 import org.jellyfin.mobile.feature.music.MusicItem
 import org.jellyfin.mobile.feature.music.MusicPlaybackController
 import org.jellyfin.mobile.feature.music.MusicRepository
+import org.jellyfin.sdk.model.serializer.toUUIDOrNull
 import timber.log.Timber
 
 class PtvMusicAutoResumeCoordinator(
@@ -83,19 +84,29 @@ class PtvMusicAutoResumeCoordinator(
         savedState: PtvMusicAutoResumeState,
         expectedOwner: PtvMusicAutoQueueOwner,
     ): PtvMusicAutoRestoreResult {
-        val savedIds = savedState.queueUuids
-        val restoredItems = repository.loadItems(savedIds).filter(MusicItem::isPlayable)
-        val missingCount = savedIds.size - restoredItems.size
+        val savedEntries = savedState.queueItemIds.mapIndexedNotNull { index, rawId ->
+            rawId.toUUIDOrNull()?.let { id -> index to id }
+        }
+        val fetchedItems = repository.loadItems(savedEntries.map { (_, id) -> id }.distinct())
+            .filter(MusicItem::isPlayable)
+            .associateBy(MusicItem::id)
         if (resumeStore.currentLocalQueueOwner() != expectedOwner) return PtvMusicAutoRestoreResult.Failed
+        val restoredEntries = savedEntries.mapNotNull { (savedIndex, id) ->
+            fetchedItems[id]?.let { item -> savedIndex to item }
+        }
+        val missingCount = savedState.queueItemIds.size - restoredEntries.size
+        val restoredItems = restoredEntries.map { (_, item) -> item }
         if (restoredItems.isEmpty()) {
             resumeStore.clearPlaybackState()
             return PtvMusicAutoRestoreResult.NoPlayableItems
         }
 
-        val restoredCurrentIndex = restoredItems.indexOfFirst { item ->
-            item.id.toString() == savedState.currentItemId
+        val restoredCurrentIndex = restoredEntries.indexOfFirst { (savedIndex, _) ->
+            savedIndex == savedState.currentIndex
         }.takeIf { index -> index >= 0 }
-            ?: savedState.currentIndex.coerceIn(0, restoredItems.lastIndex)
+            ?: restoredEntries.indexOfFirst { (savedIndex, _) -> savedIndex > savedState.currentIndex }
+                .takeIf { index -> index >= 0 }
+            ?: restoredItems.lastIndex
 
         val restored = playbackController.restoreQueue(
             queue = restoredItems,

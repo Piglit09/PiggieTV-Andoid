@@ -20,6 +20,8 @@ import io.mockk.slot
 import io.mockk.unmockkStatic
 import io.mockk.verify
 import kotlinx.coroutines.flow.MutableStateFlow
+import org.jellyfin.mobile.auth.AuthMethod
+import org.jellyfin.mobile.auth.MobileAuthState
 import org.jellyfin.mobile.feature.music.MusicItem
 import org.jellyfin.mobile.feature.music.MusicPlaybackController
 import org.jellyfin.mobile.feature.music.MusicPlaybackState
@@ -31,12 +33,7 @@ import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
 @UnstableApi
-class PtvMusicSessionPlayerStateTest {
-    @AfterEach
-    fun resetMedia3CommandsMock() {
-        unmockkStatic("org.jellyfin.mobile.feature.music.auto.PtvMusicSessionPlayerKt")
-    }
-
+class PtvMusicSessionPlayerStateTest : PtvMusicSessionPlayerFixture() {
     @Test
     fun `three consecutive tracks produce exactly one transition per actual advance`() {
         val a = track(1)
@@ -90,6 +87,23 @@ class PtvMusicSessionPlayerStateTest {
 
         listener.timelineChanges shouldBe 1
         listener.transitions shouldBe emptyList()
+    }
+
+    @Test
+    fun `repeated track timeline has distinct stable window and period identities`() {
+        val repeated = track(1)
+        val queue = listOf(repeated, track(2), repeated)
+        val (player, _) = player(state(queue, index = 2))
+
+        val timeline = player.currentTimeline
+        val firstPeriodUid = timeline.getUidOfPeriod(0)
+        val selectedPeriodUid = timeline.getUidOfPeriod(2)
+        firstPeriodUid shouldNotBe selectedPeriodUid
+        timeline.getIndexOfPeriod(firstPeriodUid) shouldBe 0
+        timeline.getIndexOfPeriod(selectedPeriodUid) shouldBe 2
+        timeline.getWindow(0, Timeline.Window()).uid shouldNotBe
+            timeline.getWindow(2, Timeline.Window()).uid
+        player.currentTimeline.getUidOfPeriod(2) shouldBe selectedPeriodUid
     }
 
     @Test
@@ -276,6 +290,292 @@ class PtvMusicSessionPlayerStateTest {
         player.play()
         verify(exactly = 0) { controller.playCurrent() }
     }
+}
+
+class PtvMusicSessionPlayerAuthenticationTest : PtvMusicSessionPlayerFixture() {
+    @Test
+    fun `Play requested during queue proof resumes after that queue becomes authenticated`() {
+        val owner = PtvMusicAutoQueueOwner(serverId = 10, userId = 20)
+        val ownedQueue = state(listOf(track(1)), index = 0)
+            .copy(queueOwner = owner)
+        val requestedProof = proof(owner)
+        var pendingProof: PtvMusicQueueAuthenticationProof? = requestedProof
+        val authenticatedOwnerAllowed = AtomicBoolean(false)
+        val controller = mockk<MusicPlaybackController>(relaxed = true)
+        val (player, _) = player(
+            initial = ownedQueue,
+            authenticatedOwnerAllowed = authenticatedOwnerAllowed,
+            controller = controller,
+            pendingQueueAuthenticationProof = { pendingProof },
+        )
+
+        player.play()
+        verify(exactly = 0) { controller.playCurrent() }
+        player.hasPendingPlayFor(requestedProof) shouldBe true
+        player.hasPendingPlayFor(requestedProof.copy()) shouldBe false
+
+        pendingProof = null
+        authenticatedOwnerAllowed.set(true)
+        player.onQueueAuthenticationVerified(requestedProof, requestedProof.copy())
+        player.notifyControllerStateChanged(ownedQueue)
+        player.onQueueAuthenticationVerified(requestedProof, requestedProof.copy())
+
+        verify(exactly = 1) { controller.playCurrent() }
+        player.hasPendingPlayFor(requestedProof) shouldBe false
+    }
+
+    @Test
+    fun `notification transport cannot bypass pending queue proof`() {
+        val owner = PtvMusicAutoQueueOwner(serverId = 10, userId = 20)
+        val ownedQueue = state(listOf(track(1), track(2)), index = 0).copy(queueOwner = owner)
+        val requestedProof = proof(owner)
+        val authenticatedOwnerAllowed = AtomicBoolean(false)
+        val controller = mockk<MusicPlaybackController>(relaxed = true)
+        val (player, _) = player(
+            ownedQueue,
+            authenticatedOwnerAllowed = authenticatedOwnerAllowed,
+            controller = controller,
+            pendingQueueAuthenticationProof = { requestedProof },
+        )
+
+        PtvMusicService.dispatchNotificationTransportAction(
+            "org.piggietv.music.notification.PLAY",
+            player,
+        ) shouldBe true
+        PtvMusicService.dispatchNotificationTransportAction(
+            "org.piggietv.music.notification.NEXT",
+            player,
+        ) shouldBe true
+        PtvMusicService.dispatchNotificationTransportAction(
+            "org.piggietv.music.notification.PREVIOUS",
+            player,
+        ) shouldBe true
+        verify(exactly = 0) { controller.playCurrent() }
+        verify(exactly = 0) { controller.next() }
+        verify(exactly = 0) { controller.previous() }
+
+        authenticatedOwnerAllowed.set(true)
+        player.onQueueAuthenticationVerified(requestedProof, requestedProof.copy())
+        verify(exactly = 1) { controller.playCurrent() }
+        verify(exactly = 0) { controller.next() }
+        verify(exactly = 0) { controller.previous() }
+    }
+
+    @Test
+    fun `notification transport uses authenticated session commands only`() {
+        val ownedQueue = state(listOf(track(1), track(2)), index = 0)
+        val controller = mockk<MusicPlaybackController>(relaxed = true)
+        val (player, _) = player(ownedQueue, controller = controller)
+
+        PtvMusicService.dispatchNotificationTransportAction(
+            "org.piggietv.music.notification.PLAY",
+            player,
+        ) shouldBe true
+        PtvMusicService.dispatchNotificationTransportAction(
+            "org.piggietv.music.notification.NEXT",
+            player,
+        ) shouldBe true
+        PtvMusicService.dispatchNotificationTransportAction(
+            "org.piggietv.music.notification.PREVIOUS",
+            player,
+        ) shouldBe true
+        PtvMusicService.dispatchNotificationTransportAction(
+            "org.piggietv.music.notification.UNKNOWN",
+            player,
+        ) shouldBe false
+        PtvMusicService.dispatchNotificationTransportAction("org.piggietv.music.notification.PLAY", null) shouldBe true
+
+        verify(exactly = 1) { controller.playCurrent() }
+        verify(exactly = 1) { controller.next() }
+        verify(exactly = 1) { controller.previous() }
+    }
+
+    @Test
+    fun `hidden queue without a pending proof does not remember Play`() {
+        val owner = PtvMusicAutoQueueOwner(serverId = 10, userId = 20)
+        val ownedQueue = state(listOf(track(1)), index = 0).copy(queueOwner = owner)
+        val authenticatedOwnerAllowed = AtomicBoolean(false)
+        val controller = mockk<MusicPlaybackController>(relaxed = true)
+        val (player, _) = player(
+            ownedQueue,
+            authenticatedOwnerAllowed = authenticatedOwnerAllowed,
+            controller = controller,
+        )
+
+        player.play()
+        authenticatedOwnerAllowed.set(true)
+        player.onQueueAuthenticationVerified(proof(owner), proof(owner))
+
+        verify(exactly = 0) { controller.playCurrent() }
+    }
+
+    @Test
+    fun `Pause cancels Play held during queue proof`() {
+        val owner = PtvMusicAutoQueueOwner(serverId = 10, userId = 20)
+        val ownedQueue = state(listOf(track(1)), index = 0).copy(queueOwner = owner)
+        val requestedProof = proof(owner)
+        val authenticatedOwnerAllowed = AtomicBoolean(false)
+        val controller = mockk<MusicPlaybackController>(relaxed = true)
+        val (player, _) = player(
+            ownedQueue,
+            authenticatedOwnerAllowed = authenticatedOwnerAllowed,
+            controller = controller,
+            pendingQueueAuthenticationProof = { requestedProof },
+        )
+
+        player.play()
+        player.pause()
+        player.hasPendingPlayFor(requestedProof) shouldBe false
+        authenticatedOwnerAllowed.set(true)
+        player.onQueueAuthenticationVerified(requestedProof, requestedProof.copy())
+
+        verify(exactly = 1) { controller.pause() }
+        verify(exactly = 0) { controller.playCurrent() }
+    }
+
+    @Test
+    fun `Stop cancels Play held during queue proof`() {
+        val owner = PtvMusicAutoQueueOwner(serverId = 10, userId = 20)
+        val ownedQueue = state(listOf(track(1)), index = 0).copy(queueOwner = owner)
+        val requestedProof = proof(owner)
+        val authenticatedOwnerAllowed = AtomicBoolean(false)
+        val controller = mockk<MusicPlaybackController>(relaxed = true)
+        val (player, _) = player(
+            ownedQueue,
+            authenticatedOwnerAllowed = authenticatedOwnerAllowed,
+            controller = controller,
+            pendingQueueAuthenticationProof = { requestedProof },
+        )
+
+        player.play()
+        player.stop()
+        authenticatedOwnerAllowed.set(true)
+        player.onQueueAuthenticationVerified(requestedProof, requestedProof.copy())
+
+        verify(exactly = 1) { controller.stop(source = "mediaSession") }
+        verify(exactly = 0) { controller.playCurrent() }
+    }
+
+    @Test
+    fun `external Pause or Stop can cancel Play held during queue proof`() {
+        val owner = PtvMusicAutoQueueOwner(serverId = 10, userId = 20)
+        val ownedQueue = state(listOf(track(1)), index = 0).copy(queueOwner = owner)
+        val requestedProof = proof(owner)
+        val authenticatedOwnerAllowed = AtomicBoolean(false)
+        val controller = mockk<MusicPlaybackController>(relaxed = true)
+        val (player, _) = player(
+            ownedQueue,
+            authenticatedOwnerAllowed = authenticatedOwnerAllowed,
+            controller = controller,
+            pendingQueueAuthenticationProof = { requestedProof },
+        )
+
+        player.play()
+        player.cancelPendingPlay()
+        authenticatedOwnerAllowed.set(true)
+        player.onQueueAuthenticationVerified(requestedProof, requestedProof.copy())
+
+        verify(exactly = 0) { controller.playCurrent() }
+    }
+
+    @Test
+    fun `replacement authentication proof cancels an earlier Play intent`() {
+        val owner = PtvMusicAutoQueueOwner(serverId = 10, userId = 20)
+        val ownedQueue = state(listOf(track(1)), index = 0).copy(queueOwner = owner)
+        val oldProof = proof(owner)
+        val replacementProof = proof(owner, credentialEpoch = 2)
+        var pendingProof: PtvMusicQueueAuthenticationProof? = oldProof
+        val authenticatedOwnerAllowed = AtomicBoolean(false)
+        val controller = mockk<MusicPlaybackController>(relaxed = true)
+        val (player, _) = player(
+            ownedQueue,
+            authenticatedOwnerAllowed = authenticatedOwnerAllowed,
+            controller = controller,
+            pendingQueueAuthenticationProof = { pendingProof },
+        )
+
+        player.play()
+        pendingProof = replacementProof
+        player.notifyControllerStateChanged(ownedQueue)
+        pendingProof = null
+        authenticatedOwnerAllowed.set(true)
+        player.onQueueAuthenticationVerified(replacementProof, replacementProof.copy())
+        player.onQueueAuthenticationVerified(oldProof, oldProof.copy())
+
+        verify(exactly = 0) { controller.playCurrent() }
+    }
+
+    @Test
+    fun `restarted equivalent proof does not replay an earlier Play intent`() {
+        val owner = PtvMusicAutoQueueOwner(serverId = 10, userId = 20)
+        val ownedQueue = state(listOf(track(1)), index = 0).copy(queueOwner = owner)
+        val oldProof = proof(owner)
+        val restartedProof = oldProof.copy()
+        var pendingProof: PtvMusicQueueAuthenticationProof? = oldProof
+        val authenticatedOwnerAllowed = AtomicBoolean(false)
+        val controller = mockk<MusicPlaybackController>(relaxed = true)
+        val (player, _) = player(
+            ownedQueue,
+            authenticatedOwnerAllowed = authenticatedOwnerAllowed,
+            controller = controller,
+            pendingQueueAuthenticationProof = { pendingProof },
+        )
+
+        player.play()
+        pendingProof = restartedProof
+        authenticatedOwnerAllowed.set(true)
+        player.onQueueAuthenticationVerified(restartedProof, restartedProof.copy())
+
+        verify(exactly = 0) { controller.playCurrent() }
+    }
+
+    @Test
+    fun `different queue selection cannot inherit Play from pending proof`() {
+        val owner = PtvMusicAutoQueueOwner(serverId = 10, userId = 20)
+        val first = track(1)
+        val second = track(2)
+        val ownedQueue = state(listOf(first, second), index = 0).copy(queueOwner = owner)
+        val requestedProof = proof(owner)
+        val authenticatedOwnerAllowed = AtomicBoolean(false)
+        val controller = mockk<MusicPlaybackController>(relaxed = true)
+        val (player, controllerState) = player(
+            ownedQueue,
+            authenticatedOwnerAllowed = authenticatedOwnerAllowed,
+            controller = controller,
+            pendingQueueAuthenticationProof = { requestedProof },
+        )
+
+        player.play()
+        announce(player, controllerState, state(listOf(first, second), index = 1).copy(queueOwner = owner))
+        authenticatedOwnerAllowed.set(true)
+        player.onQueueAuthenticationVerified(requestedProof, requestedProof.copy())
+
+        verify(exactly = 0) { controller.playCurrent() }
+    }
+
+    @Test
+    fun `foreign local owner cannot queue Play even with a pending proof`() {
+        val owner = PtvMusicAutoQueueOwner(serverId = 10, userId = 20)
+        val ownedQueue = state(listOf(track(1)), index = 0).copy(queueOwner = owner)
+        val requestedProof = proof(owner)
+        val ownerAllowed = AtomicBoolean(false)
+        val authenticatedOwnerAllowed = AtomicBoolean(false)
+        val controller = mockk<MusicPlaybackController>(relaxed = true)
+        val (player, _) = player(
+            ownedQueue,
+            ownerAllowed = ownerAllowed,
+            authenticatedOwnerAllowed = authenticatedOwnerAllowed,
+            controller = controller,
+            pendingQueueAuthenticationProof = { requestedProof },
+        )
+
+        player.play()
+        ownerAllowed.set(true)
+        authenticatedOwnerAllowed.set(true)
+        player.onQueueAuthenticationVerified(requestedProof, requestedProof.copy())
+
+        verify(exactly = 0) { controller.playCurrent() }
+    }
 
     @Test
     fun `foreign queue cannot resume advance or seek while pause and stop remain available`() {
@@ -336,13 +636,21 @@ class PtvMusicSessionPlayerStateTest {
         verify(exactly = 1) { controller.setShuffleEnabled(true, "mediaSession") }
         verify(exactly = 1) { controller.setRepeatMode(MusicRepeatMode.ALL, "mediaSession") }
     }
+}
 
-    private fun player(
+abstract class PtvMusicSessionPlayerFixture {
+    @AfterEach
+    fun resetMedia3CommandsMock() {
+        unmockkStatic("org.jellyfin.mobile.feature.music.auto.PtvMusicSessionPlayerKt")
+    }
+
+    internal fun player(
         initial: MusicPlaybackState,
         underlying: Player = mockk(relaxed = true),
         ownerAllowed: AtomicBoolean = AtomicBoolean(true),
         authenticatedOwnerAllowed: AtomicBoolean = AtomicBoolean(true),
         controller: MusicPlaybackController = mockk(relaxed = true),
+        pendingQueueAuthenticationProof: () -> PtvMusicQueueAuthenticationProof? = { null },
     ): Pair<PtvMusicSessionPlayer, MutableStateFlow<MusicPlaybackState>> {
         // Media3's command builder uses Android SparseBooleanArray, unavailable in local JVM tests.
         mockkStatic("org.jellyfin.mobile.feature.music.auto.PtvMusicSessionPlayerKt")
@@ -355,10 +663,26 @@ class PtvMusicSessionPlayerStateTest {
         every { underlying.currentPosition } returns C.TIME_UNSET
         every { underlying.bufferedPosition } returns C.TIME_UNSET
         every { underlying.isCommandAvailable(any()) } returns false
-        return PtvMusicSessionPlayer(controller) { authenticatedOwnerAllowed.get() } to state
+        return PtvMusicSessionPlayer(
+            playbackController = controller,
+            isAuthenticatedQueueOwner = { authenticatedOwnerAllowed.get() },
+            pendingQueueAuthenticationProof = pendingQueueAuthenticationProof,
+        ) to state
     }
 
-    private fun announce(
+    internal fun proof(owner: PtvMusicAutoQueueOwner, credentialEpoch: Long = 1): PtvMusicQueueAuthenticationProof =
+        PtvMusicQueueAuthenticationProof(
+            owner = owner,
+            authentication = MobileAuthState.Authenticated(
+                serverId = owner.serverId.toString(),
+                userId = "jellyfin-user",
+                credentialInstanceId = UUID(0, credentialEpoch),
+                method = AuthMethod.PASSWORD,
+                credentialEpoch = credentialEpoch,
+            ),
+        )
+
+    internal fun announce(
         player: PtvMusicSessionPlayer,
         controllerState: MutableStateFlow<MusicPlaybackState>,
         newState: MusicPlaybackState,
@@ -367,10 +691,10 @@ class PtvMusicSessionPlayerStateTest {
         player.notifyControllerStateChanged(newState)
     }
 
-    private fun state(queue: List<MusicItem>, index: Int, isPlaying: Boolean = false): MusicPlaybackState =
+    internal fun state(queue: List<MusicItem>, index: Int, isPlaying: Boolean = false): MusicPlaybackState =
         MusicPlaybackState(queue = queue, currentItem = queue[index], currentIndex = index, isPlaying = isPlaying)
 
-    private fun track(suffix: Int): MusicItem = MusicItem(
+    internal fun track(suffix: Int): MusicItem = MusicItem(
         id = UUID.fromString("00000000-0000-0000-0000-${suffix.toString().padStart(12, '0')}"),
         title = "Track $suffix",
         subtitle = "Artist",
@@ -391,40 +715,40 @@ class PtvMusicSessionPlayerStateTest {
         isFolder = false,
         isPlayable = true,
     )
+}
 
-    private class RecordingListener : Player.Listener {
-        val transitions = mutableListOf<String?>()
-        val metadataTitles = mutableListOf<String?>()
-        var timelineChanges = 0
-        val playbackStates = mutableListOf<Int>()
-        var eventBatches = 0
+private class RecordingListener : Player.Listener {
+    val transitions = mutableListOf<String?>()
+    val metadataTitles = mutableListOf<String?>()
+    var timelineChanges = 0
+    val playbackStates = mutableListOf<Int>()
+    var eventBatches = 0
 
-        override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-            transitions += mediaItem?.mediaId
-        }
+    override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+        transitions += mediaItem?.mediaId
+    }
 
-        override fun onMediaMetadataChanged(mediaMetadata: MediaMetadata) {
-            metadataTitles += mediaMetadata.title?.toString()
-        }
+    override fun onMediaMetadataChanged(mediaMetadata: MediaMetadata) {
+        metadataTitles += mediaMetadata.title?.toString()
+    }
 
-        override fun onTimelineChanged(timeline: Timeline, reason: Int) {
-            timelineChanges++
-        }
+    override fun onTimelineChanged(timeline: Timeline, reason: Int) {
+        timelineChanges++
+    }
 
-        override fun onPlaybackStateChanged(playbackState: Int) {
-            playbackStates += playbackState
-        }
+    override fun onPlaybackStateChanged(playbackState: Int) {
+        playbackStates += playbackState
+    }
 
-        override fun onEvents(player: Player, events: Player.Events) {
-            eventBatches++
-        }
+    override fun onEvents(player: Player, events: Player.Events) {
+        eventBatches++
+    }
 
-        fun clear() {
-            transitions.clear()
-            metadataTitles.clear()
-            timelineChanges = 0
-            playbackStates.clear()
-            eventBatches = 0
-        }
+    fun clear() {
+        transitions.clear()
+        metadataTitles.clear()
+        timelineChanges = 0
+        playbackStates.clear()
+        eventBatches = 0
     }
 }

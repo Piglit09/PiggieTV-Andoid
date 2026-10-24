@@ -22,20 +22,34 @@ import androidx.media3.session.SessionError
 import androidx.media3.session.SessionResult
 import com.google.common.collect.ImmutableList
 import com.google.common.util.concurrent.ListenableFuture
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.guava.future
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import org.jellyfin.mobile.R
 import org.jellyfin.mobile.auth.MobileAuthState
 import org.jellyfin.mobile.feature.music.MusicBrowseKind
 import org.jellyfin.mobile.feature.music.MusicItem
+import org.jellyfin.mobile.feature.music.MusicListeningMode
 import org.jellyfin.mobile.feature.music.MusicPage
 import org.jellyfin.mobile.feature.music.MusicPlaybackController
 import org.jellyfin.mobile.feature.music.MusicPlaybackState
+import org.jellyfin.mobile.feature.music.MusicPlaybackTransitionEvent
+import org.jellyfin.mobile.feature.music.MusicPlaybackTransitionReason
+import org.jellyfin.mobile.feature.music.MusicRecommendationBatch
+import org.jellyfin.mobile.feature.music.MusicRecommendationSessionContext
 import org.jellyfin.mobile.feature.music.MusicRepeatMode
 import org.jellyfin.mobile.feature.music.MusicRepository
 import org.jellyfin.mobile.feature.music.MusicSongAction
@@ -43,6 +57,8 @@ import org.jellyfin.mobile.feature.music.MusicSongActionHandler
 import org.jellyfin.mobile.feature.music.MusicSongActionRequest
 import org.jellyfin.mobile.feature.music.MusicSongActionResult
 import org.jellyfin.sdk.model.UUID
+import org.jellyfin.sdk.model.api.BaseItemKind
+import org.jellyfin.sdk.model.serializer.toUUIDOrNull
 import timber.log.Timber
 import java.util.concurrent.ConcurrentHashMap
 
@@ -56,9 +72,11 @@ internal class PtvMusicLibrarySessionCallback(
     private val resumeCoordinator: PtvMusicAutoResumeCoordinator,
     private val savedSessionReady: Deferred<UUID?>,
     private val authState: StateFlow<MobileAuthState>,
+    private val playerDispatcher: CoroutineDispatcher = Dispatchers.Main,
+    private val serverUrlForLocalId: (Long) -> String? = { null },
 ) : MediaLibrarySession.Callback {
     private val callbackId = runtimeInstanceId(this)
-    private val ioScope = CoroutineScope(Dispatchers.IO)
+    private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val itemCache = ConcurrentHashMap<Pair<PtvMusicAutoBrowseScope, UUID>, MusicItem>()
     private val queueCache = ConcurrentHashMap<Pair<PtvMusicAutoBrowseScope, UUID>, List<MusicItem>>()
     private val browseCache = ConcurrentHashMap<Pair<PtvMusicAutoBrowseScope, String>, List<MediaItem>>()
@@ -70,14 +88,49 @@ internal class PtvMusicLibrarySessionCallback(
     private var lastAuthenticatedScope: PtvMusicAutoBrowseScope? = null
     private var lastAuthenticatedOwner: PtvMusicAutoQueueOwner? = null
     private var pendingPriorOwner: PtvMusicAutoQueueOwner? = null
+    private var selectedListeningMode: Pair<PtvMusicAutoBrowseScope, MusicListeningMode>? = null
+    private var generatedCacheSeed: Pair<PtvMusicAutoBrowseScope, UUID?>? = null
+    private var recommendationGeneration = 0L
+    private var recommendationSession: ActiveRecommendationSession? = null
+    private var recommendationStateJob: Job? = null
+    private var recommendationTransitionJob: Job? = null
+    private var recommendationRefillJob: Job? = null
 
     private data class AutoSelectionIdentity(
         val scope: PtvMusicAutoBrowseScope,
         val localOwner: PtvMusicAutoQueueOwner,
     )
 
+    private data class PlaylistTrackSelection(val playlistId: UUID, val trackIndex: Int, val trackId: UUID)
+
+    private class ActiveRecommendationSession(
+        val identity: AutoSelectionIdentity,
+        val generation: Long,
+        var context: MusicRecommendationSessionContext,
+        val expectedItemIds: MutableSet<UUID>,
+        var activated: Boolean = false,
+        var lastRefillItemId: UUID? = null,
+        var refillFailureItemId: UUID? = null,
+        var refillFailureCount: Int = 0,
+        var refillInFlight: Boolean = false,
+        var refillSerial: Long = 0,
+    )
+
+    private data class RecommendationRefillRequest(
+        val session: ActiveRecommendationSession,
+        val context: MusicRecommendationSessionContext,
+        val currentItem: MusicItem,
+        val expectedItemIds: Set<UUID>,
+        val serial: Long,
+    )
+
     fun onAuthenticationChanged() {
         syncBrowseScope()
+    }
+
+    fun onServiceDestroyed() {
+        synchronized(browseScopeLock) { clearRecommendationSessionLocked() }
+        ioScope.cancel()
     }
 
     override fun onConnect(
@@ -170,13 +223,33 @@ internal class PtvMusicLibrarySessionCallback(
                     }
                 }
 
+                parentId == PtvMusicAutoIds.LISTENING_MODES -> {
+                    val scope = requireNotNull(browseScope)
+                    val selected = listeningModeFor(scope)
+                    PtvMusicAutoListeningMode.entries
+                        .map { mode -> mode.toAutoMediaItem(selected = mode.listeningMode == selected) }
+                        .drop(startIndex)
+                        .take(limit)
+                }
+
+                PtvMusicAutoListeningMode.fromMediaId(parentId) != null -> {
+                    val mode = requireNotNull(PtvMusicAutoListeningMode.fromMediaId(parentId))
+                    selectListeningMode(requireNotNull(browseScope), mode.listeningMode)
+                    loadGeneratedQueueForMediaId(
+                        mediaId = PtvMusicAutoIds.AUTO_PICKS,
+                        startIndex = startIndex,
+                        limit = limit,
+                        callbackName = "onGetChildren:mode:${mode.name}",
+                    ).let { result -> result.tracks.map { item -> item.toAutoMediaItem() } }
+                }
+
                 parentId == PtvMusicAutoIds.AUTO_PICKS -> {
                     loadGeneratedQueueForMediaId(
                         mediaId = parentId,
                         startIndex = startIndex,
                         limit = limit,
                         callbackName = "onGetChildren",
-                    ).let { result -> result.tracks.toMediaItems(result.scope) }
+                    ).let { result -> result.tracks.map { item -> item.toAutoMediaItem() } }
                 }
 
                 parentId == PtvMusicAutoIds.MORE -> {
@@ -225,7 +298,7 @@ internal class PtvMusicLibrarySessionCallback(
                         startIndex = startIndex,
                         limit = limit,
                         callbackName = "onGetChildren",
-                    ).let { result -> result.tracks.toMediaItems(result.scope) }
+                    ).let { result -> result.tracks.map { item -> item.toAutoMediaItem() } }
                 }
 
                 else -> {
@@ -241,7 +314,11 @@ internal class PtvMusicLibrarySessionCallback(
                                 limit = limit,
                             )
                         } ?: MusicPage(emptyList(), totalCount = 0, startIndex = 0)
-                        musicPage.toMediaItems(scope)
+                        if (item?.type == BaseItemKind.PLAYLIST) {
+                            musicPage.toPlaylistMediaItems(scope, item.id)
+                        } else {
+                            musicPage.toMediaItems(scope)
+                        }
                     }
                 }
             }
@@ -257,12 +334,20 @@ internal class PtvMusicLibrarySessionCallback(
                 val message = "PTV Music Auto browse failed for $parentId page=$page pageSize=$pageSize"
                 Timber.e(error, message)
                 resumeStore.markLastPlaybackError(error.message ?: message)
-                LibraryResult.ofError(
-                    SessionError(
-                        SessionError.ERROR_NOT_SUPPORTED,
-                        "PTV could not load this music row.",
-                    ),
-                )
+                if (syncBrowseScope() != browseScope) {
+                    unavailableBrowseResult()
+                } else {
+                    val playlistParentId = PtvMusicAutoIds.itemIdFromMediaId(parentId)
+                    val isPlaylistBrowse = parentId == PtvMusicAutoCategory.PLAYLISTS.mediaId ||
+                        playlistParentId?.let { itemCache[browseScope to it]?.type == BaseItemKind.PLAYLIST } == true
+                    LibraryResult.ofError(
+                        if (isPlaylistBrowse || error is java.io.IOException) {
+                            SessionError(SessionError.ERROR_IO, "PTV could not load this music row. Try again.")
+                        } else {
+                            SessionError(SessionError.ERROR_NOT_SUPPORTED, "PTV could not load this music row.")
+                        },
+                    )
+                }
             },
         )
     }
@@ -303,6 +388,15 @@ internal class PtvMusicLibrarySessionCallback(
                 LibraryResult.ofItem(requireNotNull(PtvMusicAutoMix.fromMediaId(mediaId)).toAutoMediaItem(), null)
             }
 
+            PtvMusicAutoListeningMode.fromMediaId(mediaId) != null -> {
+                val scope = requireNotNull(syncBrowseScope())
+                val mode = requireNotNull(PtvMusicAutoListeningMode.fromMediaId(mediaId))
+                LibraryResult.ofItem(
+                    mode.toAutoMediaItem(selected = mode.listeningMode == listeningModeFor(scope)),
+                    null,
+                )
+            }
+
             PtvMusicAutoMoreItem.entries.any { item -> item.mediaId == mediaId } -> {
                 LibraryResult.ofItem(
                     requireNotNull(PtvMusicAutoMoreItem.entries.firstOrNull { item -> item.mediaId == mediaId })
@@ -324,7 +418,7 @@ internal class PtvMusicLibrarySessionCallback(
                         ),
                     )
                 } else {
-                    LibraryResult.ofItem(item.toAutoMediaItem(), null)
+                    LibraryResult.ofItem(item.toAutoMediaItem(mediaId), null)
                 }
             }
         }
@@ -518,20 +612,24 @@ internal class PtvMusicLibrarySessionCallback(
         callbackStartedAt: Long,
         identity: AutoSelectionIdentity,
     ): MediaItemsWithStartPosition {
+        val selectionGeneration = synchronized(browseScopeLock) {
+            ++recommendationGeneration
+        }
         Timber.i(
             "PTV Music Auto resolving selection selectedMediaId=${selectedMediaItem.mediaId} " +
                 "resolvedMix=${PtvMusicAutoMix.fromMediaId(selectedMediaItem.mediaId)?.name ?: "<none>"}",
         )
         return when (selectedMediaItem.mediaId) {
-            PtvMusicAutoIds.SHUFFLE_ALL -> startShuffleAll(startPositionMs, identity)
+            PtvMusicAutoIds.SHUFFLE_ALL -> startShuffleAll(startPositionMs, identity, selectionGeneration)
 
-            PtvMusicAutoIds.MORE_LIKE_THIS -> startMoreLikeThis(startPositionMs, identity)
+            PtvMusicAutoIds.MORE_LIKE_THIS -> startMoreLikeThis(startPositionMs, identity, selectionGeneration)
 
             PtvMusicAutoIds.AUTO_PICKS -> startGeneratedQueueMediaId(
                 mediaId = selectedMediaItem.mediaId,
                 startPositionMs = startPositionMs,
                 callbackStartedAt = callbackStartedAt,
                 identity = identity,
+                selectionGeneration = selectionGeneration,
             )
 
             else -> PtvMusicAutoMix.fromMediaId(selectedMediaItem.mediaId)
@@ -541,9 +639,10 @@ internal class PtvMusicLibrarySessionCallback(
                         startPositionMs = startPositionMs,
                         callbackStartedAt = callbackStartedAt,
                         identity = identity,
+                        selectionGeneration = selectionGeneration,
                     )
                 }
-                ?: startResolvedMediaItem(selectedMediaItem, startPositionMs, identity)
+                ?: startResolvedMediaItem(selectedMediaItem, startPositionMs, identity, selectionGeneration)
         }
     }
 
@@ -552,7 +651,9 @@ internal class PtvMusicLibrarySessionCallback(
         startPositionMs: Long,
         callbackStartedAt: Long,
         identity: AutoSelectionIdentity,
+        selectionGeneration: Long,
     ): MediaItemsWithStartPosition {
+        val listeningMode = listeningModeFor(identity.scope)
         val startPosition = startPositionMs.takeIf { it != C.TIME_UNSET }?.coerceAtLeast(0) ?: 0
         val queueResult = loadGeneratedQueueForMediaId(
             mediaId = mediaId,
@@ -567,15 +668,32 @@ internal class PtvMusicLibrarySessionCallback(
             )
 
         check(queueResult.scope == identity.scope) { "PTV Music Auto account changed while selecting music." }
+        check(listeningModeFor(identity.scope) == listeningMode) {
+            "PTV Music Auto listening mode changed while selecting music."
+        }
         requireCurrentSelectionIdentity(identity)
         rememberItems(queue, identity.scope)
         requireCurrentSelectionIdentity(identity)
-        playbackController.play(
-            item = firstItem,
-            queue = queue,
-            startPositionMs = startPosition,
-            expectedOwner = identity.localOwner,
-        )
+        if (mediaId == PtvMusicAutoIds.AUTO_PICKS) {
+            val context = repository.beginAutoRecommendationSession(firstItem, queue, listeningMode)
+            activateRecommendationSession(identity, selectionGeneration, context, queue) {
+                playbackController.play(
+                    item = firstItem,
+                    queue = queue,
+                    startPositionMs = startPosition,
+                    expectedOwner = identity.localOwner,
+                )
+            }
+        } else {
+            commitReplacementSelection(identity, selectionGeneration) {
+                playbackController.play(
+                    item = firstItem,
+                    queue = queue,
+                    startPositionMs = startPosition,
+                    expectedOwner = identity.localOwner,
+                )
+            }
+        }
         resumeStore.markLastPlaybackError(null)
         resumeStore.markSessionCommand("generatedQueue $mediaId count=${queue.size}")
         Timber.i(
@@ -629,7 +747,9 @@ internal class PtvMusicLibrarySessionCallback(
         val scope = runCatching { awaitSavedSession("playbackResumption") }.getOrNull()
             ?: return@future emptyMediaItemsWithStartPosition()
         runCatching {
-            resumeCoordinator.restoreQueueIfNeeded()
+            withContext(playerDispatcher) {
+                resumeCoordinator.restoreQueueIfNeeded()
+            }
             if (!isTrustedPlaybackScope(scope)) {
                 throw IllegalStateException("PTV Music Auto has no queue owned by this account")
             }
@@ -682,6 +802,7 @@ internal class PtvMusicLibrarySessionCallback(
     private suspend fun startShuffleAll(
         startPositionMs: Long,
         identity: AutoSelectionIdentity,
+        selectionGeneration: Long,
     ): MediaItemsWithStartPosition {
         val startPosition = startPositionMs.takeIf { it != C.TIME_UNSET }?.coerceAtLeast(0) ?: 0
         val queue = repository.loadBrowsePage(
@@ -694,14 +815,15 @@ internal class PtvMusicLibrarySessionCallback(
 
         requireCurrentSelectionIdentity(identity)
         rememberItems(queue, identity.scope)
-        requireCurrentSelectionIdentity(identity)
-        playbackController.play(
-            item = itemToPlay,
-            queue = queue,
-            startPositionMs = startPosition,
-            shuffle = true,
-            expectedOwner = identity.localOwner,
-        )
+        commitReplacementSelection(identity, selectionGeneration) {
+            playbackController.play(
+                item = itemToPlay,
+                queue = queue,
+                startPositionMs = startPosition,
+                shuffle = true,
+                expectedOwner = identity.localOwner,
+            )
+        }
         resumeStore.markLastPlaybackError(null)
         resumeStore.markSessionCommand("shuffleAll count=${queue.size}")
         Timber.i("PTV Music Auto Shuffle All started count=${queue.size} firstItem=${itemToPlay.id}")
@@ -790,70 +912,165 @@ internal class PtvMusicLibrarySessionCallback(
         selectedMediaItem: MediaItem,
         startPositionMs: Long,
         identity: AutoSelectionIdentity,
+        selectionGeneration: Long,
     ): MediaItemsWithStartPosition {
         val scope = identity.scope
         requireCurrentSelectionIdentity(identity)
+        val playlistSelection = selectedMediaItem.mediaId.toPlaylistTrackSelection()
         val selectedItem = selectedMediaItem.mediaId.toCachedMusicItem(scope)
             ?: throw UnsupportedOperationException("PTV Music Auto could not resolve the selected item.")
-        val activePlaybackState = playbackController.state.value
-        val activeQueue = if (isTrustedPlaybackScope(scope)) {
-            activePlaybackState.queue.filterPlayableDistinct()
-        } else {
-            emptyList()
-        }
-        val activeQueueContainsSelection = activeQueue.any { item -> item.id == selectedItem.id }
-        val selectedItemIsCurrent = isTrustedPlaybackScope(scope) &&
-            activePlaybackState.currentItem?.id == selectedItem.id
-        val queue = when {
-            selectedItem.isPlayable && activeQueueContainsSelection -> activeQueue
-            else -> selectedItem.resolvePlaybackQueue(scope)
-        }
-        val itemToPlay = when {
-            selectedItem.isPlayable -> selectedItem
-            else -> queue.firstOrNull()
-        } ?: throw UnsupportedOperationException("PTV Music Auto found no playable songs.")
+        val mediaContext = resolvedMediaContext(playlistSelection, selectedItem, scope)
+        val queue = selectedPlaybackQueue(
+            mediaContext.playlist,
+            selectedItem,
+            mediaContext.activeQueue,
+            mediaContext.activeQueueContainsSelection,
+            scope,
+        )
+        val itemToPlay = selectedItemToPlay(playlistSelection, selectedItem, queue)
         val startPosition = startPositionMs.takeIf { it != C.TIME_UNSET }?.coerceAtLeast(0)
-            ?: activePlaybackState.positionMs.takeIf { selectedItemIsCurrent }?.coerceAtLeast(0)
+            ?: mediaContext.activePlaybackState.positionMs
+                .takeIf { mediaContext.selectedItemIsCurrent }
+                ?.coerceAtLeast(0)
             ?: 0
-        val playbackQueue = queue.ensureContains(itemToPlay)
-        val playbackIndex = playbackQueue.indexOfFirst { item -> item.id == itemToPlay.id }.coerceAtLeast(0)
+        val playbackQueue = if (mediaContext.playlist != null) queue else queue.ensureContains(itemToPlay)
+        val playbackIndex = playlistSelection?.trackIndex
+            ?: playbackQueue.indexOfFirst { item -> item.id == itemToPlay.id }.coerceAtLeast(0)
         requireCurrentSelectionIdentity(identity)
-        rememberItems(playbackQueue, scope)
+        rememberItems(playbackQueue, scope, cachePlaybackQueue = mediaContext.playlist == null)
 
-        if (selectedItemIsCurrent && activeQueueContainsSelection && activePlaybackState.hasCurrent) {
+        if (
+            canReuseActiveQueue(
+                mediaContext.playlist,
+                mediaContext.selectedItemIsCurrent,
+                mediaContext.activeQueueContainsSelection,
+                mediaContext.activePlaybackState,
+            )
+        ) {
+            requireCurrentSelectionGeneration(identity, selectionGeneration)
             Timber.i(
                 "PTV Music Auto reused active queue for current item selectedMediaId=${selectedMediaItem.mediaId} " +
                     "queueSize=${playbackQueue.size} currentIndex=$playbackIndex position=${startPosition}ms",
             )
         } else {
-            requireCurrentSelectionIdentity(identity)
-            playbackController.play(
-                item = itemToPlay,
-                queue = playbackQueue,
-                startPositionMs = startPosition,
-                expectedOwner = identity.localOwner,
-            )
+            commitReplacementSelection(identity, selectionGeneration) {
+                playbackController.play(
+                    item = itemToPlay,
+                    queue = playbackQueue,
+                    startPositionMs = startPosition,
+                    expectedOwner = identity.localOwner,
+                    authoredQueueIndex = playbackIndex.takeIf { mediaContext.playlist != null },
+                )
+            }
         }
         resumeStore.markLastPlaybackError(null)
         resumeStore.markSessionCommand(
-            "play ${itemToPlay.id} activeQueue=$activeQueueContainsSelection current=$selectedItemIsCurrent",
+            "play ${itemToPlay.id} playlist=${mediaContext.playlist?.id} " +
+                "activeQueue=${mediaContext.activeQueueContainsSelection} current=${mediaContext.selectedItemIsCurrent}",
         )
 
         return MediaItemsWithStartPosition(
-            playbackQueue.map { item -> item.toAutoMediaItem() },
+            resolvedMediaItems(playbackQueue, mediaContext.playlist),
             playbackIndex,
             startPosition,
         )
     }
 
+    private data class ResolvedMediaContext(
+        val playlist: MusicItem?,
+        val activePlaybackState: MusicPlaybackState,
+        val activeQueue: List<MusicItem>,
+        val activeQueueContainsSelection: Boolean,
+        val selectedItemIsCurrent: Boolean,
+    )
+
+    private suspend fun resolvedMediaContext(
+        selection: PlaylistTrackSelection?,
+        selectedItem: MusicItem,
+        scope: PtvMusicAutoBrowseScope,
+    ): ResolvedMediaContext {
+        val playlist = selectedPlaylistFor(selection, selectedItem, scope)
+        val activePlaybackState = playbackController.state.value
+        val trusted = isTrustedPlaybackScope(scope)
+        val activeQueue = if (trusted) activePlaybackState.queue.filterPlayableDistinct() else emptyList()
+        return ResolvedMediaContext(
+            playlist = playlist,
+            activePlaybackState = activePlaybackState,
+            activeQueue = activeQueue,
+            activeQueueContainsSelection = activeQueue.any { item -> item.id == selectedItem.id },
+            selectedItemIsCurrent = trusted && activePlaybackState.currentItem?.id == selectedItem.id,
+        )
+    }
+
+    private suspend fun selectedPlaylistFor(
+        selection: PlaylistTrackSelection?,
+        selectedItem: MusicItem,
+        scope: PtvMusicAutoBrowseScope,
+    ): MusicItem? = when {
+        selection != null -> loadPlaylistParent(selection.playlistId, scope)
+        selectedItem.type == BaseItemKind.PLAYLIST -> selectedItem
+        else -> null
+    }
+
+    private suspend fun selectedPlaybackQueue(
+        playlist: MusicItem?,
+        selectedItem: MusicItem,
+        activeQueue: List<MusicItem>,
+        activeQueueContainsSelection: Boolean,
+        scope: PtvMusicAutoBrowseScope,
+    ): List<MusicItem> = when {
+        playlist != null -> loadFullPlaylistQueue(playlist, scope)
+        selectedItem.isPlayable && activeQueueContainsSelection -> activeQueue
+        else -> selectedItem.resolvePlaybackQueue(scope)
+    }
+
+    private fun selectedItemToPlay(
+        selection: PlaylistTrackSelection?,
+        selectedItem: MusicItem,
+        queue: List<MusicItem>,
+    ): MusicItem = when {
+        selection != null -> queue.getOrNull(selection.trackIndex)
+            ?.takeIf { item -> item.id == selectedItem.id }
+            ?: throw UnsupportedOperationException("PTV Music Auto playlist changed. Browse it again.")
+
+        selectedItem.isPlayable -> selectedItem
+
+        else -> queue.firstOrNull()
+            ?: throw UnsupportedOperationException("PTV Music Auto found no playable songs.")
+    }
+
+    private fun canReuseActiveQueue(
+        playlist: MusicItem?,
+        selectedItemIsCurrent: Boolean,
+        activeQueueContainsSelection: Boolean,
+        activePlaybackState: MusicPlaybackState,
+    ): Boolean {
+        val activeSelection = selectedItemIsCurrent && activeQueueContainsSelection && activePlaybackState.hasCurrent
+        return playlist == null && activeSelection
+    }
+
+    private fun resolvedMediaItems(queue: List<MusicItem>, playlist: MusicItem?): List<MediaItem> =
+        if (playlist == null) {
+            queue.map { item -> item.toAutoMediaItem() }
+        } else {
+            queue.mapIndexed { index, item ->
+                item.toAutoMediaItem(playlistTrackMediaId(playlist.id, index, item.id))
+            }
+        }
+
     private suspend fun startMoreLikeThis(
         startPositionMs: Long,
         identity: AutoSelectionIdentity,
+        selectionGeneration: Long,
     ): MediaItemsWithStartPosition {
         val currentItem = trustedCurrentPlaybackItem()
             ?: throw UnsupportedOperationException("No PTV Music song is currently playing.")
         val startPosition = startPositionMs.takeIf { it != C.TIME_UNSET }?.coerceAtLeast(0) ?: 0
-        val generatedQueue = repository.loadAutoGeneratedQueue(currentItem)
+        val listeningMode = listeningModeFor(identity.scope)
+        val generatedQueue = repository.loadAutoGeneratedQueue(
+            currentItem,
+            listeningMode = listeningMode,
+        )
             .filter(MusicItem::isPlayable)
         val firstItem = generatedQueue.firstOrNull()
             ?: throw UnsupportedOperationException("PTV could not find similar songs right now.")
@@ -861,12 +1078,18 @@ internal class PtvMusicLibrarySessionCallback(
         requireCurrentSelectionIdentity(identity)
         rememberItems(generatedQueue, identity.scope)
         requireCurrentSelectionIdentity(identity)
-        playbackController.play(
-            item = firstItem,
-            queue = generatedQueue,
-            startPositionMs = startPosition,
-            expectedOwner = identity.localOwner,
-        )
+        check(listeningModeFor(identity.scope) == listeningMode) {
+            "PTV Music Auto listening mode changed while selecting music."
+        }
+        val context = repository.beginAutoRecommendationSession(currentItem, generatedQueue, listeningMode)
+        activateRecommendationSession(identity, selectionGeneration, context, generatedQueue) {
+            playbackController.play(
+                item = firstItem,
+                queue = generatedQueue,
+                startPositionMs = startPosition,
+                expectedOwner = identity.localOwner,
+            )
+        }
         resumeStore.markLastPlaybackError(null)
         resumeStore.markSessionCommand("moreLikeThis ${currentItem.id} count=${generatedQueue.size}")
         Timber.i("PTV Music Auto More Like This started count=${generatedQueue.size} seed=${currentItem.id}")
@@ -906,19 +1129,22 @@ internal class PtvMusicLibrarySessionCallback(
         val startedAt = System.currentTimeMillis()
         val pageLimit = limit.coerceIn(1, MIX_TRACK_LIMIT)
         val mix = PtvMusicAutoMix.fromMediaId(mediaId)
+        val listeningMode = listeningModeFor(scope)
+        val cacheKey = generatedQueueCacheKey(scope, mediaId, mix)
         val label = mix?.name ?: mediaId.generatedQueueDisplayName()
         Timber.i(
             "PTV Music Auto generated queue resolving callback=$callbackName selectedMediaId=$mediaId " +
                 "resolvedMix=${mix?.name ?: "<none>"} start=$startIndex limit=$pageLimit",
         )
 
-        generatedQueueCache[scope to mediaId]
+        generatedQueueCache[scope to cacheKey]
             ?.filterPlayableDistinct()
             ?.takeIf(List<MusicItem>::isNotEmpty)
             ?.let { cachedTracks ->
                 return generatedQueueResult(
                     scope = scope,
                     mediaId = mediaId,
+                    cacheKey = cacheKey,
                     mix = mix,
                     source = "generated-cache",
                     candidates = cachedTracks,
@@ -930,7 +1156,7 @@ internal class PtvMusicLibrarySessionCallback(
             }
 
         val cachedCandidates = when {
-            mediaId == PtvMusicAutoIds.AUTO_PICKS -> cachedAutoPicksCandidates()
+            mediaId == PtvMusicAutoIds.AUTO_PICKS -> emptyList()
             mix != null -> cachedMixCandidates(mix)
             else -> emptyList()
         }
@@ -938,6 +1164,7 @@ internal class PtvMusicLibrarySessionCallback(
             return generatedQueueResult(
                 scope = scope,
                 mediaId = mediaId,
+                cacheKey = cacheKey,
                 mix = mix,
                 source = "cache",
                 candidates = cachedCandidates,
@@ -950,7 +1177,7 @@ internal class PtvMusicLibrarySessionCallback(
 
         val freshCandidates = withTimeoutOrNull(AUTO_GENERATED_FRESH_TIMEOUT_MS) {
             when {
-                mediaId == PtvMusicAutoIds.AUTO_PICKS -> loadFreshAutoPicksCandidates()
+                mediaId == PtvMusicAutoIds.AUTO_PICKS -> loadFreshAutoPicksCandidates(listeningMode)
                 mix != null -> loadFreshMixCandidates(mix)
                 else -> emptyList()
             }
@@ -965,6 +1192,7 @@ internal class PtvMusicLibrarySessionCallback(
             return generatedQueueResult(
                 scope = scope,
                 mediaId = mediaId,
+                cacheKey = cacheKey,
                 mix = mix,
                 source = "timeout-empty",
                 candidates = emptyList(),
@@ -990,6 +1218,7 @@ internal class PtvMusicLibrarySessionCallback(
         return generatedQueueResult(
             scope = scope,
             mediaId = mediaId,
+            cacheKey = cacheKey,
             mix = mix,
             source = source,
             candidates = fallbackTracks,
@@ -1003,6 +1232,7 @@ internal class PtvMusicLibrarySessionCallback(
     private fun generatedQueueResult(
         scope: PtvMusicAutoBrowseScope,
         mediaId: String,
+        cacheKey: String,
         mix: PtvMusicAutoMix?,
         source: String,
         candidates: List<MusicItem>,
@@ -1014,10 +1244,24 @@ internal class PtvMusicLibrarySessionCallback(
         if (syncBrowseScope() != scope) {
             throw IllegalStateException("PTV Music Auto account changed while loading generated music")
         }
+        check(generatedQueueCacheKey(scope, mediaId, mix) == cacheKey) {
+            "PTV Music Auto listening mode or playing song changed while loading generated music"
+        }
         val playableCandidates = candidates.filterPlayableDistinct().take(MIX_TRACK_LIMIT)
         if (playableCandidates.isNotEmpty()) {
             rememberItems(playableCandidates, scope)
-            generatedQueueCache[scope to mediaId] = playableCandidates
+            synchronized(browseScopeLock) {
+                check(syncBrowseScope() == scope && generatedQueueCacheKey(scope, mediaId, mix) == cacheKey) {
+                    "PTV Music Auto account, mode, or seed changed before caching generated music."
+                }
+                val scopedKey = scope to cacheKey
+                if (!generatedQueueCache.containsKey(scopedKey) &&
+                    generatedQueueCache.size >= MAX_GENERATED_QUEUE_CACHE_ENTRIES
+                ) {
+                    generatedQueueCache.keys.firstOrNull()?.let(generatedQueueCache::remove)
+                }
+                generatedQueueCache[scopedKey] = playableCandidates
+            }
         }
         val returnedTracks = playableCandidates.drop(startIndex.coerceAtLeast(0)).take(limit)
         Timber.i(
@@ -1036,6 +1280,27 @@ internal class PtvMusicLibrarySessionCallback(
             candidateCount = playableCandidates.size,
             scope = scope,
         )
+    }
+
+    private fun generatedQueueCacheKey(
+        scope: PtvMusicAutoBrowseScope,
+        mediaId: String,
+        mix: PtvMusicAutoMix?,
+    ): String {
+        val seedSensitive = mediaId == PtvMusicAutoIds.AUTO_PICKS ||
+            mix == PtvMusicAutoMix.CURRENT_ARTIST ||
+            mix == PtvMusicAutoMix.CURRENT_GENRE
+        val seed = if (seedSensitive) trustedCurrentPlaybackItem()?.id else null
+        if (seedSensitive) {
+            synchronized(browseScopeLock) {
+                val currentSeed = scope to seed
+                if (generatedCacheSeed != currentSeed) {
+                    generatedQueueCache.clear()
+                    generatedCacheSeed = currentSeed
+                }
+            }
+        }
+        return "$mediaId:mode=${listeningModeFor(scope).name}:seed=${seed ?: "none"}"
     }
 
     private suspend fun loadFreshMixCandidates(mix: PtvMusicAutoMix): List<MusicItem> = when (mix) {
@@ -1075,29 +1340,12 @@ internal class PtvMusicLibrarySessionCallback(
         PtvMusicAutoMix.LATEST -> repository.loadRecentlyAddedTracks(limit = MIX_TRACK_LIMIT)
     }
 
-    private suspend fun loadFreshAutoPicksCandidates(): List<MusicItem> = repository.loadAutoPicksQueue(
-        seed = trustedCurrentPlaybackItem(),
-        limit = MIX_TRACK_LIMIT,
-    )
-
-    private fun cachedAutoPicksCandidates(): List<MusicItem> {
-        val activeQueue = activeQueueCandidates()
-        val favorites = cachedBrowseCandidates(MusicBrowseKind.FAVORITES)
-        val recent = cachedBrowseCandidates(MusicBrowseKind.RECENTLY_PLAYED)
-        val recommendations = cachedBrowseCandidates(MusicBrowseKind.RECOMMENDATIONS)
-        val songs = cachedBrowseCandidates(MusicBrowseKind.SONGS)
-        val currentItem = trustedCurrentPlaybackItem()
-
-        return (
-            listOfNotNull(currentItem?.takeIf(MusicItem::isPlayable)) +
-                recommendations +
-                favorites +
-                recent +
-                activeQueue +
-                songs
-            )
-            .filterPlayableDistinct()
-    }
+    private suspend fun loadFreshAutoPicksCandidates(mode: MusicListeningMode): List<MusicItem> =
+        repository.loadAutoPicksQueue(
+            seed = trustedCurrentPlaybackItem(),
+            limit = MIX_TRACK_LIMIT,
+            listeningMode = mode,
+        )
 
     private fun cachedMixCandidates(mix: PtvMusicAutoMix): List<MusicItem> {
         val activeQueue = activeQueueCandidates()
@@ -1191,7 +1439,7 @@ internal class PtvMusicLibrarySessionCallback(
     ): MusicItem? {
         val scope = expectedScope ?: return null
         if (syncBrowseScope() != scope) return null
-        val itemId = PtvMusicAutoIds.itemIdFromMediaId(this) ?: return null
+        val itemId = toPlaylistTrackSelection()?.trackId ?: PtvMusicAutoIds.itemIdFromMediaId(this) ?: return null
         itemCache[scope to itemId]?.let { cached -> return cached.takeIf { syncBrowseScope() == scope } }
         val loaded = repository.loadItem(itemId) ?: return null
         synchronized(browseScopeLock) {
@@ -1202,6 +1450,7 @@ internal class PtvMusicLibrarySessionCallback(
     }
 
     private suspend fun MusicItem.resolvePlaybackQueue(scope: PtvMusicAutoBrowseScope): List<MusicItem> {
+        if (type == BaseItemKind.PLAYLIST) return loadFullPlaylistQueue(this, scope)
         if (isPlayable) {
             if (syncBrowseScope() != scope) {
                 throw IllegalStateException("PTV Music Auto account changed while resolving playback")
@@ -1222,6 +1471,29 @@ internal class PtvMusicLibrarySessionCallback(
         return children
             .filter(MusicItem::isPlayable)
             .ifEmpty { listOf(this).filter(MusicItem::isPlayable) }
+    }
+
+    private suspend fun loadPlaylistParent(playlistId: UUID, scope: PtvMusicAutoBrowseScope): MusicItem {
+        if (syncBrowseScope() != scope) {
+            throw IllegalStateException("PTV Music Auto account changed while loading playlist")
+        }
+        val parent = itemCache[scope to playlistId] ?: repository.loadItem(playlistId)
+        if (parent?.type != BaseItemKind.PLAYLIST) {
+            throw UnsupportedOperationException("PTV Music Auto could not find the selected playlist.")
+        }
+        rememberItems(listOf(parent), scope, cachePlaybackQueue = false)
+        return parent
+    }
+
+    private suspend fun loadFullPlaylistQueue(playlist: MusicItem, scope: PtvMusicAutoBrowseScope): List<MusicItem> {
+        if (syncBrowseScope() != scope) {
+            throw IllegalStateException("PTV Music Auto account changed while loading playlist")
+        }
+        val tracks = repository.loadPlaylistQueue(playlist)
+        if (syncBrowseScope() != scope) {
+            throw IllegalStateException("PTV Music Auto account changed while loading playlist")
+        }
+        return tracks
     }
 
     private suspend fun loadMediaItemsWithCache(
@@ -1306,6 +1578,27 @@ internal class PtvMusicLibrarySessionCallback(
 
     private fun requireCurrentSelectionIdentity(identity: AutoSelectionIdentity) {
         check(isSelectionIdentityCurrent(identity)) { "PTV Music Auto account changed while selecting music." }
+    }
+
+    private fun requireCurrentSelectionGeneration(identity: AutoSelectionIdentity, selectionGeneration: Long) {
+        synchronized(browseScopeLock) {
+            requireCurrentSelectionIdentity(identity)
+            check(recommendationGeneration == selectionGeneration) {
+                "PTV Music Auto selected another queue while music loaded."
+            }
+        }
+    }
+
+    private fun commitReplacementSelection(
+        identity: AutoSelectionIdentity,
+        selectionGeneration: Long,
+        startPlayback: () -> Unit,
+    ) {
+        synchronized(browseScopeLock) {
+            requireCurrentSelectionGeneration(identity, selectionGeneration)
+            startPlayback()
+            clearRecommendationSessionLocked()
+        }
     }
 
     private suspend fun handleToggleShuffle() {
@@ -1438,6 +1731,13 @@ internal class PtvMusicLibrarySessionCallback(
         return items.map { item -> item.toAutoMediaItem() }
     }
 
+    private fun MusicPage.toPlaylistMediaItems(scope: PtvMusicAutoBrowseScope, playlistId: UUID): List<MediaItem> {
+        rememberItems(items, scope, cachePlaybackQueue = false)
+        return items.mapIndexed { index, item ->
+            item.toAutoMediaItem(playlistTrackMediaId(playlistId, startIndex + index, item.id))
+        }
+    }
+
     private fun List<MusicItem>.toMediaItems(scope: PtvMusicAutoBrowseScope): List<MediaItem> {
         rememberItems(this, scope)
         return map { item -> item.toAutoMediaItem() }
@@ -1470,15 +1770,372 @@ internal class PtvMusicLibrarySessionCallback(
         return pageItems.map { item -> item.toAutoMediaItem() }
     }
 
-    private fun rememberItems(items: List<MusicItem>, expectedScope: PtvMusicAutoBrowseScope) {
+    private fun rememberItems(
+        items: List<MusicItem>,
+        expectedScope: PtvMusicAutoBrowseScope,
+        cachePlaybackQueue: Boolean = true,
+    ) {
         synchronized(browseScopeLock) {
             if (syncBrowseScope() != expectedScope) {
                 throw IllegalStateException("PTV Music Auto account changed while loading music")
             }
             items.forEach { item -> itemCache[expectedScope to item.id] = item }
-            val playableQueue = items.filter(MusicItem::isPlayable)
-            playableQueue.forEach { item -> queueCache[expectedScope to item.id] = playableQueue }
+            if (cachePlaybackQueue) {
+                val playableQueue = items.filter(MusicItem::isPlayable)
+                playableQueue.forEach { item -> queueCache[expectedScope to item.id] = playableQueue }
+            }
         }
+    }
+
+    private fun listeningModeFor(scope: PtvMusicAutoBrowseScope): MusicListeningMode = synchronized(browseScopeLock) {
+        selectedListeningMode?.takeIf { it.first == scope }?.second
+            ?: MusicListeningMode.BALANCED_DISCOVERY
+    }
+
+    private fun selectListeningMode(scope: PtvMusicAutoBrowseScope, mode: MusicListeningMode) {
+        synchronized(browseScopeLock) {
+            check(syncBrowseScope() == scope) { "PTV Music Auto account changed while choosing a listening mode" }
+            if (listeningModeFor(scope) != mode) {
+                generatedQueueCache.clear()
+                selectedListeningMode = scope to mode
+            }
+        }
+    }
+
+    private fun activateRecommendationSession(
+        identity: AutoSelectionIdentity,
+        selectionGeneration: Long,
+        context: MusicRecommendationSessionContext,
+        queue: List<MusicItem>,
+        startPlayback: () -> Unit,
+    ) {
+        synchronized(browseScopeLock) {
+            requireCurrentSelectionIdentity(identity)
+            check(recommendationOwnerMatchesIdentity(context, identity)) {
+                "PTV Music Auto recommendation session belongs to another account."
+            }
+            check(recommendationGeneration == selectionGeneration) {
+                "PTV Music Auto selected another queue while recommendations loaded."
+            }
+            check(context.selectedMode == listeningModeFor(identity.scope)) {
+                "PTV Music Auto listening mode changed while recommendations loaded."
+            }
+            val itemIds = queue.map(MusicItem::id).toMutableSet()
+            check(itemIds.isNotEmpty() && context.recommendedIds.containsAll(itemIds)) {
+                "PTV Music Auto recommendation session did not authorize the selected queue."
+            }
+            startPlayback()
+            clearRecommendationSessionLocked()
+            recommendationSession = ActiveRecommendationSession(identity, recommendationGeneration, context, itemIds)
+            recommendationStateJob = ioScope.launch {
+                playbackController.state.collect(::observeRecommendationPlaybackState)
+            }
+            recommendationTransitionJob = ioScope.launch {
+                playbackController.transitionEvents.collect(::recordVerifiedRecommendationTransition)
+            }
+        }
+    }
+
+    private fun recommendationOwnerMatchesIdentity(
+        context: MusicRecommendationSessionContext,
+        identity: AutoSelectionIdentity,
+    ): Boolean {
+        val serverId = identity.scope.serverId.toLongOrNull() ?: return false
+        val userId = identity.scope.userId.toUUIDOrNull() ?: return false
+        if (identity.localOwner.serverId != serverId) return false
+        val serverUrl = serverUrlForLocalId(serverId)?.trimEnd('/')?.takeIf(String::isNotBlank) ?: return false
+        return context.owner.serverUrl.trimEnd('/') == serverUrl && context.owner.userId == userId
+    }
+
+    private fun observeRecommendationPlaybackState(state: MusicPlaybackState) {
+        val request = synchronized(browseScopeLock) {
+            val session = recommendationSession ?: return@synchronized null
+            if (!isSelectionIdentityCurrent(session.identity)) {
+                clearRecommendationSessionLocked()
+                return@synchronized null
+            }
+            val ownsExpectedQueue = recommendationQueueMatches(state, session)
+            if (!session.activated) {
+                if (!ownsExpectedQueue) return@synchronized null
+                session.activated = true
+            } else if (!ownsExpectedQueue) {
+                clearRecommendationSessionLocked()
+                return@synchronized null
+            }
+            val current = state.currentItem ?: return@synchronized null
+            if (!canRequestRecommendationRefill(state, session, current)) return@synchronized null
+            if (session.refillFailureItemId != current.id) {
+                session.refillFailureItemId = current.id
+                session.refillFailureCount = 0
+            }
+            session.lastRefillItemId = current.id
+            session.refillInFlight = true
+            session.refillSerial++
+            RecommendationRefillRequest(
+                session = session,
+                context = session.context,
+                currentItem = current,
+                expectedItemIds = session.expectedItemIds.toSet(),
+                serial = session.refillSerial,
+            )
+        } ?: return
+
+        launchRecommendationRefill(request)
+    }
+
+    private fun recommendationQueueMatches(state: MusicPlaybackState, session: ActiveRecommendationSession): Boolean =
+        state.queueOwner == session.identity.localOwner &&
+            state.queue.size == session.expectedItemIds.size &&
+            state.queue.map(MusicItem::id).toSet() == session.expectedItemIds
+
+    private fun canRequestRecommendationRefill(
+        state: MusicPlaybackState,
+        session: ActiveRecommendationSession,
+        current: MusicItem,
+    ): Boolean {
+        val authenticatedQueue = playbackController.isCurrentQueueOwnedByAuthenticatedUser()
+        val playbackIsActive = authenticatedQueue && (state.isPlaying || state.isBuffering)
+        val playbackIsCurrent = playbackIsActive && state.currentIndex in state.queue.indices
+        if (!playbackIsCurrent) return false
+        val currentIsRecommended = state.queue[state.currentIndex].id == current.id &&
+            current.id in session.context.recommendedIds
+        if (!currentIsRecommended) return false
+        val refillIsDue = state.queue.size - state.currentIndex - 1 <= AUTO_RECOMMENDATION_PREFETCH_REMAINING &&
+            !session.context.catalogExhausted &&
+            !session.refillInFlight
+        return refillIsDue && session.lastRefillItemId != current.id
+    }
+
+    private fun launchRecommendationRefill(request: RecommendationRefillRequest) {
+        val job = ioScope.launch {
+            try {
+                val failure = runCatching {
+                    val batch = repository.replenishAutoRecommendations(request.context, request.currentItem)
+                    applyRecommendationRefill(request, batch)
+                }.exceptionOrNull()
+                if (failure != null) {
+                    if (failure is CancellationException || failure !is Exception) throw failure
+                    val retryDelayMs = retryDelayAfterRefillFailure(request)
+                    Timber.w(failure, "PTV Music Auto recommendation refill unavailable retryDelayMs=$retryDelayMs")
+                    if (retryDelayMs != null) delay(retryDelayMs)
+                }
+            } finally {
+                val recheckCurrentState = synchronized(browseScopeLock) {
+                    if (recommendationSession === request.session && request.session.refillSerial == request.serial) {
+                        request.session.refillInFlight = false
+                        true
+                    } else {
+                        false
+                    }
+                }
+                if (recheckCurrentState) observeRecommendationPlaybackState(playbackController.state.value)
+            }
+        }
+        synchronized(browseScopeLock) {
+            if (recommendationSession === request.session && request.session.refillSerial == request.serial) {
+                recommendationRefillJob = job
+            } else {
+                job.cancel()
+            }
+        }
+    }
+
+    private fun retryDelayAfterRefillFailure(request: RecommendationRefillRequest): Long? =
+        synchronized(browseScopeLock) {
+            val session = recommendationSession ?: return@synchronized null
+            val sameRequest = session === request.session && session.refillSerial == request.serial
+            val sameContext = session.context === request.context
+            if (!sameRequest || !sameContext || !isSelectionIdentityCurrent(session.identity)) {
+                return@synchronized null
+            }
+            if (!isCurrentRecommendationRefillPlayback(playbackController.state.value, session, request)) {
+                return@synchronized null
+            }
+            if (session.refillFailureCount >= MAX_AUTO_RECOMMENDATION_SAME_SONG_RETRIES) return@synchronized null
+            session.refillFailureCount++
+            session.lastRefillItemId = null
+            AUTO_RECOMMENDATION_RETRY_DELAY_MS * session.refillFailureCount
+        }
+
+    private suspend fun applyRecommendationRefill(
+        request: RecommendationRefillRequest,
+        batch: MusicRecommendationBatch,
+    ) = withContext(playerDispatcher) {
+        val freshItems = batch.items.filter(MusicItem::isPlayable)
+            .distinctBy(MusicItem::id)
+            .filterNot { it.id in request.expectedItemIds }
+        synchronized(browseScopeLock) {
+            val session = recommendationSession ?: return@synchronized
+            if (!isCurrentRecommendationRefill(session, request, batch, freshItems)) return@synchronized
+            val state = playbackController.state.value
+            if (!isCurrentRecommendationRefillPlayback(state, session, request)) return@synchronized
+            if (freshItems.isEmpty()) {
+                session.context = batch.context
+                return@synchronized
+            }
+            val retainedQueue = (state.queue + freshItems)
+                .drop((state.currentIndex - AUTO_RECOMMENDATION_PREVIOUS_WINDOW).coerceAtLeast(0))
+                .take(MAX_AUTO_RECOMMENDATION_RESIDENT_QUEUE)
+            val retainedIds = retainedQueue.map(MusicItem::id)
+            if (request.currentItem.id !in retainedIds ||
+                !retainedIds.containsAll(freshItems.map(MusicItem::id))
+            ) {
+                return@synchronized
+            }
+            applyRetainedRecommendationQueue(session, batch, retainedQueue, retainedIds)
+        }
+    }
+
+    private fun isCurrentRecommendationRefill(
+        session: ActiveRecommendationSession,
+        request: RecommendationRefillRequest,
+        batch: MusicRecommendationBatch,
+        freshItems: List<MusicItem>,
+    ): Boolean {
+        if (session !== request.session || session.refillSerial != request.serial) return false
+        if (session.context !== request.context || session.context.revision != request.context.revision) return false
+        if (
+            session.expectedItemIds != request.expectedItemIds ||
+            !isSelectionIdentityCurrent(session.identity)
+        ) {
+            return false
+        }
+        return isValidRecommendationBatch(batch, request, freshItems)
+    }
+
+    private fun isValidRecommendationBatch(
+        batch: MusicRecommendationBatch,
+        request: RecommendationRefillRequest,
+        freshItems: List<MusicItem>,
+    ): Boolean {
+        val context = batch.context
+        if (context.owner != request.context.owner || context.selectedMode != request.context.selectedMode ||
+            context.seed.id != request.context.seed.id
+        ) {
+            return false
+        }
+        if (context.revision <= request.context.revision || context.catalogOffset < request.context.catalogOffset) {
+            return false
+        }
+        return context.recommendedIds.containsAll(freshItems.map(MusicItem::id))
+    }
+
+    private fun isCurrentRecommendationRefillPlayback(
+        state: MusicPlaybackState,
+        session: ActiveRecommendationSession,
+        request: RecommendationRefillRequest,
+    ): Boolean {
+        if (state.queueOwner != session.identity.localOwner ||
+            !playbackController.isCurrentQueueOwnedByAuthenticatedUser() ||
+            state.currentItem?.id != request.currentItem.id
+        ) {
+            return false
+        }
+        if (
+            state.currentIndex !in state.queue.indices ||
+            state.queue[state.currentIndex].id != request.currentItem.id
+        ) {
+            return false
+        }
+        return state.queue.size == request.expectedItemIds.size &&
+            state.queue.map(MusicItem::id).toSet() == request.expectedItemIds
+    }
+
+    private fun applyRetainedRecommendationQueue(
+        session: ActiveRecommendationSession,
+        batch: MusicRecommendationBatch,
+        retainedQueue: List<MusicItem>,
+        retainedIds: List<UUID>,
+    ) {
+        if (!playbackController.replaceQueueKeepingCurrent(
+                retainedQueue,
+                "autoRecommendationRefill",
+                preservePlaybackOrder = true,
+            )
+        ) {
+            return
+        }
+        val residentQueue = playbackController.state.value.queue
+        if (residentQueue.map(MusicItem::id) != retainedIds) {
+            clearRecommendationSessionLocked()
+            return
+        }
+        val residentIds = retainedIds.toSet()
+        val droppedIds = session.expectedItemIds - residentIds
+        droppedIds.forEach { id ->
+            queueCache.remove(session.identity.scope to id)
+            itemCache.remove(session.identity.scope to id)
+        }
+        session.expectedItemIds.clear()
+        session.expectedItemIds.addAll(residentIds)
+        session.context = batch.context
+        rememberItems(residentQueue, session.identity.scope)
+    }
+
+    private fun recordVerifiedRecommendationTransition(event: MusicPlaybackTransitionEvent) {
+        val state = playbackController.state.value
+        synchronized(browseScopeLock) {
+            val session = recommendationSession ?: return
+            if (!isVerifiedRecommendationTransition(event, state, session)) return
+            session.context = when (event.reason) {
+                MusicPlaybackTransitionReason.NATURAL ->
+                    session.context.recordPlayed(state.queue[event.previousIndex])
+
+                MusicPlaybackTransitionReason.EXPLICIT_SKIP ->
+                    session.context.recordSkipped(event.previousItemId)
+            }
+            session.lastRefillItemId = null
+            session.refillFailureItemId = null
+            session.refillFailureCount = 0
+            session.refillSerial++
+            session.refillInFlight = false
+            recommendationRefillJob?.cancel()
+            recommendationRefillJob = null
+        }
+        observeRecommendationPlaybackState(state)
+    }
+
+    private fun isVerifiedRecommendationTransition(
+        event: MusicPlaybackTransitionEvent,
+        state: MusicPlaybackState,
+        session: ActiveRecommendationSession,
+    ): Boolean {
+        if (!session.activated || !isSelectionIdentityCurrent(session.identity)) return false
+        if (event.owner != session.identity.localOwner || state.queueOwner != event.owner ||
+            !playbackController.isCurrentQueueOwnedByAuthenticatedUser()
+        ) {
+            return false
+        }
+        return transitionEntriesMatchQueue(event, state) &&
+            recommendationQueueMatches(state, session) &&
+            transitionMatchesCurrentItem(event, state, session)
+    }
+
+    private fun transitionEntriesMatchQueue(event: MusicPlaybackTransitionEvent, state: MusicPlaybackState): Boolean {
+        if (event.previousIndex !in state.queue.indices || event.nextIndex !in state.queue.indices) return false
+        return state.queue[event.previousIndex].id == event.previousItemId &&
+            state.queue[event.nextIndex].id == event.nextItemId
+    }
+
+    private fun transitionMatchesCurrentItem(
+        event: MusicPlaybackTransitionEvent,
+        state: MusicPlaybackState,
+        session: ActiveRecommendationSession,
+    ): Boolean {
+        val currentMatches = state.currentIndex == event.nextIndex && state.currentItem?.id == event.nextItemId
+        return currentMatches && event.previousItemId in session.expectedItemIds &&
+            event.nextItemId in session.expectedItemIds
+    }
+
+    private fun clearRecommendationSessionLocked() {
+        recommendationGeneration++
+        recommendationSession = null
+        recommendationStateJob?.cancel()
+        recommendationTransitionJob?.cancel()
+        recommendationRefillJob?.cancel()
+        recommendationStateJob = null
+        recommendationTransitionJob = null
+        recommendationRefillJob = null
     }
 
     private fun syncBrowseScope(): PtvMusicAutoBrowseScope? = synchronized(browseScopeLock) {
@@ -1486,18 +2143,24 @@ internal class PtvMusicLibrarySessionCallback(
         val currentOwner = resumeStore.currentLocalQueueOwner()
         val priorOwnerChanged = observeAuthenticatedOwnerTransition(currentScope, currentOwner)
         if (currentScope != observedBrowseScope) {
+            clearRecommendationSessionLocked()
             itemCache.clear()
             queueCache.clear()
             browseCache.clear()
             generatedQueueCache.clear()
+            generatedCacheSeed = null
+            selectedListeningMode = null
             observedBrowseScope = currentScope
             observedLocalOwner = currentOwner
             localOwnerChangedWithinScope = false
         } else if (currentOwner != observedLocalOwner) {
+            clearRecommendationSessionLocked()
             itemCache.clear()
             queueCache.clear()
             browseCache.clear()
             generatedQueueCache.clear()
+            generatedCacheSeed = null
+            selectedListeningMode = null
             if (priorOwnerChanged) {
                 observedLocalOwner = currentOwner
                 localOwnerChangedWithinScope = false
@@ -1606,6 +2269,20 @@ internal class PtvMusicLibrarySessionCallback(
         )
         .build()
 
+    private fun PtvMusicAutoListeningMode.toAutoMediaItem(selected: Boolean): MediaItem = MediaItem.Builder()
+        .setMediaId(mediaId)
+        .setMediaMetadata(
+            MediaMetadata.Builder()
+                .setTitle(title)
+                .setSubtitle(if (selected) "Selected · $subtitle" else subtitle)
+                .setIsBrowsable(true)
+                .setIsPlayable(false)
+                .setArtworkUri(R.drawable.ic_music_note_white_24dp.asResourceUri())
+                .setExtras(contentStyleExtras(grid = false, playable = false))
+                .build(),
+        )
+        .build()
+
     private fun PtvMusicAutoMoreItem.toAutoMediaItem(): MediaItem = MediaItem.Builder()
         .setMediaId(mediaId)
         .setMediaMetadata(
@@ -1620,10 +2297,11 @@ internal class PtvMusicLibrarySessionCallback(
         )
         .build()
 
-    private fun MusicItem.toAutoMediaItem(): MediaItem = MediaItem.Builder()
-        .setMediaId(toPtvMusicAutoDescriptor().mediaId)
-        .setMediaMetadata(toPtvMusicAutoDescriptor().toMediaMetadata())
-        .build()
+    private fun MusicItem.toAutoMediaItem(mediaId: String = toPtvMusicAutoDescriptor().mediaId): MediaItem =
+        MediaItem.Builder()
+            .setMediaId(mediaId)
+            .setMediaMetadata(toPtvMusicAutoDescriptor().toMediaMetadata())
+            .build()
 
     private fun PtvMusicAutoItemDescriptor.toMediaMetadata(fallbackArtworkUri: Uri? = null): MediaMetadata =
         MediaMetadata.Builder()
@@ -1671,6 +2349,25 @@ internal class PtvMusicLibrarySessionCallback(
     private fun List<MusicItem>.filterPlayableDistinct(): List<MusicItem> =
         filter(MusicItem::isPlayable).distinctBy(MusicItem::id)
 
+    private fun playlistTrackMediaId(playlistId: UUID, trackIndex: Int, trackId: UUID): String =
+        "$PLAYLIST_TRACK_PREFIX$playlistId:$trackIndex:$trackId"
+
+    private fun String.toPlaylistTrackSelection(): PlaylistTrackSelection? =
+        takeIf { it.startsWith(PLAYLIST_TRACK_PREFIX) }
+            ?.removePrefix(PLAYLIST_TRACK_PREFIX)
+            ?.split(':')
+            ?.takeIf { parts -> parts.size == PLAYLIST_TRACK_PART_COUNT }
+            ?.let { parts ->
+                val playlistId = parts[0].toUUIDOrNull()
+                val trackIndex = parts[1].toIntOrNull()?.takeIf { index -> index >= 0 }
+                val trackId = parts[2].toUUIDOrNull()
+                if (playlistId != null && trackIndex != null && trackId != null) {
+                    PlaylistTrackSelection(playlistId, trackIndex, trackId)
+                } else {
+                    null
+                }
+            }
+
     private fun String.isGeneratedQueueMediaId(): Boolean =
         this == PtvMusicAutoIds.AUTO_PICKS || PtvMusicAutoMix.fromMediaId(this) != null
 
@@ -1687,6 +2384,8 @@ internal class PtvMusicLibrarySessionCallback(
         .replace(Regex("\\s+"), " ")
 
     private companion object {
+        const val PLAYLIST_TRACK_PREFIX = "ptv:auto:playlist-track:"
+        const val PLAYLIST_TRACK_PART_COUNT = 3
         const val AUTO_BROWSE_ATTEMPTS = 2
         const val AUTO_BROWSE_TIMEOUT_MS = 12_000L
         const val AUTO_GENERATED_FRESH_TIMEOUT_MS = 3_500L
@@ -1696,6 +2395,12 @@ internal class PtvMusicLibrarySessionCallback(
         const val DEFAULT_PAGE_SIZE = 24
         const val DEFAULT_SEARCH_RESULT_COUNT = 50
         const val MIX_TRACK_LIMIT = 50
+        const val MAX_GENERATED_QUEUE_CACHE_ENTRIES = 12
+        const val AUTO_RECOMMENDATION_PREFETCH_REMAINING = 2
+        const val MAX_AUTO_RECOMMENDATION_SAME_SONG_RETRIES = 2
+        const val AUTO_RECOMMENDATION_RETRY_DELAY_MS = 500L
+        const val AUTO_RECOMMENDATION_PREVIOUS_WINDOW = 12
+        const val MAX_AUTO_RECOMMENDATION_RESIDENT_QUEUE = 100
         const val MAX_PAGE_SIZE = 100
         const val AUTO_PLAYLIST_NAME = "PTV Auto Picks"
     }

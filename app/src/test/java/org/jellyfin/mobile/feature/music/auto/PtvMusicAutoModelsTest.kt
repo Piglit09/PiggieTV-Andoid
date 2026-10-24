@@ -46,6 +46,7 @@ class PtvMusicAutoModelsTest {
             PtvMusicAutoCategory.ARTISTS.mediaId,
             PtvMusicAutoCategory.GENRES.mediaId,
             PtvMusicAutoIds.RECOMMENDED_MIXES,
+            PtvMusicAutoIds.LISTENING_MODES,
             PtvMusicAutoIds.AUTO_PICKS,
             PtvMusicAutoIds.MORE,
         )

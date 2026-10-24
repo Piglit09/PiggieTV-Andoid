@@ -247,20 +247,23 @@ internal object MusicQueueActions {
             return MusicQueueUpdateResult(queue, currentIndex, "${item.title} is already playing next.")
         }
 
-        val queueWithoutItem = queue.filterNot { queuedItem -> queuedItem.id == item.id }
-        val adjustedCurrentIndex = queueWithoutItem.indexOfFirst { queuedItem -> queuedItem.id == currentItem.id }
-            .takeIf { index -> index >= 0 }
-            ?: currentIndex.coerceIn(0, queueWithoutItem.lastIndex.coerceAtLeast(0))
+        // Move one existing occurrence, preferring the next one in playback order.
+        // Removing by ID would discard repeated entries in an authored playlist.
+        val existingIndex = queue.indices.firstOrNull { index ->
+            index > currentIndex && queue[index].id == item.id
+        } ?: queue.indexOfFirst { queuedItem -> queuedItem.id == item.id }
+        val queueWithoutItem = queue.toMutableList().apply {
+            if (existingIndex >= 0) removeAt(existingIndex)
+        }
+        val adjustedCurrentIndex = currentIndex - if (existingIndex in 0 until currentIndex) 1 else 0
         val insertIndex = (adjustedCurrentIndex + 1).coerceIn(0, queueWithoutItem.size)
-        val updatedQueue = queueWithoutItem.toMutableList().apply {
+        val updatedQueue = queueWithoutItem.apply {
             add(insertIndex, item)
         }
-        val updatedCurrentIndex = updatedQueue.indexOfFirst { queuedItem -> queuedItem.id == currentItem.id }
-            .coerceAtLeast(0)
 
         return MusicQueueUpdateResult(
             queue = updatedQueue,
-            currentIndex = updatedCurrentIndex,
+            currentIndex = adjustedCurrentIndex,
             message = "Playing ${item.title} next.",
         )
     }
@@ -327,6 +330,7 @@ internal object MusicGeneratedMixBuilder {
         notInterestedIds: Set<UUID>,
         maxTracks: Int,
         surface: MusicRecommendationSurface = MusicRecommendationSurface.RADIO,
+        listeningMode: MusicListeningMode? = null,
     ): List<MusicItem> = MusicRecommendationRanker.rank(
         seed = seed,
         groups = groups,
@@ -334,6 +338,7 @@ internal object MusicGeneratedMixBuilder {
         notInterestedIds = notInterestedIds,
         maxItems = maxTracks.coerceIn(MIN_TRACKS, MAX_TRACKS),
         surface = surface,
+        listeningMode = listeningMode,
     )
 
     private const val MIN_TRACKS = 25

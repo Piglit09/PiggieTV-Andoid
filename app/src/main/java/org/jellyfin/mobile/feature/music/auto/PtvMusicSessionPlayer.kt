@@ -24,6 +24,7 @@ import org.jellyfin.mobile.feature.music.MusicPlaybackController
 import org.jellyfin.mobile.feature.music.MusicPlaybackState
 import org.jellyfin.mobile.feature.music.MusicRepeatMode
 import timber.log.Timber
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArraySet
 
@@ -31,11 +32,13 @@ import java.util.concurrent.CopyOnWriteArraySet
 internal class PtvMusicSessionPlayer(
     private val playbackController: MusicPlaybackController,
     private val isAuthenticatedQueueOwner: () -> Boolean,
+    private val pendingQueueAuthenticationProof: () -> PtvMusicQueueAuthenticationProof? = { null },
 ) : ForwardingPlayer(playbackController.mediaSessionPlayer) {
     val instanceId: String = runtimeInstanceId(this)
     private val sessionListeners = CopyOnWriteArraySet<Player.Listener>()
     private val underlyingListeners = ConcurrentHashMap<Player.Listener, Player.Listener>()
     private var lastNotifiedSnapshot: PtvMusicAutoPlayerStateSnapshot? = null
+    private var pendingPlay: PendingPlayIntent? = null
 
     init {
         Timber.i(
@@ -194,7 +197,39 @@ internal class PtvMusicSessionPlayer(
     override fun getBufferedPercentage(): Int = if (visibleState().hasCurrent) super.getBufferedPercentage() else 0
 
     override fun play() {
-        if (visibleState().hasCurrent) playbackController.playCurrent()
+        val state = playbackController.state.value
+        if (visibleState(state).hasCurrent) {
+            pendingPlay = null
+            playbackController.playCurrent()
+            return
+        }
+
+        // A hidden queue may be awaiting the service's account proof. Retain only this Play,
+        // and only for the local owner and the exact proof request currently in flight.
+        pendingPlay = null
+        val proof = pendingQueueAuthenticationProof()
+        if (proof != null) {
+            val currentItem = state.currentItem
+            if (currentItem != null && canDeferPlay(state, currentItem, proof)) {
+                pendingPlay = PendingPlayIntent(
+                    requestedProof = proof,
+                    currentItemId = currentItem.id,
+                    currentIndex = state.currentIndex,
+                    queueSize = state.queue.size,
+                )
+            }
+        }
+    }
+
+    private fun canDeferPlay(
+        state: MusicPlaybackState,
+        currentItem: MusicItem,
+        proof: PtvMusicQueueAuthenticationProof,
+    ): Boolean {
+        val selectedItemMatchesQueue = state.queueOwner == proof.owner &&
+            state.currentIndex in state.queue.indices &&
+            state.queue[state.currentIndex].id == currentItem.id
+        return selectedItemMatchesQueue && playbackController.isCurrentQueueOwnedByAuthenticatedUser()
     }
 
     override fun setPlayWhenReady(playWhenReady: Boolean) {
@@ -202,6 +237,7 @@ internal class PtvMusicSessionPlayer(
     }
 
     override fun pause() {
+        cancelPendingPlay()
         playbackController.pause()
     }
 
@@ -284,10 +320,39 @@ internal class PtvMusicSessionPlayer(
     override fun setMediaItems(mediaItems: List<MediaItem>, startIndex: Int, startPositionMs: Long) = Unit
 
     override fun stop() {
+        cancelPendingPlay()
         playbackController.stop(source = "mediaSession")
     }
 
+    /** Called for direct notification actions and authentication failures outside this Player. */
+    fun cancelPendingPlay() {
+        pendingPlay = null
+    }
+
+    /** Task removal may retain the service only for this exact live proof request and Play intent. */
+    fun hasPendingPlayFor(requestedProof: PtvMusicQueueAuthenticationProof?): Boolean {
+        if (requestedProof == null) return false
+        discardStalePendingPlay()
+        return pendingPlay?.requestedProof === requestedProof
+    }
+
+    /** A deferred Play may start only after the service publishes the matching verified proof. */
+    fun onQueueAuthenticationVerified(
+        requestedProof: PtvMusicQueueAuthenticationProof,
+        verifiedProof: PtvMusicQueueAuthenticationProof,
+    ) {
+        val intent = pendingPlay ?: return
+        pendingPlay = null
+        val state = playbackController.state.value
+        val proofMatches = intent.requestedProof === requestedProof && requestedProof == verifiedProof
+        if (!proofMatches || !intent.matches(state) || !visibleState(state).hasCurrent) {
+            return
+        }
+        playbackController.playCurrent()
+    }
+
     fun notifyControllerStateChanged(state: MusicPlaybackState, force: Boolean = false) {
+        discardStalePendingPlay()
         val snapshot = visibleState(state).toAutoPlayerStateSnapshot()
         val previous = lastNotifiedSnapshot
         if (!force && snapshot == previous) return
@@ -346,6 +411,32 @@ internal class PtvMusicSessionPlayer(
     ): Boolean = previous == null ||
         current.currentItemId != previous.currentItemId ||
         current.currentIndex != previous.currentIndex
+
+    private fun discardStalePendingPlay() {
+        val intent = pendingPlay ?: return
+        val state = playbackController.state.value
+        val currentPendingProof = pendingQueueAuthenticationProof()
+        val queueIsCurrent = intent.matches(state) &&
+            playbackController.isCurrentQueueOwnedByAuthenticatedUser()
+        val proofIsCurrent = queueIsCurrent &&
+            (currentPendingProof?.let { it === intent.requestedProof } ?: isAuthenticatedQueueOwner())
+        if (!proofIsCurrent) {
+            pendingPlay = null
+        }
+    }
+
+    private data class PendingPlayIntent(
+        val requestedProof: PtvMusicQueueAuthenticationProof,
+        val currentItemId: UUID,
+        val currentIndex: Int,
+        val queueSize: Int,
+    ) {
+        fun matches(state: MusicPlaybackState): Boolean = state.queueOwner == requestedProof.owner &&
+            state.queue.size == queueSize &&
+            state.currentIndex == currentIndex &&
+            state.currentItem?.id == currentItemId &&
+            state.queue.getOrNull(currentIndex)?.id == currentItemId
+    }
 
     private fun canSeekInCurrentMediaItem(): Boolean = visibleState().hasCurrent &&
         liveDurationMs() > 0 &&
@@ -616,14 +707,15 @@ private class PtvMusicQueueTimeline(
     private val currentIndex: Int,
     private val currentDurationMs: Long,
 ) : Timeline() {
-    private val periodUids = queue.map { item -> "ptv-period-${item.id}" }
+    private val windowUids = queue.mapIndexed { index, item -> "ptv-window-${item.id}-$index" }
+    private val periodUids = queue.mapIndexed { index, item -> "ptv-period-${item.id}-$index" }
 
     override fun getWindowCount(): Int = queue.size
 
     override fun getWindow(windowIndex: Int, window: Window, defaultPositionProjectionUs: Long): Window {
         val durationUs = durationUsFor(windowIndex)
         return window.set(
-            queue[windowIndex].id.toString(),
+            windowUids[windowIndex],
             queue[windowIndex].toSessionMediaItem(),
             null,
             C.TIME_UNSET,
@@ -645,7 +737,7 @@ private class PtvMusicQueueTimeline(
     override fun getPeriod(periodIndex: Int, period: Period, setIds: Boolean): Period {
         val uid = periodUids[periodIndex]
         return period.set(
-            if (setIds) queue[periodIndex].id.toString() else null,
+            if (setIds) uid else null,
             uid,
             periodIndex,
             durationUsFor(periodIndex),

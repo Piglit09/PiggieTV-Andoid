@@ -1,7 +1,9 @@
 package org.jellyfin.mobile.feature.music.auto
 
+import io.kotest.matchers.shouldBe
 import io.kotest.matchers.types.shouldBeInstanceOf
 import io.mockk.coEvery
+import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
@@ -120,6 +122,73 @@ class PtvMusicAutoResumeCoordinatorTest {
 
         coordinator.restoreQueueIfNeeded().shouldBeInstanceOf<PtvMusicAutoRestoreResult.Failed>()
         verify(exactly = 0) { playbackController.restoreQueue(any(), any(), any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun `restore rebuilds repeated occurrences in saved order from unique repository items`() = runBlocking<Unit> {
+        val firstId = UUID.fromString(ITEM_ID)
+        val secondId = UUID.fromString("22222222-2222-2222-2222-222222222222")
+        val thirdId = UUID.fromString("33333333-3333-3333-3333-333333333333")
+        val first = playableItem(firstId)
+        val second = playableItem(secondId)
+        val third = playableItem(thirdId)
+        val repository = mockk<MusicRepository>()
+        val playbackController = mockk<MusicPlaybackController>()
+        val resumeStore = mockk<PtvMusicAutoResumeStore>(relaxed = true)
+        val owner = PtvMusicAutoQueueOwner(1, 2)
+        every { playbackController.state } returns MutableStateFlow(MusicPlaybackState())
+        every { resumeStore.currentLocalQueueOwner() } returns owner
+        every { resumeStore.loadPlaybackState() } returns savedState().copy(
+            queueItemIds = listOf(firstId, secondId, firstId, thirdId).map(UUID::toString),
+            currentIndex = 2,
+        )
+        coEvery { repository.loadItems(any()) } returns listOf(third, first, second)
+        every { playbackController.restoreQueue(any(), any(), any(), any(), any(), any()) } returns true
+
+        val result = PtvMusicAutoResumeCoordinator(repository, playbackController, resumeStore)
+            .restoreQueueIfNeeded().shouldBeInstanceOf<PtvMusicAutoRestoreResult.Restored>()
+
+        result.restoredCount shouldBe 4
+        result.missingCount shouldBe 0
+        coVerify(exactly = 1) { repository.loadItems(listOf(firstId, secondId, thirdId)) }
+        verify(exactly = 1) {
+            playbackController.restoreQueue(
+                listOf(first, second, first, third),
+                2,
+                12_000,
+                false,
+                MusicRepeatMode.NONE,
+                owner,
+            )
+        }
+    }
+
+    @Test
+    fun `missing earlier item rebases selected repeated occurrence without deduping it`() = runBlocking<Unit> {
+        val firstId = UUID.fromString(ITEM_ID)
+        val missingId = UUID.fromString("22222222-2222-2222-2222-222222222222")
+        val first = playableItem(firstId)
+        val repository = mockk<MusicRepository>()
+        val playbackController = mockk<MusicPlaybackController>()
+        val resumeStore = mockk<PtvMusicAutoResumeStore>(relaxed = true)
+        val owner = PtvMusicAutoQueueOwner(1, 2)
+        every { playbackController.state } returns MutableStateFlow(MusicPlaybackState())
+        every { resumeStore.currentLocalQueueOwner() } returns owner
+        every { resumeStore.loadPlaybackState() } returns savedState().copy(
+            queueItemIds = listOf(firstId, missingId, firstId).map(UUID::toString),
+            currentIndex = 2,
+        )
+        coEvery { repository.loadItems(any()) } returns listOf(first)
+        every { playbackController.restoreQueue(any(), any(), any(), any(), any(), any()) } returns true
+
+        val result = PtvMusicAutoResumeCoordinator(repository, playbackController, resumeStore)
+            .restoreQueueIfNeeded().shouldBeInstanceOf<PtvMusicAutoRestoreResult.Restored>()
+
+        result.restoredCount shouldBe 2
+        result.missingCount shouldBe 1
+        verify(exactly = 1) {
+            playbackController.restoreQueue(listOf(first, first), 1, 12_000, false, MusicRepeatMode.NONE, owner)
+        }
     }
 
     private fun savedState(ownerUserId: Long = 2) = PtvMusicAutoResumeState(

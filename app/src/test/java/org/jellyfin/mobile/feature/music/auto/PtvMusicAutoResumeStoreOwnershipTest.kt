@@ -12,6 +12,54 @@ import org.junit.jupiter.api.Test
 
 class PtvMusicAutoResumeStoreOwnershipTest {
     @Test
+    fun `missing selected owner retains saved queue until the account is available`() {
+        val context = mockk<Context>()
+        val preferences = mockk<AppPreferences>()
+        val sharedPreferences = mockk<SharedPreferences>()
+        val editor = mockk<SharedPreferences.Editor>()
+        val state = savedState().withOwner(serverId = 1, userId = 2)
+        var serverId: Long? = null
+        var userId: Long? = 2
+        every { context.getSharedPreferences(any(), Context.MODE_PRIVATE) } returns sharedPreferences
+        every { preferences.currentServerId } answers { serverId }
+        every { preferences.currentUserId } answers { userId }
+        every { sharedPreferences.getString(any(), any()) } returns PtvMusicAutoResumeStateSerializer.encode(state)
+        every { sharedPreferences.edit() } returns editor
+        every { editor.remove(any()) } returns editor
+        every { editor.apply() } returns Unit
+        val store = PtvMusicAutoResumeStore(context, preferences)
+
+        store.loadPlaybackState() shouldBe null
+        serverId = 1
+        userId = null
+        store.loadPlaybackState() shouldBe null
+        verify(exactly = 0) { editor.remove(any()) }
+
+        userId = 2
+        store.loadPlaybackState() shouldBe state
+        verify(exactly = 0) { sharedPreferences.edit() }
+    }
+
+    @Test
+    fun `known different selected owner removes the saved queue`() {
+        val context = mockk<Context>()
+        val preferences = mockk<AppPreferences>()
+        val sharedPreferences = mockk<SharedPreferences>()
+        val editor = mockk<SharedPreferences.Editor>()
+        val state = savedState().withOwner(serverId = 1, userId = 2)
+        every { context.getSharedPreferences(any(), Context.MODE_PRIVATE) } returns sharedPreferences
+        every { preferences.currentServerId } returns 1
+        every { preferences.currentUserId } returns 3
+        every { sharedPreferences.getString(any(), any()) } returns PtvMusicAutoResumeStateSerializer.encode(state)
+        every { sharedPreferences.edit() } returns editor
+        every { editor.remove(any()) } returns editor
+        every { editor.apply() } returns Unit
+
+        PtvMusicAutoResumeStore(context, preferences).loadPlaybackState() shouldBe null
+        verify(exactly = 1) { editor.remove("playback_state") }
+    }
+
+    @Test
     fun `old queue cannot be saved under a newly selected account`() {
         val context = mockk<Context>()
         val preferences = mockk<AppPreferences>()
@@ -50,4 +98,13 @@ class PtvMusicAutoResumeStoreOwnershipTest {
         PtvMusicAutoResumeStateSerializer.decode(savedValues.last())?.belongsTo(serverId, userId) shouldBe true
         verify(exactly = 2) { sharedPreferences.edit() }
     }
+
+    private fun savedState() = PtvMusicAutoResumeState(
+        queueItemIds = listOf("11111111-1111-1111-1111-111111111111"),
+        currentIndex = 0,
+        positionMs = 12_000,
+        shuffleEnabled = false,
+        repeatMode = MusicRepeatMode.NONE.name,
+        lastPlayedTimestampMs = 1,
+    )
 }
