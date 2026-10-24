@@ -27,6 +27,62 @@ function ConvertTo-PTVMobilePolicyPath {
     return [IO.Path]::GetFullPath($Path).TrimEnd([char[]]@('\', '/'))
 }
 
+function Assert-PTVMobileSharedWebV3Entry {
+    param([Parameter(Mandatory = $true)]$Project)
+    Assert-PTVMobilePolicyFields $Project @(
+        'projectId','state','sourceRoot','gitCommonDir','remote','artifactRoots',
+        'permissions','developmentDeployment'
+    )
+    foreach ($field in @('projectId','state','sourceRoot','gitCommonDir','remote')) {
+        if ($Project.$field -isnot [string]) { throw "Shared Web v3 $field must be a scalar string." }
+    }
+    if ($Project.artifactRoots -isnot [array] -or @($Project.artifactRoots).Count -ne 1 -or
+        $Project.artifactRoots[0] -isnot [string]) {
+        throw 'Shared Web v3 artifact root must be one scalar string.'
+    }
+    if ($Project.projectId -cne 'PTV_WEB' -or $Project.state -cne 'ACTIVE' -or
+        -not (ConvertTo-PTVMobilePolicyPath ([string]$Project.sourceRoot)).Equals(
+            'C:\Users\Piggie\Documents\GitHub\Jellyfin-Web-PiggieTV', [StringComparison]::OrdinalIgnoreCase) -or
+        -not (ConvertTo-PTVMobilePolicyPath ([string]$Project.gitCommonDir)).Equals(
+            'C:\Users\Piggie\Documents\GitHub\Jellyfin-Web-PiggieTV\.git', [StringComparison]::OrdinalIgnoreCase) -or
+        $Project.remote -cne 'https://github.com/Piglit09/PiggieTV-Jellyfin-web-app.git' -or
+        $Project.artifactRoots -isnot [array] -or @($Project.artifactRoots).Count -ne 1 -or
+        -not (ConvertTo-PTVMobilePolicyPath ([string]$Project.artifactRoots[0])).Equals(
+            'C:\Users\Piggie\Documents\GitHub\_PTV-Artifacts', [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Shared Web v3 source identity differs from the protected development entry.'
+    }
+    Assert-PTVMobilePolicyFields $Project.permissions @(
+        'sourceEdit','localBuild','debugPackage','testDeviceInstall','testDeploy125',
+        'githubPublish','productionDeploy50'
+    )
+    foreach ($permission in @('sourceEdit','localBuild','debugPackage','testDeviceInstall','testDeploy125','githubPublish','productionDeploy50')) {
+        if ($Project.permissions.$permission -isnot [bool]) { throw 'Shared Web permission must be a boolean.' }
+    }
+    if (-not $Project.permissions.sourceEdit -or -not $Project.permissions.localBuild -or
+        -not $Project.permissions.testDeploy125 -or $Project.permissions.debugPackage -or
+        $Project.permissions.testDeviceInstall -or $Project.permissions.githubPublish -or
+        $Project.permissions.productionDeploy50) {
+        throw 'Shared Web v3 permissions differ from the protected development entry.'
+    }
+    Assert-PTVMobilePolicyFields $Project.developmentDeployment @(
+        'environmentId','host','serverId','serverName','webTargetPath','pluginTargetRoot'
+    )
+    $deployment = $Project.developmentDeployment
+    foreach ($field in @('environmentId','host','serverId','serverName','webTargetPath','pluginTargetRoot')) {
+        if ($deployment.$field -isnot [string]) { throw "Shared Web v3 deployment $field must be a scalar string." }
+    }
+    if ($deployment.environmentId -cne 'JF_DEVELOPMENT_125' -or
+        $deployment.host -cne '10.16.0.125' -or
+        $deployment.serverId -cne 'c1858e3f2d09468fb546ad9cfe438283' -or
+        $deployment.serverName -cne 'PTV Testing' -or
+        -not (ConvertTo-PTVMobilePolicyPath ([string]$deployment.webTargetPath)).Equals(
+            'C:\Program Files\Jellyfin\Server\jellyfin-web', [StringComparison]::OrdinalIgnoreCase) -or
+        -not (ConvertTo-PTVMobilePolicyPath ([string]$deployment.pluginTargetRoot)).Equals(
+            'C:\JFData\plugins\PiggieTV_Plugin (testing)', [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Shared Web v3 deployment target differs from the protected development entry.'
+    }
+}
+
 function Resolve-PTVMobilePolicyFormat {
     param([Parameter(Mandatory = $true)]$Policy, [int]$MinimumSchemaVersion = 1)
     if ($MinimumSchemaVersion -notin @(1,2,3) -or $null -eq $Policy -or $Policy -isnot [pscustomobject]) {
@@ -44,7 +100,8 @@ function Resolve-PTVMobilePolicyFormat {
     }
     if ($hasVersion -or $hasProjects) { throw 'Partial shared policy cannot fall back to legacy authority.' }
     if ($MinimumSchemaVersion -ge 2) { throw 'Legacy policy is denied by the protected minimum schema marker.' }
-    if ($fields -cnotcontains 'projectId' -or $Policy.projectId -cne 'PTV_WEBOS') {
+    if ($fields -cnotcontains 'projectId' -or $Policy.projectId -isnot [string] -or
+        $Policy.projectId -cne 'PTV_WEBOS') {
         throw 'Only the protected legacy webOS policy may occupy the shared value.'
     }
     return 'LegacyWebOS'
@@ -62,18 +119,21 @@ function Resolve-PTVMobileSharedPolicy {
         [Parameter(Mandatory = $true)][string]$Mode
     )
     Assert-PTVMobilePolicyFields $Policy @('schemaVersion','policyId','issuedUtc','expiresUtc','projects','approvals')
+    foreach ($field in @('policyId','issuedUtc','expiresUtc')) {
+        if ($Policy.$field -isnot [string]) { throw "Shared policy $field must be a scalar string." }
+    }
     if (($Policy.schemaVersion -isnot [int] -and $Policy.schemaVersion -isnot [long]) -or $Policy.schemaVersion -notin @(2,3) -or
-        [string]::IsNullOrWhiteSpace([string]$Policy.policyId)) {
+        [string]::IsNullOrWhiteSpace($Policy.policyId)) {
         throw 'Shared policy version or identity is invalid.'
     }
     foreach ($field in @('issuedUtc','expiresUtc')) {
-        $value = [string]$Policy.$field
+        $value = $Policy.$field
         if ($value -cnotmatch '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$') {
             throw "Shared policy $field is not an ISO UTC timestamp."
         }
     }
-    $issued = [DateTimeOffset]::Parse([string]$Policy.issuedUtc)
-    $expiry = [DateTimeOffset]::Parse([string]$Policy.expiresUtc)
+    $issued = [DateTimeOffset]::Parse($Policy.issuedUtc)
+    $expiry = [DateTimeOffset]::Parse($Policy.expiresUtc)
     if ($issued -gt [DateTimeOffset]::UtcNow -or $expiry -le [DateTimeOffset]::UtcNow -or $expiry -le $issued) {
         throw 'Shared policy issue or expiry time is invalid.'
     }
@@ -87,30 +147,47 @@ function Resolve-PTVMobileSharedPolicy {
     $selected = $null
     foreach ($project in $Policy.projects) {
         if ($null -eq $project -or $project -isnot [pscustomobject]) { throw 'Shared project is malformed.' }
-        $id = [string]$project.projectId
+        foreach ($field in @('projectId','state')) {
+            if ($project.$field -isnot [string]) { throw "Shared project $field must be a scalar string." }
+        }
+        $id = $project.projectId
         if ($known -cnotcontains $id -or $seen.ContainsKey($id)) { throw 'Shared project identity is unknown or duplicated.' }
         $seen[$id] = $true
         if ($project.state -ceq 'HOLD') {
             Assert-PTVMobilePolicyFields $project @('projectId','state','reason')
-            if ([string]::IsNullOrWhiteSpace([string]$project.reason)) { throw 'HOLD reason is absent.' }
+            if ($project.reason -isnot [string] -or [string]::IsNullOrWhiteSpace($project.reason)) {
+                throw 'HOLD reason must be a nonempty scalar string.'
+            }
         } elseif ($project.state -ceq 'ACTIVE') {
+            foreach ($field in @('sourceRoot','gitCommonDir','remote')) {
+                if ($project.$field -isnot [string]) { throw "Shared project $field must be a scalar string." }
+            }
             if ($Policy.schemaVersion -eq 2) {
                 Assert-PTVMobilePolicyFields $project @('projectId','state','sourceRoot','gitCommonDir','remote','applicationId','versionSource','artifactRoots','allowedModes','packageEnabled','externalOperations')
             } else {
-                Assert-PTVMobilePolicyFields $project @('projectId','state','sourceRoot','gitCommonDir','remote','applicationId','versionSource','artifactRoots','permissions')
-                Assert-PTVMobilePolicyFields $project.permissions @('sourceEdit','localBuild','debugPackage','testDeviceInstall','testDeploy125','githubPublish','productionDeploy50')
-                foreach ($permission in @('sourceEdit','localBuild','debugPackage','testDeviceInstall','testDeploy125','githubPublish','productionDeploy50')) {
-                    if ($project.permissions.$permission -isnot [bool]) { throw 'Shared project permission must be a boolean.' }
-                }
-                if ($id -eq 'PTV_WEBOS' -and $project.permissions.debugPackage) {
-                    throw 'webOS cannot authorize Android debug packaging.'
-                }
-                if ($project.permissions.testDeviceInstall -or $project.permissions.testDeploy125 -or
-                    $project.permissions.githubPublish -or $project.permissions.productionDeploy50) {
-                    throw 'Shared v3 policy cannot grant unimplemented external operations.'
+                if ($id -ceq 'PTV_WEB') {
+                    Assert-PTVMobileSharedWebV3Entry $project
+                } else {
+                    Assert-PTVMobilePolicyFields $project @('projectId','state','sourceRoot','gitCommonDir','remote','applicationId','versionSource','artifactRoots','permissions')
+                    Assert-PTVMobilePolicyFields $project.permissions @('sourceEdit','localBuild','debugPackage','testDeviceInstall','testDeploy125','githubPublish','productionDeploy50')
+                    foreach ($permission in @('sourceEdit','localBuild','debugPackage','testDeviceInstall','testDeploy125','githubPublish','productionDeploy50')) {
+                        if ($project.permissions.$permission -isnot [bool]) { throw 'Shared project permission must be a boolean.' }
+                    }
+                    if ($id -eq 'PTV_WEBOS' -and $project.permissions.debugPackage) {
+                        throw 'webOS cannot authorize Android debug packaging.'
+                    }
+                    if ($project.permissions.testDeviceInstall -or $project.permissions.testDeploy125 -or
+                        $project.permissions.githubPublish -or $project.permissions.productionDeploy50) {
+                        throw 'Shared v3 policy cannot grant unimplemented external operations.'
+                    }
                 }
             }
-            if ($id -ceq 'PTV_WEB') { throw 'PTV Web authority remains on HOLD.' }
+            if ($Policy.schemaVersion -eq 2 -or $id -cne 'PTV_WEB') {
+                foreach ($field in @('applicationId','versionSource')) {
+                    if ($project.$field -isnot [string]) { throw "Shared project $field must be a scalar string." }
+                }
+            }
+            if ($id -ceq 'PTV_WEB' -and $Policy.schemaVersion -eq 2) { throw 'PTV Web is not authorized in shared v2.' }
             $projectRoot = ConvertTo-PTVMobilePolicyPath ([string]$project.sourceRoot)
             $projectCommon = ConvertTo-PTVMobilePolicyPath ([string]$project.gitCommonDir)
             if (-not $projectCommon.Equals(($projectRoot + '\.git'), [StringComparison]::OrdinalIgnoreCase)) {
@@ -125,12 +202,16 @@ function Resolve-PTVMobileSharedPolicy {
             }
             $roots += $projectRoot
             if ([string]::IsNullOrWhiteSpace([string]$project.remote) -or
-                [string]::IsNullOrWhiteSpace([string]$project.applicationId) -or
-                [string]::IsNullOrWhiteSpace([string]$project.versionSource) -or
-                $project.artifactRoots -isnot [array] -or @($project.artifactRoots).Count -lt 1) {
+                $project.artifactRoots -isnot [array] -or @($project.artifactRoots).Count -lt 1 -or
+                ($id -cne 'PTV_WEB' -and
+                    ([string]::IsNullOrWhiteSpace([string]$project.applicationId) -or
+                     [string]::IsNullOrWhiteSpace([string]$project.versionSource)))) {
                 throw 'Shared project source or permissions are invalid.'
             }
-            foreach ($artifactPath in $project.artifactRoots) { $null = ConvertTo-PTVMobilePolicyPath ([string]$artifactPath) }
+            foreach ($artifactPath in $project.artifactRoots) {
+                if ($artifactPath -isnot [string]) { throw 'Shared artifact root must be a scalar string.' }
+                $null = ConvertTo-PTVMobilePolicyPath $artifactPath
+            }
             if ($Policy.schemaVersion -eq 2) {
                 if ($project.allowedModes -isnot [array] -or $project.externalOperations -isnot [array] -or
                     $project.packageEnabled -isnot [bool] -or $project.packageEnabled -or

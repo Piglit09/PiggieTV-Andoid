@@ -31,6 +31,15 @@ function Resolve-Fixture {
     Resolve-PTVMobileSharedPolicy -Policy $Policy -Root $sourceRoot -CommonDirectory "$sourceRoot\.git" -Remote 'https://github.com/Piglit09/PiggieTV-Andoid.git' -ApplicationId 'com.piggietv.android' -VersionSource 'gradle.properties:piggietv.version' -ArtifactRoot $artifactRoot -Mode $Mode
 }
 Assert-Case 'valid exact mobile build entry' { Resolve-Fixture (Copy-Policy) } $true
+Assert-Case 'v2 singleton array policy ID rejected' {
+    $p=Copy-Policy; $p.policyId=@('fixture-v2'); Resolve-Fixture $p
+} $false
+Assert-Case 'v2 singleton array issued UTC rejected' {
+    $p=Copy-Policy; $p.issuedUtc=@('2026-10-19T00:00:00Z'); Resolve-Fixture $p
+} $false
+Assert-Case 'v2 singleton array expires UTC rejected' {
+    $p=Copy-Policy; $p.expiresUtc=@('2099-10-19T00:00:00Z'); Resolve-Fixture $p
+} $false
 Assert-Case 'cross-project entry cannot authorize mobile' {
     $p=Copy-Policy; $p.projects=@($p.projects | Where-Object projectId -ne 'PTV_ANDROID_MOBILE'); Resolve-Fixture $p
 } $false
@@ -69,6 +78,133 @@ foreach ($entry in $development.projects) {
     })
 }
 function Copy-DevelopmentPolicy { return (($development | ConvertTo-Json -Depth 20 -Compress) | ConvertFrom-Json) }
+$activeWeb = Copy-DevelopmentPolicy
+$activeWeb.projects[0] = [pscustomobject]@{
+    projectId='PTV_WEB'; state='ACTIVE'
+    sourceRoot='C:\Users\Piggie\Documents\GitHub\Jellyfin-Web-PiggieTV'
+    gitCommonDir='C:\Users\Piggie\Documents\GitHub\Jellyfin-Web-PiggieTV\.git'
+    remote='https://github.com/Piglit09/PiggieTV-Jellyfin-web-app.git'
+    artifactRoots=@('C:\Users\Piggie\Documents\GitHub\_PTV-Artifacts')
+    permissions=[pscustomobject]@{
+        sourceEdit=$true; localBuild=$true; debugPackage=$false; testDeviceInstall=$false
+        testDeploy125=$true; githubPublish=$false; productionDeploy50=$false
+    }
+    developmentDeployment=[pscustomobject]@{
+        environmentId='JF_DEVELOPMENT_125'; host='10.16.0.125'
+        serverId='c1858e3f2d09468fb546ad9cfe438283'; serverName='PTV Testing'
+        webTargetPath='C:\Program Files\Jellyfin\Server\jellyfin-web'
+        pluginTargetRoot='C:\JFData\plugins\PiggieTV_Plugin (testing)'
+    }
+}
+function Copy-ActiveWebPolicy { return (($activeWeb | ConvertTo-Json -Depth 20 -Compress) | ConvertFrom-Json) }
+Assert-Case 'v3 exact active Web entry coexists with Mobile Edit' {
+    Resolve-Fixture (Copy-ActiveWebPolicy) 'Edit'
+} $true
+Assert-Case 'v3 singleton array policy ID rejected' {
+    $p=Copy-ActiveWebPolicy; $p.policyId=@('fixture-v2'); Resolve-Fixture $p 'Edit'
+} $false
+Assert-Case 'v3 singleton array issued UTC rejected' {
+    $p=Copy-ActiveWebPolicy; $p.issuedUtc=@('2026-10-19T00:00:00Z'); Resolve-Fixture $p 'Edit'
+} $false
+Assert-Case 'v3 singleton array expires UTC rejected' {
+    $p=Copy-ActiveWebPolicy; $p.expiresUtc=@('2099-10-19T00:00:00Z'); Resolve-Fixture $p 'Edit'
+} $false
+Assert-Case 'v3 active Web wrong root rejected' {
+    $p=Copy-ActiveWebPolicy; $p.projects[0].sourceRoot='C:\Other\Web'; Resolve-Fixture $p 'Edit'
+} $false
+Assert-Case 'v3 active Web wrong remote rejected' {
+    $p=Copy-ActiveWebPolicy; $p.projects[0].remote='https://example.invalid/web.git'; Resolve-Fixture $p 'Edit'
+} $false
+Assert-Case 'v3 active Web array project ID rejected' {
+    $p=Copy-ActiveWebPolicy; $p.projects[0].projectId=@('PTV_WEB'); Resolve-Fixture $p 'Edit'
+} $false
+Assert-Case 'v3 active Web array state rejected' {
+    $p=Copy-ActiveWebPolicy; $p.projects[0].state=@('ACTIVE'); Resolve-Fixture $p 'Edit'
+} $false
+Assert-Case 'v3 active Web array source root rejected' {
+    $p=Copy-ActiveWebPolicy; $p.projects[0].sourceRoot=@('C:\Users\Piggie\Documents\GitHub\Jellyfin-Web-PiggieTV'); Resolve-Fixture $p 'Edit'
+} $false
+Assert-Case 'v3 active Web array common directory rejected' {
+    $p=Copy-ActiveWebPolicy; $p.projects[0].gitCommonDir=@('C:\Users\Piggie\Documents\GitHub\Jellyfin-Web-PiggieTV\.git'); Resolve-Fixture $p 'Edit'
+} $false
+Assert-Case 'v3 active Web array remote rejected' {
+    $p=Copy-ActiveWebPolicy; $p.projects[0].remote=@('https://github.com/Piglit09/PiggieTV-Jellyfin-web-app.git'); Resolve-Fixture $p 'Edit'
+} $false
+Assert-Case 'v3 active Web nested artifact root rejected' {
+    $p=Copy-ActiveWebPolicy; $p.projects[0].artifactRoots[0]=@('C:\Users\Piggie\Documents\GitHub\_PTV-Artifacts'); Resolve-Fixture $p 'Edit'
+} $false
+Assert-Case 'v3 active Web array deployment host rejected' {
+    $p=Copy-ActiveWebPolicy; $p.projects[0].developmentDeployment.host=@('10.16.0.125'); Resolve-Fixture $p 'Edit'
+} $false
+Assert-Case 'v3 active Web array deployment target rejected' {
+    $p=Copy-ActiveWebPolicy; $p.projects[0].developmentDeployment.webTargetPath=@('C:\Program Files\Jellyfin\Server\jellyfin-web'); Resolve-Fixture $p 'Edit'
+} $false
+Assert-Case 'v3 active Web missing permission rejected' {
+    $p=Copy-ActiveWebPolicy; $p.projects[0].permissions.PSObject.Properties.Remove('productionDeploy50'); Resolve-Fixture $p 'Edit'
+} $false
+Assert-Case 'v3 active Web unauthorized device install rejected' {
+    $p=Copy-ActiveWebPolicy; $p.projects[0].permissions.testDeviceInstall=$true; Resolve-Fixture $p 'Edit'
+} $false
+Assert-Case 'v3 active Web production permission rejected' {
+    $p=Copy-ActiveWebPolicy; $p.projects[0].permissions.productionDeploy50=$true; Resolve-Fixture $p 'Edit'
+} $false
+Assert-Case 'v3 active Web target substitution rejected' {
+    $p=Copy-ActiveWebPolicy; $p.projects[0].developmentDeployment.host='10.16.0.50'; Resolve-Fixture $p 'Edit'
+} $false
+Assert-Case 'v3 active Web missing deployment evidence rejected' {
+    $p=Copy-ActiveWebPolicy; $p.projects[0].PSObject.Properties.Remove('developmentDeployment'); Resolve-Fixture $p 'Edit'
+} $false
+Assert-Case 'v3 active Web unknown field rejected' {
+    $p=Copy-ActiveWebPolicy; $p.projects[0] | Add-Member -NotePropertyName fallbackPolicyPath -NotePropertyValue 'C:\Temp\policy.json'; Resolve-Fixture $p 'Edit'
+} $false
+Assert-Case 'v3 active Web cannot grant Mobile device installation' {
+    $p=Copy-ActiveWebPolicy; $p.projects[-1].permissions.testDeviceInstall=$true; Resolve-Fixture $p 'Edit'
+} $false
+Assert-Case 'v3 active Web cannot replace Mobile root' {
+    $p=Copy-ActiveWebPolicy; $p.projects[-1].sourceRoot=$p.projects[0].sourceRoot; Resolve-Fixture $p 'Edit'
+} $false
+Assert-Case 'v3 Mobile array project ID rejected' {
+    $p=Copy-ActiveWebPolicy; $p.projects[-1].projectId=@('PTV_ANDROID_MOBILE'); Resolve-Fixture $p 'Edit'
+} $false
+Assert-Case 'v3 Mobile array state rejected' {
+    $p=Copy-ActiveWebPolicy; $p.projects[-1].state=@('ACTIVE'); Resolve-Fixture $p 'Edit'
+} $false
+Assert-Case 'v3 Mobile array source root rejected' {
+    $p=Copy-ActiveWebPolicy; $p.projects[-1].sourceRoot=@($sourceRoot); Resolve-Fixture $p 'Edit'
+} $false
+Assert-Case 'v3 Mobile array common directory rejected' {
+    $p=Copy-ActiveWebPolicy; $p.projects[-1].gitCommonDir=@("$sourceRoot\.git"); Resolve-Fixture $p 'Edit'
+} $false
+Assert-Case 'v3 Mobile array remote rejected' {
+    $p=Copy-ActiveWebPolicy; $p.projects[-1].remote=@('https://github.com/Piglit09/PiggieTV-Andoid.git'); Resolve-Fixture $p 'Edit'
+} $false
+Assert-Case 'v3 Mobile array application ID rejected' {
+    $p=Copy-ActiveWebPolicy; $p.projects[-1].applicationId=@('com.piggietv.android'); Resolve-Fixture $p 'Edit'
+} $false
+Assert-Case 'v3 Mobile array version source rejected' {
+    $p=Copy-ActiveWebPolicy; $p.projects[-1].versionSource=@('gradle.properties:piggietv.version'); Resolve-Fixture $p 'Edit'
+} $false
+Assert-Case 'v3 Mobile nested artifact root rejected' {
+    $p=Copy-ActiveWebPolicy; $p.projects[-1].artifactRoots[0]=@($artifactRoot); Resolve-Fixture $p 'Edit'
+} $false
+Assert-Case 'v3 Android TV array remote rejected' {
+    $p=Copy-ActiveWebPolicy; $p.projects[1].remote=@('https://github.com/Piglit09/PiggieTV-AndoidTV.git'); Resolve-Fixture $p 'Edit'
+} $false
+Assert-Case 'v3 webOS nested artifact root rejected' {
+    $p=Copy-ActiveWebPolicy; $p.projects[2].artifactRoots[0]=@('C:\Users\Piggie\Documents\GitHub\_PTV-Artifacts\Builds\webOS'); Resolve-Fixture $p 'Edit'
+} $false
+Assert-Case 'v3 Web HOLD array project ID rejected' {
+    $p=Copy-DevelopmentPolicy; $p.projects[0].projectId=@('PTV_WEB'); Resolve-Fixture $p 'Edit'
+} $false
+Assert-Case 'v3 Web HOLD array state rejected' {
+    $p=Copy-DevelopmentPolicy; $p.projects[0].state=@('HOLD'); Resolve-Fixture $p 'Edit'
+} $false
+Assert-Case 'v3 Web HOLD array reason rejected' {
+    $p=Copy-DevelopmentPolicy; $p.projects[0].reason=@('Retained by protected policy'); Resolve-Fixture $p 'Edit'
+} $false
+Assert-Case 'v2 Mobile array remote rejected' {
+    $p=Copy-Policy; $p.projects[-1].remote=@('https://github.com/Piglit09/PiggieTV-Andoid.git'); Resolve-Fixture $p 'Edit'
+} $false
 Assert-Case 'proposed v3 mobile debug packaging is project scoped' {
     Resolve-Fixture (Copy-DevelopmentPolicy) 'DebugPackage'
 } $true
@@ -101,6 +237,14 @@ Assert-Case 'legacy webOS format recognized before operator v2 floor' {
     $format=Resolve-PTVMobilePolicyFormat -Policy $legacy -MinimumSchemaVersion 1
     if ($format -cne 'LegacyWebOS') { throw 'Wrong policy format.' }
 } $true
+Assert-Case 'legacy singleton array project ID rejected' {
+    $p=[pscustomobject]@{ projectId=@('PTV_WEBOS'); sourceRoot='C:\Users\Piggie\Documents\GitHub\PiggieTV-WebOS' }
+    Resolve-PTVMobilePolicyFormat -Policy $p -MinimumSchemaVersion 1
+} $false
+Assert-Case 'shared singleton array schema version rejected by format selector' {
+    $p=Copy-ActiveWebPolicy; $p.schemaVersion=@(3)
+    Resolve-PTVMobilePolicyFormat -Policy $p -MinimumSchemaVersion 2
+} $false
 Assert-Case 'legacy format denied after protected v2 floor' {
     Resolve-PTVMobilePolicyFormat -Policy $legacy -MinimumSchemaVersion 2
 } $false
