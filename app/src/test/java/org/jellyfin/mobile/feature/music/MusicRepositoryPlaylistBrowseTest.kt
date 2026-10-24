@@ -2,11 +2,14 @@ package org.jellyfin.mobile.feature.music
 
 import io.kotest.matchers.collections.shouldContain
 import io.kotest.matchers.shouldBe
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.jellyfin.sdk.api.client.ApiClient
 import org.jellyfin.sdk.api.client.HttpClientOptions
 import org.jellyfin.sdk.api.client.HttpMethod
@@ -165,6 +168,53 @@ class MusicRepositoryPlaylistBrowseTest {
     }
 
     @Test
+    fun `full playlist queue starts another page when one slot finishes while an earlier page is held`() =
+        runBlocking<Unit> {
+            val parent = playlist(11, childCount = 651)
+            val repeatedTrack = child(150, "Audio")
+            val children = (0 until 651).map { index ->
+                if (index == 550) repeatedTrack else child(index, "Audio")
+            }
+            val firstWaveStarted = CompletableDeferred<Unit>()
+            val nextPageStarted = CompletableDeferred<Unit>()
+            val firstWaveCount = AtomicInteger()
+            val heldPages = (100..400 step 100).associateWith { CompletableDeferred<Unit>() }
+            val client = PlaylistBrowseApiClient(
+                playlists = listOf(parent),
+                playlistChildren = mapOf(parent.id to children),
+                onPlaylistItemsPage = { startIndex ->
+                    heldPages[startIndex]?.let { gate ->
+                        if (firstWaveCount.incrementAndGet() == heldPages.size) firstWaveStarted.complete(Unit)
+                        gate.await()
+                    }
+                    if (startIndex == 500) nextPageStarted.complete(Unit)
+                },
+            )
+            val repository = MusicRepository(client, savedUserIdProvider = { USER_ID })
+            val playlistItem = repository.loadBrowsePage(MusicBrowseKind.PLAYLISTS, 0, 10).items.single()
+
+            val queueRequest = async { repository.loadPlaylistQueue(playlistItem) }
+            try {
+                withTimeout(5_000) { firstWaveStarted.await() }
+                client.maxPlaylistItemRequestsInFlight.get() shouldBe 4
+                nextPageStarted.isCompleted shouldBe false
+
+                // A finished page should release one slot without waiting for the still-held earlier pages.
+                heldPages.getValue(200).complete(Unit)
+                withTimeout(5_000) { nextPageStarted.await() }
+                (client.maxPlaylistItemRequestsInFlight.get() <= 4) shouldBe true
+            } finally {
+                heldPages.values.forEach { it.complete(Unit) }
+            }
+
+            val queue = queueRequest.await()
+            queue.map(MusicItem::id) shouldBe children.map(ChildRecord::id)
+            queue.count { it.id == repeatedTrack.id } shouldBe 2
+            client.requests.filter { it.path == "GET /Playlists/{playlistId}/Items" }
+                .map { it.query["startIndex"] as Int }.sorted() shouldBe listOf(0, 100, 200, 300, 400, 500, 600)
+        }
+
+    @Test
     fun `empty full playlist queue stays empty after one scoped request`() = runBlocking<Unit> {
         val parent = playlist(5, childCount = 0)
         val client = PlaylistBrowseApiClient(playlists = listOf(parent))
@@ -261,6 +311,7 @@ class MusicRepositoryPlaylistBrowseTest {
         val failListingFromStartIndex: Int? = null,
         val failPlaylistItemsFromStartIndex: Int? = null,
         val onPlaylistItemsRequest: ((Int) -> Unit)? = null,
+        val onPlaylistItemsPage: (suspend (Int) -> Unit)? = null,
         val playlistItemsDelayMs: Long = 0,
     ) : ApiClient() {
         val requests = Collections.synchronizedList(mutableListOf<Request>())
@@ -310,6 +361,7 @@ class MusicRepositoryPlaylistBrowseTest {
                     maxPlaylistItemRequestsInFlight.updateAndGet { maxOf(it, inFlight) }
                     try {
                         onPlaylistItemsRequest?.invoke(startIndex)
+                        onPlaylistItemsPage?.invoke(startIndex)
                         if (playlistItemsDelayMs > 0) delay(playlistItemsDelayMs)
                         if (failPlaylistItemsFromStartIndex != null && startIndex >= failPlaylistItemsFromStartIndex) {
                             throw IOException("playlist items unavailable")

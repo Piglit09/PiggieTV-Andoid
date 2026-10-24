@@ -1358,9 +1358,12 @@ class MusicRepository(
 
         if (firstPage.items.size == PLAYLIST_API_PAGE_LIMIT) {
             val remainingOffsets = (PLAYLIST_API_PAGE_LIMIT until rawTotalCount step PLAYLIST_API_PAGE_LIMIT)
-            for (offsets in remainingOffsets.chunked(PLAYLIST_QUEUE_MAX_CONCURRENT_REQUESTS)) {
+            val requestGate = Semaphore(PLAYLIST_QUEUE_MAX_CONCURRENT_REQUESTS)
+            for (offsets in remainingOffsets.chunked(PLAYLIST_QUEUE_MAX_PENDING_REQUESTS)) {
                 val pages = offsets.map { offset ->
-                    async { loadFullPlaylistRawPage(owner, playlist.id, offset, rawTotalCount) }
+                    async {
+                        requestGate.withPermit { loadFullPlaylistRawPage(owner, playlist.id, offset, rawTotalCount) }
+                    }
                 }.awaitAll()
                 offsets.zip(pages).forEach { (offset, page) ->
                     val expectedCount = minOf(PLAYLIST_API_PAGE_LIMIT, rawTotalCount - offset)
@@ -3058,6 +3061,7 @@ class MusicRepository(
         const val PLAYLIST_DUPLICATE_CHECK_LIMIT = 1_000
         const val PLAYLIST_API_PAGE_LIMIT = 100
         const val PLAYLIST_QUEUE_MAX_CONCURRENT_REQUESTS = 4
+        const val PLAYLIST_QUEUE_MAX_PENDING_REQUESTS = 16
         const val PLAYLIST_ITEM_LIMIT = 500
         const val PLAYLIST_LIMIT = 100
         const val SEARCH_LIMIT = 60
